@@ -49,6 +49,41 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     }
 }
 
-pub fn token_prompt(_state: &mut AppState, _ctx: &egui::Context) {
-    // Filled in by Task 9.
+pub fn token_prompt(state: &mut AppState, ctx: &egui::Context) {
+    if !state.token_prompt_open { return; }
+    let mut save = false;
+    let mut close = false;
+    egui::Window::new("Notion token required")
+        .collapsible(false).resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label("Paste your Notion integration token. It will be saved to");
+            ui.monospace(
+                crate::config::config_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+            );
+            ui.add_space(8.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut state.token_input)
+                    .password(true)
+                    .desired_width(400.0),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked()   { save = true; }
+                if ui.button("Cancel").clicked() { close = true; }
+            });
+        });
+    if save {
+        state.config.notion_token = state.token_input.trim().to_string();
+        if let Err(e) = crate::config::save(&state.config) {
+            state.error_banner = Some(format!("Failed to save config: {e}"));
+        }
+        state.token_prompt_open = false;
+        state.refresh(super::AssetType::Hdris);
+        state.refresh(super::AssetType::Textures);
+    } else if close {
+        state.token_prompt_open = false;
+    }
 }

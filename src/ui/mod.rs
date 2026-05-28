@@ -57,6 +57,8 @@ pub struct AppState {
     pub jobs:           HashMap<RowKey, RowJob>,
     pub notion_rx:      HashMap<AssetType, Receiver<Result<Vec<Asset>, String>>>,
     pub pending_conflict: Option<PendingConflict>,
+    pub token_prompt_open: bool,
+    pub token_input:       String,
 }
 
 impl AppState {
@@ -70,7 +72,11 @@ impl AppState {
             jobs: HashMap::new(),
             notion_rx: HashMap::new(),
             pending_conflict: None,
+            token_prompt_open: false,
+            token_input: String::new(),
         };
+        s.token_prompt_open = s.config.notion_token.is_empty();
+        s.token_input       = s.config.notion_token.clone();
         if !s.config.notion_token.is_empty() {
             s.refresh(AssetType::Hdris);
             s.refresh(AssetType::Textures);
