@@ -1,5 +1,6 @@
 mod config;
 mod copy;
+mod notion;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
