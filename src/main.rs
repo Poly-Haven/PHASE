@@ -5,7 +5,18 @@ mod ui;
 
 use ui::AppState;
 
+fn init_logging() {
+    use simplelog::{LevelFilter, WriteLogger, Config as SlConfig};
+    use std::fs::OpenOptions;
+    let Ok(path) = config::log_path() else { return; };
+    if let Ok(file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = WriteLogger::init(LevelFilter::Info, SlConfig::default(), file);
+    }
+}
+
 fn main() -> eframe::Result<()> {
+    init_logging();
+    log::info!("PHASE {} starting", env!("CARGO_PKG_VERSION"));
     let cfg = config::load().unwrap_or_default();
 
     let options = eframe::NativeOptions {
