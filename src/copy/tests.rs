@@ -94,3 +94,63 @@ fn plan_ignores_partial_files() {
     assert_eq!(plan.files.len(), 1);
     assert_eq!(plan.files[0].rel_path.to_string_lossy(), "a.exr");
 }
+
+use super::engine::{copy_one_file, CopyError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+#[test]
+fn copy_one_file_writes_and_validates() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("nested/dst.bin");
+    let payload: Vec<u8> = (0..(9 * 1024 * 1024)).map(|i| (i % 251) as u8).collect();
+    write(&src, &payload);
+
+    let bytes = AtomicU64::new(0);
+    let cancel = AtomicBool::new(false);
+
+    copy_one_file(&src, &dst, &bytes, &cancel).unwrap();
+
+    let on_disk = std::fs::read(&dst).unwrap();
+    assert_eq!(on_disk, payload);
+    assert_eq!(bytes.load(Ordering::Relaxed), payload.len() as u64);
+    let partial = dst.with_file_name("dst.bin.partial");
+    assert!(!partial.exists());
+}
+
+#[test]
+fn copy_one_file_cancel_removes_partial_and_leaves_dest_untouched() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    let payload: Vec<u8> = vec![7u8; 32 * 1024 * 1024];
+    write(&src, &payload);
+    write(&dst, b"original");
+
+    let bytes = AtomicU64::new(0);
+    let cancel = AtomicBool::new(true);
+    let err = copy_one_file(&src, &dst, &bytes, &cancel).unwrap_err();
+    assert!(matches!(err, CopyError::Cancelled));
+
+    assert_eq!(std::fs::read(&dst).unwrap(), b"original");
+    let partial = dst.with_file_name("dst.bin.partial");
+    assert!(!partial.exists(), "partial should be cleaned up");
+}
+
+#[test]
+fn copy_one_file_preserves_source_mtime() {
+    use filetime::{set_file_mtime, FileTime};
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    write(&src, b"hi");
+    let stamp = FileTime::from_unix_time(1_700_000_000, 0);
+    set_file_mtime(&src, stamp).unwrap();
+
+    let bytes = AtomicU64::new(0);
+    let cancel = AtomicBool::new(false);
+    copy_one_file(&src, &dst, &bytes, &cancel).unwrap();
+
+    let md = std::fs::metadata(&dst).unwrap();
+    assert_eq!(FileTime::from_last_modification_time(&md).unix_seconds(), 1_700_000_000);
+}
