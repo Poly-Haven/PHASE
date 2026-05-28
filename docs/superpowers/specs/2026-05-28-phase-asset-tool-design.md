@@ -1,4 +1,4 @@
-# PHASE — Asset Management Tool (v0.1) — Design
+# PHASE — Poly Haven Asset System, etc. (v0.1) — Design
 
 **Date:** 2026-05-28
 **Status:** Approved (brainstorming complete, ready for implementation plan)
