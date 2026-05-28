@@ -210,3 +210,19 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     dialogs::draw(state, ctx);
     egui::CentralPanel::default().show(ctx, |ui| table::draw(state, ui));
 }
+
+pub fn notion_logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/notion_logo.png");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| {
+        let image = image::load_from_memory(BYTES).expect("decode notion_logo.png").to_rgba8();
+        let size = [image.width() as usize, image.height() as usize];
+        let pixels = image.into_raw();
+        ctx.load_texture(
+            "notion_logo",
+            egui::ColorImage::from_rgba_unmultiplied(size, &pixels),
+            egui::TextureOptions::LINEAR,
+        )
+    }).clone()
+}

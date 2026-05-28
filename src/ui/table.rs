@@ -81,8 +81,9 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
 }
 
 fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
-    // Notion button — text "N" until Task 11 swaps it for the logo image.
-    if ui.button("N").on_hover_text("Open in Notion").clicked() {
+    let tex = super::notion_logo_texture(ui.ctx());
+    let btn = egui::ImageButton::new(egui::load::SizedTexture::new(tex.id(), egui::vec2(18.0, 18.0)));
+    if ui.add(btn).on_hover_text("Open in Notion").clicked() {
         let _ = open::that(&row.url);
     }
 
