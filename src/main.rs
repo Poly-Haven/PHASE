@@ -1,4 +1,5 @@
 mod config;
+mod copy;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
