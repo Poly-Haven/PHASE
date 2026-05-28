@@ -1,8 +1,13 @@
 mod config;
 mod copy;
 mod notion;
+mod ui;
+
+use ui::AppState;
 
 fn main() -> eframe::Result<()> {
+    let cfg = config::load().unwrap_or_default();
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 700.0])
@@ -14,18 +19,19 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            Box::new(App::default())
+            Box::new(App { state: AppState::new(cfg) })
         }),
     )
 }
 
-#[derive(Default)]
-struct App;
+struct App { state: AppState }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.label("PHASE — starting up");
-        });
+        self.state.pump();
+        ui::draw(&mut self.state, ctx);
+        if !self.state.jobs.is_empty() || !self.state.notion_rx.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
     }
 }
