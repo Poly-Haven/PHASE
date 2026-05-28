@@ -1,5 +1,6 @@
 mod menu;
 mod table;
+mod dialogs;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -9,7 +10,7 @@ use std::thread;
 
 use crate::config::Config;
 use crate::copy::job::{JobMsg, JobProgress};
-use crate::copy::plan::{build_plan, Direction};
+use crate::copy::plan::{build_plan, Action, Direction};
 use crate::notion::{Asset, HDRIS_DB_ID, TEXTURES_DB_ID};
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
@@ -38,6 +39,15 @@ pub struct RowJob {
     pub message:   Arc<Mutex<String>>,
 }
 
+pub struct PendingConflict {
+    pub key:       RowKey,
+    pub direction: Direction,
+    pub plan:      crate::copy::plan::Plan,
+}
+
+#[derive(Copy, Clone)]
+pub enum ConflictChoice { OverwriteAll, CopyOnlyNew, Cancel }
+
 pub struct AppState {
     pub config:         Config,
     pub current_type:   AssetType,
@@ -46,6 +56,7 @@ pub struct AppState {
     pub error_banner:   Option<String>,
     pub jobs:           HashMap<RowKey, RowJob>,
     pub notion_rx:      HashMap<AssetType, Receiver<Result<Vec<Asset>, String>>>,
+    pub pending_conflict: Option<PendingConflict>,
 }
 
 impl AppState {
@@ -58,6 +69,7 @@ impl AppState {
             error_banner: None,
             jobs: HashMap::new(),
             notion_rx: HashMap::new(),
+            pending_conflict: None,
         };
         if !s.config.notion_token.is_empty() {
             s.refresh(AssetType::Hdris);
@@ -135,11 +147,7 @@ pub fn start_job(state: &mut AppState, key: &RowKey, direction: Direction) {
     };
 
     if !plan.conflicts().is_empty() {
-        // Conflict dialog is added in Task 8; until then, surface to banner.
-        state.error_banner = Some(format!(
-            "{} conflict(s) for {} — conflict dialog not yet implemented",
-            plan.conflicts().len(), key.slug
-        ));
+        state.pending_conflict = Some(PendingConflict { key: key.clone(), direction, plan });
         return;
     }
 
@@ -148,6 +156,34 @@ pub fn start_job(state: &mut AppState, key: &RowKey, direction: Direction) {
     crate::copy::job::spawn(plan, progress.clone(), tx);
     state.jobs.insert(key.clone(), RowJob {
         direction,
+        progress,
+        rx,
+        message: Arc::new(Mutex::new(String::new())),
+    });
+}
+
+pub fn execute_after_conflict(state: &mut AppState, choice: ConflictChoice) {
+    let Some(pc) = state.pending_conflict.take() else { return; };
+    let mut plan = pc.plan;
+    match choice {
+        ConflictChoice::Cancel => return,
+        ConflictChoice::OverwriteAll => {
+            for f in plan.files.iter_mut() {
+                if matches!(f.action, Action::Conflict { .. }) {
+                    f.action = Action::Overwrite;
+                    plan.total_bytes_to_copy += f.size;
+                }
+            }
+        }
+        ConflictChoice::CopyOnlyNew => {
+            plan.files.retain(|f| !matches!(f.action, Action::Conflict { .. }));
+        }
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let progress = Arc::new(JobProgress::default());
+    crate::copy::job::spawn(plan, progress.clone(), tx);
+    state.jobs.insert(pc.key, RowJob {
+        direction: pc.direction,
         progress,
         rx,
         message: Arc::new(Mutex::new(String::new())),
@@ -164,5 +200,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             });
         });
     }
+    dialogs::token_prompt(state, ctx);
+    dialogs::draw(state, ctx);
     egui::CentralPanel::default().show(ctx, |ui| table::draw(state, ui));
 }
