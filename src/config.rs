@@ -1,0 +1,60 @@
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(default)]
+    pub notion_token: String,
+    #[serde(default = "default_prod_root")]
+    pub prod_root: PathBuf,
+    #[serde(default = "default_local_root")]
+    pub local_root: PathBuf,
+}
+
+fn default_prod_root() -> PathBuf  { PathBuf::from(r"P:\Assets") }
+fn default_local_root() -> PathBuf { PathBuf::from(r"C:\PHASE\Assets") }
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            notion_token: String::new(),
+            prod_root:  default_prod_root(),
+            local_root: default_local_root(),
+        }
+    }
+}
+
+/// Returns `%APPDATA%\phase`, creating it if missing.
+pub fn app_dir() -> Result<PathBuf> {
+    let base = dirs::config_dir().context("could not locate %APPDATA%")?;
+    let dir = base.join("phase");
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir)
+}
+
+pub fn config_path() -> Result<PathBuf> {
+    Ok(app_dir()?.join("config.toml"))
+}
+
+pub fn log_path() -> Result<PathBuf> {
+    Ok(app_dir()?.join("phase.log"))
+}
+
+pub fn load() -> Result<Config> {
+    let path = config_path()?;
+    if !path.exists() {
+        return Ok(Config::default());
+    }
+    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(cfg)
+}
+
+pub fn save(cfg: &Config) -> Result<()> {
+    let path = config_path()?;
+    let text = toml::to_string_pretty(cfg).context("serialising config")?;
+    fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
