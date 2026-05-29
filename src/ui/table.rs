@@ -138,8 +138,8 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     let avail = ui.available_rect_before_wrap();
     let row_rect = egui::Rect::from_min_size(avail.min, egui::vec2(avail.width(), row_height));
 
-    let bg = ui.visuals().extreme_bg_color;
-    ui.painter().rect_filled(row_rect, 2.0, bg);
+    ui.painter()
+        .rect_filled(row_rect, 2.0, colors::ROW_BACKGROUND);
     if let Some(job) = state.jobs.get(key) {
         let f = job.progress.fraction().clamp(0.0, 1.0);
         let mut fill = row_rect;
@@ -460,6 +460,7 @@ fn draw_row_context_button(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey
         ui.memory_mut(|mem| mem.toggle_popup(popup_id));
     }
     egui::popup::popup_below_widget(ui, popup_id, &response, |ui| {
+        ui.set_min_width(140.0);
         let local_folder = state.local_root_for(key.asset_type).join(&key.slug);
         let prod_folder = state.prod_root_for(key.asset_type).join(&key.slug);
         draw_context_menu(ui, &local_folder, &prod_folder, &row.url);
@@ -548,6 +549,11 @@ fn status_pill_button(
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     let bg = colors::colored_background(notion_color(&status.color));
     ui.painter().rect_filled(rect, height / 2.0, bg);
+    ui.painter().rect_stroke(
+        rect.shrink(0.5),
+        height / 2.0,
+        egui::Stroke::new(1.0, notion_color(&status.color)),
+    );
     ui.painter().text(
         egui::pos2(rect.left() + padding.x, rect.center().y),
         egui::Align2::LEFT_CENTER,

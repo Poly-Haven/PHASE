@@ -32,6 +32,10 @@ fn load_app_icon() -> egui::IconData {
     }
 }
 
+fn default_window_size() -> [f32; 2] {
+    [860.0, 500.0]
+}
+
 fn main() -> eframe::Result<()> {
     init_logging();
     log::info!("PHASE {} starting", env!("CARGO_PKG_VERSION"));
@@ -39,7 +43,7 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 700.0])
+            .with_inner_size(default_window_size())
             .with_min_inner_size([600.0, 400.0])
             .with_icon(load_app_icon()),
         ..Default::default()
@@ -58,6 +62,14 @@ fn main() -> eframe::Result<()> {
 
 struct App {
     state: AppState,
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn default_window_size_is_compact() {
+        assert_eq!(super::default_window_size(), [860.0, 500.0]);
+    }
 }
 
 impl eframe::App for App {

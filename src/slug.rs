@@ -30,6 +30,9 @@ pub fn message(slug: &str) -> Option<String> {
     let details = problems
         .iter()
         .map(|problem| match problem {
+            SlugProblem::Uppercase(ch) | SlugProblem::InvalidChar(ch) if *ch == ' ' => {
+                "<space>".to_string()
+            }
             SlugProblem::Uppercase(ch) | SlugProblem::InvalidChar(ch) => ch.to_string(),
         })
         .collect::<Vec<_>>()
@@ -43,5 +46,10 @@ mod tests {
     fn slug_validation_reports_specific_invalid_characters() {
         assert!(super::is_valid("valid_slug_123"));
         assert_eq!(super::message("Bad-Slug").unwrap(), "Invalid slug: B - S");
+    }
+
+    #[test]
+    fn slug_validation_renders_spaces_explicitly() {
+        assert_eq!(super::message("bad slug").unwrap(), "Invalid slug: <space>");
     }
 }
