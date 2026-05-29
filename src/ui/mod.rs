@@ -71,10 +71,21 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: Config) -> Self {
+        // Restore last-used tab.
+        let current_type = match config.last_tab.as_str() {
+            "Textures" => AssetType::Textures,
+            _          => AssetType::Hdris,
+        };
+        // Restore last-used filter for the active tab.
+        let author_filter = config.last_filters
+            .get(current_type.label())
+            .cloned()
+            .unwrap_or_default();
+
         let mut s = Self {
+            current_type,
+            author_filter,
             config,
-            current_type: AssetType::Hdris,
-            author_filter: String::new(),
             assets_by_type: HashMap::new(),
             error_banner: None,
             jobs: HashMap::new(),
