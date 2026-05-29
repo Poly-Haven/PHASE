@@ -83,6 +83,19 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                     .then(|| { let _ = open::that(&prod_folder); });
             }
 
+            // Notion button — sits immediately to the right of the slug.
+            let notion_tex = super::notion_logo_texture(ui.ctx());
+            let notion_btn = egui::ImageButton::new(
+                egui::load::SizedTexture::new(notion_tex.id(), egui::vec2(14.0, 14.0))
+            ).frame(false).tint(text_color.linear_multiply(0.6));
+            if ui.add(notion_btn)
+                .on_hover_text("Open in Notion")
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                let _ = open::that(&row.url);
+            }
+
             ui.add_space(16.0);
             ui.colored_label(text_color.linear_multiply(0.8), &row.author);
 
