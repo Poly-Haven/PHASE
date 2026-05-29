@@ -2,11 +2,12 @@ mod menu;
 mod table;
 mod dialogs;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Receiver};
 use std::thread;
+use std::time::Instant;
 
 use crate::config::Config;
 use crate::copy::job::{JobMsg, JobProgress};
@@ -20,6 +21,7 @@ impl AssetType {
     pub fn label(self) -> &'static str { match self { Self::Hdris => "HDRIs", Self::Textures => "Textures" } }
     pub fn folder(self) -> &'static str { match self { Self::Hdris => "HDRIs", Self::Textures => "Textures" } }
     pub fn db_id(self) -> &'static str { match self { Self::Hdris => HDRIS_DB_ID, Self::Textures => TEXTURES_DB_ID } }
+    pub fn cache_name(self) -> &'static str { match self { Self::Hdris => "hdris", Self::Textures => "textures" } }
 }
 
 pub enum AssetListState {
@@ -59,6 +61,12 @@ pub struct AppState {
     pub pending_conflict: Option<PendingConflict>,
     pub token_prompt_open: bool,
     pub token_input:       String,
+    /// Asset types whose background fetch is currently in flight.
+    pub refreshing:      HashSet<AssetType>,
+    /// Notion results buffered while the cursor is active in the table.
+    pub pending_notion:  HashMap<AssetType, Vec<Asset>>,
+    /// Last time the pointer moved while inside the table area.
+    pub cursor_moved_in_table_at: Option<Instant>,
 }
 
 impl AppState {
@@ -74,9 +82,18 @@ impl AppState {
             pending_conflict: None,
             token_prompt_open: false,
             token_input: String::new(),
+            refreshing: HashSet::new(),
+            pending_notion: HashMap::new(),
+            cursor_moved_in_table_at: None,
         };
         s.token_prompt_open = s.config.notion_token.is_empty();
         s.token_input       = s.config.notion_token.clone();
+        // Warm the UI from cache immediately, then refresh in the background.
+        for t in [AssetType::Hdris, AssetType::Textures] {
+            if let Some(cached) = crate::cache::load(t.cache_name()) {
+                s.assets_by_type.insert(t, AssetListState::Loaded(cached));
+            }
+        }
         if !s.config.notion_token.is_empty() {
             s.refresh(AssetType::Hdris);
             s.refresh(AssetType::Textures);
@@ -89,7 +106,12 @@ impl AppState {
             self.assets_by_type.insert(t, AssetListState::Error("No Notion token configured".into()));
             return;
         }
-        self.assets_by_type.insert(t, AssetListState::Loading);
+        // If we already have data, keep showing it while the background fetch runs.
+        // Only show the "Loading…" placeholder when there's nothing to display yet.
+        if !matches!(self.assets_by_type.get(&t), Some(AssetListState::Loaded(_))) {
+            self.assets_by_type.insert(t, AssetListState::Loading);
+        }
+        self.refreshing.insert(t);
         let (tx, rx) = channel();
         let token = self.config.notion_token.clone();
         let db = t.db_id().to_string();
@@ -102,15 +124,39 @@ impl AppState {
 
     /// Drain Notion + job channels each frame.
     pub fn pump(&mut self) {
+        let cursor_guard = self.cursor_moved_in_table_at
+            .map(|t| t.elapsed().as_secs_f32() < 2.0)
+            .unwrap_or(false);
+
         let types: Vec<_> = self.notion_rx.keys().copied().collect();
         for t in types {
             let res_opt = self.notion_rx.get(&t).and_then(|rx| rx.try_recv().ok());
             if let Some(res) = res_opt {
-                match res {
-                    Ok(list) => { self.assets_by_type.insert(t, AssetListState::Loaded(list)); }
-                    Err(msg) => { self.assets_by_type.insert(t, AssetListState::Error(msg)); }
-                }
                 self.notion_rx.remove(&t);
+                self.refreshing.remove(&t);
+                match res {
+                    Ok(list) => {
+                        if cursor_guard {
+                            // Buffer — apply once the cursor has been idle for 2s.
+                            self.pending_notion.insert(t, list);
+                        } else {
+                            let _ = crate::cache::save(t.cache_name(), &list);
+                            self.assets_by_type.insert(t, AssetListState::Loaded(list));
+                        }
+                    }
+                    Err(msg) => {
+                        self.assets_by_type.insert(t, AssetListState::Error(msg));
+                    }
+                }
+            }
+        }
+
+        // Flush buffered updates once the cursor has been still for 2s.
+        if !cursor_guard && !self.pending_notion.is_empty() {
+            let pending: Vec<_> = self.pending_notion.drain().collect();
+            for (t, list) in pending {
+                let _ = crate::cache::save(t.cache_name(), &list);
+                self.assets_by_type.insert(t, AssetListState::Loaded(list));
             }
         }
 
@@ -208,7 +254,22 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     }
     dialogs::token_prompt(state, ctx);
     dialogs::draw(state, ctx);
-    egui::CentralPanel::default().show(ctx, |ui| table::draw(state, ui));
+    let table_resp = egui::CentralPanel::default().show(ctx, |ui| table::draw(state, ui));
+
+    // Track cursor movement inside the table panel for the 2s safety guard.
+    let table_rect = table_resp.response.rect;
+    ctx.input(|i| {
+        if let Some(pos) = i.pointer.latest_pos() {
+            if table_rect.contains(pos) && i.pointer.delta() != egui::Vec2::ZERO {
+                state.cursor_moved_in_table_at = Some(Instant::now());
+            }
+        }
+    });
+
+    // Keep repainting while a pending update is waiting to be flushed.
+    if !state.pending_notion.is_empty() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+    }
 }
 
 pub fn notion_logo_texture(ctx: &egui::Context) -> egui::TextureHandle {

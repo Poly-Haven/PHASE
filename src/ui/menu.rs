@@ -31,7 +31,9 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
 
         ui.separator();
 
-        if ui.button("↻ Refresh").clicked() {
+        let is_loading = state.refreshing.contains(&state.current_type);
+        let refresh_label = if is_loading { "Loading…" } else { "↻ Refresh" };
+        if ui.add_enabled(!is_loading, egui::Button::new(refresh_label)).clicked() {
             state.refresh(state.current_type);
         }
 

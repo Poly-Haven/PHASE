@@ -42,6 +42,13 @@ pub fn log_path() -> Result<PathBuf> {
     Ok(app_dir()?.join("phase.log"))
 }
 
+/// Returns `%APPDATA%\phase\cache`, creating it if missing.
+pub fn cache_dir() -> Result<PathBuf> {
+    let dir = app_dir()?.join("cache");
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir)
+}
+
 pub fn load() -> Result<Config> {
     let path = config_path()?;
     if !path.exists() {
