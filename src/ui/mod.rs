@@ -1,6 +1,7 @@
 mod menu;
 mod table;
 mod dialogs;
+mod authors;
 pub mod colors;
 
 use std::collections::{HashMap, HashSet};
