@@ -144,7 +144,8 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
         let f = job.progress.fraction().clamp(0.0, 1.0);
         let mut fill = row_rect;
         fill.set_width(avail.width() * f);
-        ui.painter().rect_filled(fill, 2.0, colors::PROGRESS_BAR);
+        ui.painter()
+            .rect_filled(fill, 2.0, colors::colored_background(colors::PROGRESS_BAR));
     }
 
     let prod_folder = state.prod_root_for(key.asset_type).join(&key.slug);
@@ -356,13 +357,7 @@ fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
 
     // Padding on the far right of the action strip (RTL: first space = rightmost).
     ui.add_space(8.0);
-    ui.menu_button("v", |ui| {
-        let local_folder = state.local_root_for(key.asset_type).join(&key.slug);
-        let prod_folder = state.prod_root_for(key.asset_type).join(&key.slug);
-        draw_context_menu(ui, &local_folder, &prod_folder, &row.url);
-    })
-    .response
-    .on_hover_cursor(egui::CursorIcon::PointingHand);
+    draw_row_context_button(state, ui, key, row);
     ui.add_space(6.0);
     let enabled = row.exists_on_prod;
     let push_tex = super::push_icon_texture(ui.ctx());
@@ -440,6 +435,37 @@ fn draw_context_menu(
     }
 }
 
+fn draw_row_context_button(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
+    let icon_size = egui::vec2(18.0, 18.0);
+    let (rect, response) = ui.allocate_exact_size(icon_size, egui::Sense::click());
+    let tex = super::chevron_down_texture(ui.ctx());
+    let tint = if response.hovered() {
+        colors::HOVER
+    } else if row.exists_on_prod {
+        colors::TEXT_PRIMARY
+    } else {
+        colors::TEXT_DISABLED
+    };
+    ui.painter().image(
+        tex.id(),
+        rect.shrink(3.0),
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        tint,
+    );
+    let response = response
+        .on_hover_text("More actions")
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let popup_id = ui.make_persistent_id(("row_context_popup", &key.asset_type, &key.slug));
+    if response.clicked() {
+        ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+    }
+    egui::popup::popup_below_widget(ui, popup_id, &response, |ui| {
+        let local_folder = state.local_root_for(key.asset_type).join(&key.slug);
+        let prod_folder = state.prod_root_for(key.asset_type).join(&key.slug);
+        draw_context_menu(ui, &local_folder, &prod_folder, &row.url);
+    });
+}
+
 fn draw_toast(ui: &mut egui::Ui, toast: &super::RowToast) {
     let age = toast.created_at.elapsed().as_secs_f32();
     let alpha = if age > 3.0 {
@@ -485,6 +511,7 @@ fn colored_status_option(
 ) -> egui::Response {
     let height = 20.0;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    let bg = colors::colored_background(bg);
     let fill = if response.hovered() {
         bg.linear_multiply(1.25)
     } else {
@@ -519,7 +546,7 @@ fn status_pill_button(
     let height = 18.0;
     let width = text_width + icon_size.x + padding.x * 3.0;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
-    let bg = notion_color(&status.color);
+    let bg = colors::colored_background(notion_color(&status.color));
     ui.painter().rect_filled(rect, height / 2.0, bg);
     ui.painter().text(
         egui::pos2(rect.left() + padding.x, rect.center().y),

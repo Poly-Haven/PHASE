@@ -30,14 +30,11 @@ pub fn message(slug: &str) -> Option<String> {
     let details = problems
         .iter()
         .map(|problem| match problem {
-            SlugProblem::Uppercase(ch) => format!("uppercase '{ch}'"),
-            SlugProblem::InvalidChar(ch) => format!("invalid '{ch}'"),
+            SlugProblem::Uppercase(ch) | SlugProblem::InvalidChar(ch) => ch.to_string(),
         })
         .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!(
-        "Invalid slug: only lowercase a-z, 0-9, and underscores are allowed ({details})"
-    ))
+        .join(" ");
+    Some(format!("Invalid slug: {details}"))
 }
 
 #[cfg(test)]
@@ -45,9 +42,6 @@ mod tests {
     #[test]
     fn slug_validation_reports_specific_invalid_characters() {
         assert!(super::is_valid("valid_slug_123"));
-        assert_eq!(
-            super::message("Bad-Slug").unwrap(),
-            "Invalid slug: only lowercase a-z, 0-9, and underscores are allowed (uppercase 'B', invalid '-', uppercase 'S')"
-        );
+        assert_eq!(super::message("Bad-Slug").unwrap(), "Invalid slug: B - S");
     }
 }
