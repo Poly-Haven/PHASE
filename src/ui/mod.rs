@@ -144,6 +144,10 @@ pub struct AppState {
     /// Last time the pointer moved while inside the table area.
     pub cursor_moved_in_table_at: Option<Instant>,
     pub focus_refresh: focus_refresh::State,
+    /// Cached result of `is_dir()` for each asset's prod folder.
+    /// Rebuilt when Notion data loads, window gains focus, a job finishes,
+    /// or a prod folder is created — never on every frame.
+    pub prod_folder_cache: HashMap<RowKey, bool>,
 }
 
 impl AppState {
@@ -188,6 +192,7 @@ impl AppState {
             pending_notion: HashMap::new(),
             cursor_moved_in_table_at: None,
             focus_refresh: focus_refresh::State::default(),
+            prod_folder_cache: HashMap::new(),
         };
         s.token_prompt_open = s.config.notion_token.is_empty();
         s.token_input = s.config.notion_token.clone();
@@ -197,6 +202,7 @@ impl AppState {
                 s.assets_by_type.insert(t, AssetListState::Loaded(cached));
             }
         }
+        s.rebuild_prod_folder_cache();
         s
     }
 
@@ -237,6 +243,31 @@ impl AppState {
         }
     }
 
+    /// Rebuild the full prod-folder existence cache from disk.
+    /// Call when Notion data loads, window gains focus, or the asset list changes.
+    pub fn rebuild_prod_folder_cache(&mut self) {
+        self.prod_folder_cache.clear();
+        for &t in AssetType::all() {
+            let prod_root = self.prod_root_for(t);
+            if let Some(AssetListState::Loaded(list)) = self.assets_by_type.get(&t) {
+                for asset in &list.assets {
+                    let key = RowKey {
+                        asset_type: t,
+                        slug: asset.slug.clone(),
+                    };
+                    self.prod_folder_cache
+                        .insert(key, prod_root.join(&asset.slug).is_dir());
+                }
+            }
+        }
+    }
+
+    /// Update the cache for a single asset (after a job finishes or a folder is created).
+    pub fn update_prod_folder_cache_for(&mut self, key: &RowKey) {
+        let exists = self.prod_root_for(key.asset_type).join(&key.slug).is_dir();
+        self.prod_folder_cache.insert(key.clone(), exists);
+    }
+
     pub fn refresh_published_assets(&mut self) {
         if self.refreshing_published {
             return;
@@ -271,6 +302,7 @@ impl AppState {
                         } else {
                             let _ = crate::cache::save(t.cache_name(), &list);
                             self.assets_by_type.insert(t, AssetListState::Loaded(list));
+                            self.rebuild_prod_folder_cache();
                         }
                     }
                     Err(msg) => {
@@ -287,6 +319,7 @@ impl AppState {
                 let _ = crate::cache::save(t.cache_name(), &list);
                 self.assets_by_type.insert(t, AssetListState::Loaded(list));
             }
+            self.rebuild_prod_folder_cache();
 
             if let Some(res) = self.published_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
                 self.published_rx = None;
@@ -359,6 +392,7 @@ impl AppState {
             if done {
                 if let Some(job) = self.jobs.remove(&k) {
                     if finished_successfully {
+                        self.update_prod_folder_cache_for(&k);
                         let action = match job.direction {
                             Direction::Pull => "Pulled from prod",
                             Direction::Push => "Pushed to prod",
@@ -535,6 +569,7 @@ pub fn create_prod_folder(state: &mut AppState, key: &RowKey) {
         ));
         return;
     }
+    state.update_prod_folder_cache_for(key);
     let _ = open::that(root);
 }
 
@@ -564,6 +599,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     let gained_focus = ctx.input(|i| state.focus_refresh.update(i.focused));
     if gained_focus {
         state.refresh_all_asset_types();
+        state.rebuild_prod_folder_cache();
     }
 
     egui::TopBottomPanel::top("menu").show(ctx, |ui| {

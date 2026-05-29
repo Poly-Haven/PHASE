@@ -39,13 +39,19 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
             }
             Some(AssetListState::Loaded(list)) => {
                 has_loaded_list = true;
-                let prod_root = state.prod_root_for(t);
                 rows.extend(
                     list.assets
                         .iter()
                         .filter(|a| author_matches_filter(&a.author, &filter))
                         .filter(|a| status_matches_filter(&a.status, &status_groups))
-                        .map(|a| RowView::from_asset(t, a, &prod_root, &state.published_assets)),
+                        .map(|a| {
+                            let key = super::RowKey {
+                                asset_type: t,
+                                slug: a.slug.clone(),
+                            };
+                            let exists = *state.prod_folder_cache.get(&key).unwrap_or(&false);
+                            RowView::from_asset(t, a, exists, &state.published_assets)
+                        }),
                 );
             }
         }
@@ -68,13 +74,13 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
 
     egui::ScrollArea::vertical()
         .auto_shrink([false; 2])
-        .show(ui, |ui| {
-            for row in rows {
+        .show_rows(ui, 28.0, rows.len(), |ui, row_range| {
+            for row in &rows[row_range] {
                 let key = RowKey {
                     asset_type: row.asset_type,
                     slug: row.slug.clone(),
                 };
-                draw_row(state, ui, &key, &row);
+                draw_row(state, ui, &key, row);
             }
         });
 }
@@ -94,10 +100,9 @@ impl RowView {
     fn from_asset(
         asset_type: super::AssetType,
         a: &Asset,
-        prod_root: &std::path::Path,
+        exists_on_prod: bool,
         published_assets: &crate::polyhaven::PublishedAssets,
     ) -> Self {
-        let exists_on_prod = prod_root.join(&a.slug).is_dir();
         let mut messages = Vec::new();
         if let Some(text) = crate::slug::message(&a.slug) {
             messages.push(RowMsg {
@@ -281,7 +286,6 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     });
 
     ui.advance_cursor_after_rect(row_rect);
-    ui.separator();
 }
 
 fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
@@ -377,7 +381,6 @@ fn draw_status_pill(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
     };
 
     let is_updating = state.status_updates.contains_key(key);
-    let options = status_options_for(state, key.asset_type);
     let popup_id = ui.make_persistent_id(("status_popup", &key.asset_type, &key.slug));
     let response = status_pill_button(ui, status, is_updating);
 
@@ -385,8 +388,9 @@ fn draw_status_pill(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
         ui.memory_mut(|mem| mem.toggle_popup(popup_id));
     }
 
-    let popup_width = status_dropdown_width(ui, &options);
     egui::popup::popup_below_widget(ui, popup_id, &response, |ui| {
+        let options = status_options_for(state, key.asset_type);
+        let popup_width = status_dropdown_width(ui, &options);
         ui.set_min_width(popup_width);
         for group in StatusGroup::all() {
             let group_options: Vec<_> = options
