@@ -33,3 +33,8 @@ pub const MSG_QUESTION: Color32 = Color32::from_rgb(60, 175, 80);
 pub const ASSET_TYPE_HDRIS: Color32 = Color32::from_rgb(65, 187, 217);
 pub const ASSET_TYPE_TEXTURES: Color32 = Color32::from_rgb(243, 130, 55);
 pub const ASSET_TYPE_MODELS: Color32 = Color32::from_rgb(161, 208, 77);
+
+// ── Status groups ─────────────────────────────────────────────────────────────
+pub const STATUS_TODO: Color32 = ACCENT;
+pub const STATUS_IN_PROGRESS: Color32 = Color32::from_rgb(70, 130, 220);
+pub const STATUS_COMPLETE: Color32 = Color32::from_rgb(60, 175, 80);

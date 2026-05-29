@@ -6,6 +6,7 @@ mod focus_refresh;
 mod group_selector;
 mod loading_indicator;
 mod menu;
+mod status_groups;
 mod table;
 
 use std::collections::{HashMap, HashSet};
@@ -18,7 +19,7 @@ use std::time::Instant;
 use crate::config::Config;
 use crate::copy::job::{JobMsg, JobProgress};
 use crate::copy::plan::{build_plan, Action, Direction};
-use crate::notion::{Asset, HDRIS_DB_ID, TEXTURES_DB_ID};
+use crate::notion::{AssetList, AssetStatus, StatusOption, HDRIS_DB_ID, TEXTURES_DB_ID};
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum AssetType {
@@ -73,7 +74,7 @@ impl AssetType {
 
 pub enum AssetListState {
     Loading,
-    Loaded(Vec<Asset>),
+    Loaded(AssetList),
     Error(String),
 }
 
@@ -97,6 +98,13 @@ pub struct PendingConflict {
     pub plan: crate::copy::plan::Plan,
 }
 
+pub struct StatusUpdateJob {
+    pub rx: Receiver<Result<(), String>>,
+    pub previous: Option<AssetStatus>,
+    #[allow(dead_code)]
+    pub requested: StatusOption,
+}
+
 #[derive(Copy, Clone)]
 pub enum ConflictChoice {
     OverwriteAll,
@@ -108,18 +116,20 @@ pub struct AppState {
     pub config: Config,
     pub current_type: AssetType,
     pub selected_types: Vec<AssetType>,
+    pub selected_status_groups: Vec<crate::notion::StatusGroup>,
     pub author_filter: String,
     pub assets_by_type: HashMap<AssetType, AssetListState>,
     pub error_banner: Option<String>,
     pub jobs: HashMap<RowKey, RowJob>,
-    pub notion_rx: HashMap<AssetType, Receiver<Result<Vec<Asset>, String>>>,
+    pub status_updates: HashMap<RowKey, StatusUpdateJob>,
+    pub notion_rx: HashMap<AssetType, Receiver<Result<AssetList, String>>>,
     pub pending_conflict: Option<PendingConflict>,
     pub token_prompt_open: bool,
     pub token_input: String,
     /// Asset types whose background fetch is currently in flight.
     pub refreshing: HashSet<AssetType>,
     /// Notion results buffered while the cursor is active in the table.
-    pub pending_notion: HashMap<AssetType, Vec<Asset>>,
+    pub pending_notion: HashMap<AssetType, AssetList>,
     /// Last time the pointer moved while inside the table area.
     pub cursor_moved_in_table_at: Option<Instant>,
     pub focus_refresh: focus_refresh::State,
@@ -146,11 +156,13 @@ impl AppState {
         let mut s = Self {
             current_type,
             selected_types,
+            selected_status_groups: crate::notion::StatusGroup::default_filter(),
             author_filter,
             config,
             assets_by_type: HashMap::new(),
             error_banner: None,
             jobs: HashMap::new(),
+            status_updates: HashMap::new(),
             notion_rx: HashMap::new(),
             pending_conflict: None,
             token_prompt_open: false,
@@ -246,6 +258,33 @@ impl AppState {
             }
         }
 
+        let status_keys: Vec<RowKey> = self.status_updates.keys().cloned().collect();
+        for key in status_keys {
+            let res_opt = self
+                .status_updates
+                .get(&key)
+                .and_then(|job| job.rx.try_recv().ok());
+            if let Some(res) = res_opt {
+                let Some(job) = self.status_updates.remove(&key) else {
+                    continue;
+                };
+                match res {
+                    Ok(()) => {
+                        if let Some(AssetListState::Loaded(list)) =
+                            self.assets_by_type.get(&key.asset_type)
+                        {
+                            let _ = crate::cache::save(key.asset_type.cache_name(), list);
+                        }
+                    }
+                    Err(msg) => {
+                        set_asset_status(self, &key, job.previous);
+                        self.error_banner =
+                            Some(format!("Status update failed for {}: {msg}", key.slug));
+                    }
+                }
+            }
+        }
+
         let keys: Vec<RowKey> = self.jobs.keys().cloned().collect();
         for k in keys {
             let mut done = false;
@@ -322,6 +361,60 @@ pub fn start_job(state: &mut AppState, key: &RowKey, direction: Direction) {
             message: Arc::new(Mutex::new(String::new())),
         },
     );
+}
+
+pub fn start_status_update(
+    state: &mut AppState,
+    key: &RowKey,
+    page_id: &str,
+    requested: StatusOption,
+) {
+    if state.status_updates.contains_key(key) {
+        return;
+    }
+    let previous = set_asset_status(state, key, Some(status_from_option(&requested)));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let token = state.config.notion_token.clone();
+    let page_id = page_id.to_string();
+    let requested_for_thread = requested.clone();
+    thread::spawn(move || {
+        let res = crate::notion::update_page_status(&token, &page_id, &requested_for_thread)
+            .map_err(|e| e.to_string());
+        let _ = tx.send(res);
+    });
+    state.status_updates.insert(
+        key.clone(),
+        StatusUpdateJob {
+            rx,
+            previous,
+            requested,
+        },
+    );
+}
+
+fn status_from_option(option: &StatusOption) -> AssetStatus {
+    AssetStatus {
+        id: option.id.clone(),
+        name: option.name.clone(),
+        color: option.color.clone(),
+        group: option.group,
+    }
+}
+
+fn set_asset_status(
+    state: &mut AppState,
+    key: &RowKey,
+    status: Option<AssetStatus>,
+) -> Option<AssetStatus> {
+    let Some(AssetListState::Loaded(list)) = state.assets_by_type.get_mut(&key.asset_type) else {
+        return None;
+    };
+    let Some(asset) = list.assets.iter_mut().find(|asset| asset.slug == key.slug) else {
+        return None;
+    };
+    let previous = asset.status.clone();
+    asset.status = status;
+    previous
 }
 
 pub fn execute_after_conflict(state: &mut AppState, choice: ConflictChoice) {
@@ -464,6 +557,14 @@ pub fn loading_texture(ctx: &egui::Context) -> egui::TextureHandle {
         ctx.load_texture("loading_spinner", image, egui::TextureOptions::LINEAR)
     })
     .clone()
+}
+
+pub fn chevron_down_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/chevron-down.svg");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "chevron_down", "chevron-down.svg"))
+        .clone()
 }
 
 fn load_svg_texture(

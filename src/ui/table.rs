@@ -1,7 +1,7 @@
 use super::colors;
 use super::{AppState, AssetListState, RowKey};
 use crate::copy::plan::Direction;
-use crate::notion::Asset;
+use crate::notion::{Asset, AssetStatus, StatusGroup, StatusOption};
 
 /// Severity of a row-level message.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -21,6 +21,7 @@ pub struct RowMsg {
 
 pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
     let filter = state.author_filter.clone();
+    let status_groups = state.selected_status_groups.clone();
     let selected_types = state.selected_types.clone();
     let mut rows = Vec::new();
     let mut has_loaded_list = false;
@@ -39,8 +40,10 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                 has_loaded_list = true;
                 let prod_root = state.prod_root_for(t);
                 rows.extend(
-                    list.iter()
+                    list.assets
+                        .iter()
                         .filter(|a| author_matches_filter(&a.author, &filter))
+                        .filter(|a| status_matches_filter(&a.status, &status_groups))
                         .map(|a| RowView::from_asset(t, a, &prod_root)),
                 );
             }
@@ -80,6 +83,8 @@ struct RowView {
     slug: String,
     author: String,
     url: String,
+    page_id: String,
+    status: Option<AssetStatus>,
     exists_on_prod: bool,
     messages: Vec<RowMsg>,
 }
@@ -99,6 +104,8 @@ impl RowView {
             slug: a.slug.clone(),
             author: a.author.clone(),
             url: a.url.clone(),
+            page_id: a.page_id.clone(),
+            status: a.status.clone(),
             exists_on_prod,
             messages,
         }
@@ -182,6 +189,8 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
 
             ui.add_space(16.0);
             ui.colored_label(text_color.linear_multiply(0.8), &row.author);
+            ui.add_space(8.0);
+            draw_status_pill(state, ui, key, row);
 
             // Row messages (icons + text, left-to-right after author).
             for msg in &row.messages {
@@ -299,6 +308,99 @@ fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
     }
 }
 
+fn draw_status_pill(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
+    let Some(status) = &row.status else {
+        ui.colored_label(colors::TEXT_DISABLED, "No status");
+        return;
+    };
+
+    let is_updating = state.status_updates.contains_key(key);
+    let options = status_options_for(state, key.asset_type);
+    let popup_id = ui.make_persistent_id(("status_popup", &key.asset_type, &key.slug));
+    let response = status_pill_button(ui, status, is_updating);
+
+    if response.clicked() && !is_updating {
+        ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+    }
+
+    egui::popup::popup_below_widget(ui, popup_id, &response, |ui| {
+        ui.set_min_width(220.0);
+        for group in StatusGroup::all() {
+            let group_options: Vec<_> = options
+                .iter()
+                .filter(|option| option.group == *group)
+                .collect();
+            if group_options.is_empty() {
+                continue;
+            }
+            ui.strong(format!("{}:", group.label()));
+            for option in group_options {
+                if ui.button(&option.name).clicked() {
+                    super::start_status_update(state, key, &row.page_id, option.clone());
+                    ui.close_menu();
+                }
+            }
+            ui.add_space(4.0);
+        }
+    });
+}
+
+fn status_pill_button(
+    ui: &mut egui::Ui,
+    status: &AssetStatus,
+    is_updating: bool,
+) -> egui::Response {
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let text_width = ui.fonts(|fonts| {
+        fonts
+            .layout_no_wrap(status.name.clone(), font_id.clone(), egui::Color32::WHITE)
+            .rect
+            .width()
+    });
+    let icon_size = egui::vec2(10.0, 10.0);
+    let padding = egui::vec2(8.0, 3.0);
+    let height = 22.0;
+    let width = text_width + icon_size.x + padding.x * 3.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    let bg = notion_color(&status.color);
+    ui.painter().rect_filled(rect, height / 2.0, bg);
+    ui.painter().text(
+        egui::pos2(rect.left() + padding.x, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        &status.name,
+        font_id,
+        egui::Color32::WHITE,
+    );
+
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(
+            rect.right() - padding.x - icon_size.x / 2.0,
+            rect.center().y,
+        ),
+        icon_size,
+    );
+    if is_updating {
+        super::loading_indicator::draw_image_at(ui, icon_rect, egui::Color32::WHITE);
+    } else {
+        let tex = super::chevron_down_texture(ui.ctx());
+        ui.painter().image(
+            tex.id(),
+            icon_rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+    }
+
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn status_options_for(state: &AppState, asset_type: super::AssetType) -> Vec<StatusOption> {
+    match state.assets_by_type.get(&asset_type) {
+        Some(AssetListState::Loaded(list)) => list.statuses.clone(),
+        _ => Vec::new(),
+    }
+}
+
 fn fmt_bytes(b: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
@@ -319,12 +421,59 @@ fn author_matches_filter(author: &str, filter: &str) -> bool {
     super::authors::contains(author, filter)
 }
 
+fn status_matches_filter(status: &Option<AssetStatus>, selected: &[StatusGroup]) -> bool {
+    status
+        .as_ref()
+        .map(|status| selected.contains(&status.group))
+        .unwrap_or(false)
+}
+
+fn notion_color(color: &str) -> egui::Color32 {
+    match color {
+        "red" => egui::Color32::from_rgb(180, 68, 68),
+        "orange" => egui::Color32::from_rgb(190, 110, 45),
+        "yellow" => egui::Color32::from_rgb(170, 135, 40),
+        "green" => egui::Color32::from_rgb(60, 145, 80),
+        "blue" => egui::Color32::from_rgb(70, 120, 190),
+        "purple" => egui::Color32::from_rgb(130, 90, 190),
+        "pink" => egui::Color32::from_rgb(180, 85, 150),
+        "brown" => egui::Color32::from_rgb(130, 95, 70),
+        "gray" | "default" => egui::Color32::from_gray(95),
+        _ => colors::ACCENT,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::notion::{AssetStatus, StatusGroup};
+
     #[test]
     fn author_filter_matches_any_person_in_multi_author_combination() {
         assert!(super::author_matches_filter("Alice, Bob", "Alice"));
         assert!(super::author_matches_filter("Alice, Bob", "Bob"));
         assert!(!super::author_matches_filter("Alice, Bob", "Carol"));
+    }
+
+    #[test]
+    fn status_filter_matches_selected_status_groups() {
+        let status = Some(AssetStatus {
+            id: "a".into(),
+            name: "Creative review".into(),
+            color: "blue".into(),
+            group: StatusGroup::InProgress,
+        });
+
+        assert!(super::status_matches_filter(
+            &status,
+            &[StatusGroup::InProgress]
+        ));
+        assert!(!super::status_matches_filter(
+            &status,
+            &[StatusGroup::Complete]
+        ));
+        assert!(!super::status_matches_filter(
+            &None,
+            &[StatusGroup::InProgress]
+        ));
     }
 }
