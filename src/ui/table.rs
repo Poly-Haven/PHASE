@@ -3,6 +3,17 @@ use super::colors;
 use crate::copy::plan::Direction;
 use crate::notion::Asset;
 
+/// Severity of a row-level message.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MsgKind { Info, Warning, Error, Question }
+
+/// A single message attached to an asset row.
+#[derive(Clone)]
+pub struct RowMsg {
+    pub kind: MsgKind,
+    pub text: String,
+}
+
 pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
     let t = state.current_type;
     match state.assets_by_type.get(&t) {
@@ -36,15 +47,22 @@ struct RowView {
     author: String,
     url: String,
     exists_on_prod: bool,
+    messages: Vec<RowMsg>,
 }
 
 impl RowView {
     fn from_asset(a: &Asset, prod_root: &std::path::Path) -> Self {
+        let exists_on_prod = prod_root.join(&a.slug).is_dir();
+        let mut messages = Vec::new();
+        if !exists_on_prod {
+            messages.push(RowMsg { kind: MsgKind::Error, text: "Prod folder missing".into() });
+        }
         Self {
             slug: a.slug.clone(),
             author: a.author.clone(),
             url: a.url.clone(),
-            exists_on_prod: prod_root.join(&a.slug).is_dir(),
+            exists_on_prod,
+            messages,
         }
     }
 }
@@ -98,6 +116,21 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
 
             ui.add_space(16.0);
             ui.colored_label(text_color.linear_multiply(0.8), &row.author);
+
+            // Row messages (icons + text, left-to-right after author).
+            for msg in &row.messages {
+                ui.add_space(8.0);
+                let (tex, color) = match msg.kind {
+                    MsgKind::Info     => (super::info_icon_texture(ui.ctx()),     colors::MSG_INFO),
+                    MsgKind::Warning  => (super::warn_icon_texture(ui.ctx()),     colors::MSG_WARNING),
+                    MsgKind::Error    => (super::error_icon_texture(ui.ctx()),    colors::MSG_ERROR),
+                    MsgKind::Question => (super::question_icon_texture(ui.ctx()), colors::MSG_QUESTION),
+                };
+                ui.add(egui::Image::new(egui::load::SizedTexture::new(tex.id(), egui::vec2(14.0, 14.0)))
+                    .tint(color));
+                ui.add_space(3.0);
+                ui.colored_label(color, &msg.text);
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 draw_row_actions(state, ui, key, row);

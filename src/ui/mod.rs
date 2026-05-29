@@ -307,6 +307,34 @@ pub fn push_icon_texture(ctx: &egui::Context) -> egui::TextureHandle {
     TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "push_icon", "cloud-upload-fill.svg")).clone()
 }
 
+pub fn info_icon_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/info.svg");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "icon_info", "info.svg")).clone()
+}
+
+pub fn warn_icon_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/exclamation-triangle.svg");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "icon_warn", "exclamation-triangle.svg")).clone()
+}
+
+pub fn error_icon_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/exclamation-diamond.svg");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "icon_error", "exclamation-diamond.svg")).clone()
+}
+
+pub fn question_icon_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/question.svg");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "icon_question", "question.svg")).clone()
+}
+
 fn load_svg_texture(
     ctx: &egui::Context,
     bytes: &[u8],
