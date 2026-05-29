@@ -54,18 +54,17 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                 .selected_types
                 .iter()
                 .any(|t| state.refreshing.contains(t));
-            let refresh_label = if is_loading {
-                "Loading…"
+            if is_loading {
+                super::loading_indicator::draw_button(ui);
             } else {
-                "↻ Refresh"
-            };
-            if ui
-                .add_enabled(!is_loading, egui::Button::new(refresh_label))
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .clicked()
-            {
-                for t in state.selected_types.clone() {
-                    state.refresh(t);
+                if ui
+                    .button("↻ Refresh")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    for t in state.selected_types.clone() {
+                        state.refresh(t);
+                    }
                 }
             }
             ui.separator();
