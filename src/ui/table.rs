@@ -1,4 +1,5 @@
 use super::{AppState, AssetListState, RowKey};
+use super::colors;
 use crate::copy::plan::Direction;
 use crate::notion::Asset;
 
@@ -6,7 +7,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
     let t = state.current_type;
     match state.assets_by_type.get(&t) {
         None | Some(AssetListState::Loading) => { ui.label("Loading…"); return; }
-        Some(AssetListState::Error(msg))     => { ui.colored_label(egui::Color32::from_rgb(220,80,80), msg.clone()); return; }
+        Some(AssetListState::Error(msg)) => { ui.colored_label(colors::ERROR_BANNER, msg.clone()); return; }
         Some(AssetListState::Loaded(_))      => {}
     }
 
@@ -59,13 +60,13 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
         let f = job.progress.fraction().clamp(0.0, 1.0);
         let mut fill = row_rect;
         fill.set_width(avail.width() * f);
-        ui.painter().rect_filled(fill, 2.0, egui::Color32::from_rgb(50, 110, 200));
+        ui.painter().rect_filled(fill, 2.0, colors::PROGRESS_BAR);
     }
 
     ui.allocate_ui_at_rect(row_rect, |ui| {
         ui.horizontal_centered(|ui| {
             ui.add_space(8.0);
-            let text_color = if row.exists_on_prod { ui.visuals().text_color() } else { egui::Color32::from_gray(110) };
+            let text_color = if row.exists_on_prod { colors::SLUG_ACTIVE } else { colors::SLUG_MISSING };
             ui.colored_label(text_color, &row.slug);
             ui.add_space(16.0);
             ui.colored_label(text_color.linear_multiply(0.8), &row.author);
@@ -81,11 +82,7 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
 }
 
 fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
-    let text_color = if row.exists_on_prod {
-        ui.visuals().text_color()
-    } else {
-        egui::Color32::from_gray(110)
-    };
+    let text_color = if row.exists_on_prod { colors::SLUG_ACTIVE } else { colors::SLUG_MISSING };
     let icon_size = egui::vec2(18.0, 18.0);
 
     let icon_button = |ui: &mut egui::Ui, tex: &egui::TextureHandle, enabled: bool, tooltip: &str| -> egui::Response {

@@ -1,6 +1,7 @@
 mod menu;
 mod table;
 mod dialogs;
+pub mod colors;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -258,7 +259,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     if let Some(err) = state.error_banner.clone() {
         egui::TopBottomPanel::top("banner").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.colored_label(egui::Color32::from_rgb(220, 80, 80), err);
+                ui.colored_label(colors::ERROR_BANNER, err);
                 if ui.button("✕").clicked() { state.error_banner = None; }
             });
         });
