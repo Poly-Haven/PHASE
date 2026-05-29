@@ -326,12 +326,8 @@ fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
     };
 
     if state.jobs.contains_key(key) {
-        if ui
-            .button("✕")
-            .on_hover_text("Cancel")
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .clicked()
-        {
+        let x_tex = super::x_icon_texture(ui.ctx());
+        if icon_button(ui, &x_tex, true, "Cancel").clicked() {
             if let Some(job) = state.jobs.get(key) {
                 job.progress
                     .cancel
