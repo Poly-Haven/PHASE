@@ -575,7 +575,20 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         egui::TopBottomPanel::top("banner").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.colored_label(colors::ERROR_BANNER, err);
-                if ui.button("✕").clicked() {
+                let tex = x_icon_texture(ui.ctx());
+                let resp = ui.add(
+                    egui::Image::new(egui::load::SizedTexture::new(
+                        tex.id(),
+                        egui::vec2(14.0, 14.0),
+                    ))
+                    .tint(colors::ERROR_BANNER)
+                    .sense(egui::Sense::click()),
+                );
+                if resp
+                    .on_hover_text("Dismiss")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
                     state.error_banner = None;
                 }
             });
@@ -713,6 +726,14 @@ pub fn chevron_down_texture(ctx: &egui::Context) -> egui::TextureHandle {
     static BYTES: &[u8] = include_bytes!("../assets/chevron-down.svg");
     static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
     TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "chevron_down", "chevron-down.svg"))
+        .clone()
+}
+
+pub fn x_icon_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/x.svg");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "x_icon", "x.svg"))
         .clone()
 }
 
