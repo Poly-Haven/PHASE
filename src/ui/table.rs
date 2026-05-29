@@ -89,16 +89,18 @@ fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
         let btn = egui::ImageButton::new(egui::load::SizedTexture::new(tex.id(), icon_size))
             .frame(false)
             .tint(text_color);
-        ui.add_enabled(enabled, btn).on_hover_text(tooltip)
+        let cursor = if enabled { egui::CursorIcon::PointingHand } else { egui::CursorIcon::NotAllowed };
+        ui.add_enabled(enabled, btn)
+            .on_hover_text(tooltip)
+            .on_hover_cursor(cursor)
     };
 
-    let notion_tex = super::notion_logo_texture(ui.ctx());
-    if icon_button(ui, &notion_tex, true, "Open in Notion").clicked() {
-        let _ = open::that(&row.url);
-    }
-
     if state.jobs.contains_key(key) {
-        if ui.button("✕").on_hover_text("Cancel").clicked() {
+        if ui.button("✕")
+            .on_hover_text("Cancel")
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
             if let Some(job) = state.jobs.get(key) {
                 job.progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             }
