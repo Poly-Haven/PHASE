@@ -99,10 +99,21 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
 }
 
 fn current_authors(state: &AppState) -> Vec<String> {
+    let status_filter = &state.selected_status_groups;
     let mut authors = Vec::new();
     for t in &state.selected_types {
         if let Some(AssetListState::Loaded(list)) = state.assets_by_type.get(t) {
-            authors.extend(list.assets.iter().map(|a| a.author.as_str()));
+            authors.extend(
+                list.assets
+                    .iter()
+                    .filter(|a| {
+                        a.status
+                            .as_ref()
+                            .map(|s| status_filter.contains(&s.group))
+                            .unwrap_or(false)
+                    })
+                    .map(|a| a.author.as_str()),
+            );
         }
     }
     author_filter_options_with_current(authors, &state.author_filter)
@@ -126,17 +137,58 @@ fn author_filter_options_with_current<'a>(
 
 #[cfg(test)]
 mod tests {
+    use crate::notion::{Asset, AssetStatus, StatusGroup};
+
+    fn asset(author: &str, group: StatusGroup) -> Asset {
+        Asset {
+            page_id: String::new(),
+            slug: "test".into(),
+            author: author.to_string(),
+            url: String::new(),
+            status: Some(AssetStatus {
+                id: String::new(),
+                name: String::new(),
+                color: String::new(),
+                group,
+            }),
+        }
+    }
+
     #[test]
     fn author_filter_options_split_multi_author_combinations_into_people() {
         let options = super::author_filter_options(["Alice, Bob", "Bob, Carol", "Alice", ""]);
-
         assert_eq!(options, vec!["Alice", "Bob", "Carol"]);
     }
 
     #[test]
     fn author_filter_options_include_current_selection_even_without_matching_assets() {
         let options = super::author_filter_options_with_current(["Alice, Bob"], "Carol");
-
         assert_eq!(options, vec!["Alice", "Bob", "Carol"]);
     }
+
+    #[test]
+    fn author_list_excludes_authors_whose_assets_dont_match_status_filter() {
+        let assets = [
+            asset("Greg", StatusGroup::Complete),
+            asset("Didier", StatusGroup::InProgress),
+        ];
+        let status_filter = &[StatusGroup::InProgress];
+
+        let authors: Vec<_> = assets
+            .iter()
+            .filter(|a| {
+                a.status
+                    .as_ref()
+                    .map(|s| status_filter.contains(&s.group))
+                    .unwrap_or(false)
+            })
+            .map(|a| a.author.as_str())
+            .collect();
+
+        let options = super::author_filter_options(authors);
+        assert_eq!(options, vec!["Didier"]);
+        assert!(!options.iter().any(|o| o == "Greg"));
+    }
 }
+
+
