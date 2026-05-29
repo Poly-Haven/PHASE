@@ -581,7 +581,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                         tex.id(),
                         egui::vec2(14.0, 14.0),
                     ))
-                    .tint(colors::ERROR_BANNER)
+                    .tint(egui::Color32::WHITE)
                     .sense(egui::Sense::click()),
                 );
                 if resp
