@@ -58,6 +58,12 @@ impl AssetType {
             Self::Textures => "textures",
         }
     }
+    pub fn selected_color(self) -> egui::Color32 {
+        match self {
+            Self::Hdris => colors::ASSET_TYPE_HDRIS,
+            Self::Textures => colors::ASSET_TYPE_TEXTURES,
+        }
+    }
     pub fn from_label(label: &str) -> Option<Self> {
         Self::all().iter().copied().find(|t| t.label() == label)
     }

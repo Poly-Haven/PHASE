@@ -10,6 +10,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
             .map(|t| super::group_selector::OptionItem {
                 value: *t,
                 label: t.label(),
+                selected_bg: Some(t.selected_color()),
             })
             .collect();
         let response =

@@ -3,6 +3,7 @@ use super::colors;
 pub struct OptionItem<T> {
     pub value: T,
     pub label: &'static str,
+    pub selected_bg: Option<egui::Color32>,
 }
 
 #[derive(Default)]
@@ -56,7 +57,9 @@ pub fn draw<T: Copy + PartialEq>(
             egui::Sense::click(),
         );
         let is_selected = selected.contains(&option.value);
-        let fill = if response.hovered() {
+        let fill = if is_selected {
+            option.selected_bg.unwrap_or(colors::ACCENT)
+        } else if response.hovered() {
             colors::PILL_OPTION_BG_HOVER
         } else {
             colors::PILL_OPTION_BG
