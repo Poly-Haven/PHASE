@@ -42,19 +42,17 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
             let _ = crate::config::save(&state.config);
         }
 
-        ui.separator();
-
-        let is_loading = state.refreshing.contains(&state.current_type);
-        let refresh_label = if is_loading { "Loading…" } else { "↻ Refresh" };
-        if ui.add_enabled(!is_loading, egui::Button::new(refresh_label))
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .clicked()
-        {
-            state.refresh(state.current_type);
-        }
-
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(format!("PHASE {}", env!("CARGO_PKG_VERSION")));
+            let is_loading = state.refreshing.contains(&state.current_type);
+            let refresh_label = if is_loading { "Loading…" } else { "↻ Refresh" };
+            if ui.add_enabled(!is_loading, egui::Button::new(refresh_label))
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                state.refresh(state.current_type);
+            }
+            ui.separator();
+            ui.label(env!("CARGO_PKG_VERSION"));
         });
     });
 }
