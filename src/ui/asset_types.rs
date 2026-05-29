@@ -60,4 +60,16 @@ mod tests {
         let selected = select(vec![AssetType::Hdris], AssetType::Hdris, true);
         assert_eq!(selected, vec![AssetType::Hdris]);
     }
+
+    #[test]
+    fn selected_color_uses_type_specific_color() {
+        assert_eq!(
+            AssetType::Hdris.selected_color(),
+            super::super::colors::ASSET_TYPE_HDRIS
+        );
+        assert_eq!(
+            AssetType::Textures.selected_color(),
+            super::super::colors::ASSET_TYPE_TEXTURES
+        );
+    }
 }
