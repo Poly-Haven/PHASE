@@ -17,7 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
-use crate::copy::job::{JobMsg, JobProgress};
+use crate::copy::job::{JobMsg, JobProgress, VerifyMsg};
 use crate::copy::plan::{build_plan, Action, Direction};
 use crate::notion::{AssetList, AssetStatus, StatusOption, HDRIS_DB_ID, TEXTURES_DB_ID};
 
@@ -86,11 +86,23 @@ pub struct RowKey {
 
 pub struct RowJob {
     pub direction: Direction,
+    pub plan: crate::copy::plan::Plan,
     pub progress: Arc<JobProgress>,
     pub rx: Receiver<JobMsg>,
     pub started_at: Instant,
     #[allow(dead_code)]
     pub message: Arc<Mutex<String>>,
+}
+
+pub struct VerificationJob {
+    pub progress: Arc<JobProgress>,
+    pub rx: Receiver<VerifyMsg>,
+}
+
+pub struct PendingVerificationFailure {
+    pub key: RowKey,
+    pub rel_path: String,
+    pub error: String,
 }
 
 pub struct RowToast {
@@ -127,9 +139,11 @@ pub struct AppState {
     pub assets_by_type: HashMap<AssetType, AssetListState>,
     pub error_banner: Option<String>,
     pub jobs: HashMap<RowKey, RowJob>,
+    pub verifications: HashMap<RowKey, VerificationJob>,
     pub status_updates: HashMap<RowKey, StatusUpdateJob>,
     pub notion_rx: HashMap<AssetType, Receiver<Result<AssetList, String>>>,
     pub pending_conflict: Option<PendingConflict>,
+    pub pending_verification_failure: Option<PendingVerificationFailure>,
     pub pending_prod_folder_create: Option<RowKey>,
     pub row_toasts: HashMap<RowKey, RowToast>,
     pub published_assets: crate::polyhaven::PublishedAssets,
@@ -177,9 +191,11 @@ impl AppState {
             assets_by_type: HashMap::new(),
             error_banner: None,
             jobs: HashMap::new(),
+            verifications: HashMap::new(),
             status_updates: HashMap::new(),
             notion_rx: HashMap::new(),
             pending_conflict: None,
+            pending_verification_failure: None,
             pending_prod_folder_create: None,
             row_toasts: HashMap::new(),
             published_assets: crate::cache::load(crate::polyhaven::cache_name())
@@ -393,6 +409,9 @@ impl AppState {
                 if let Some(job) = self.jobs.remove(&k) {
                     if finished_successfully {
                         self.update_prod_folder_cache_for(&k);
+                        if job.direction == Direction::Push {
+                            self.start_push_verification(k.clone(), job.plan.clone());
+                        }
                         let action = match job.direction {
                             Direction::Pull => "Pulled from prod",
                             Direction::Push => "Pushed to prod",
@@ -411,6 +430,35 @@ impl AppState {
                 }
             }
         }
+        let verification_keys: Vec<RowKey> = self.verifications.keys().cloned().collect();
+        for k in verification_keys {
+            let mut done = false;
+            let mut failure: Option<PendingVerificationFailure> = None;
+            if let Some(job) = self.verifications.get(&k) {
+                while let Ok(msg) = job.rx.try_recv() {
+                    match msg {
+                        VerifyMsg::FileDone { .. } => {}
+                        VerifyMsg::Finished => {
+                            done = true;
+                        }
+                        VerifyMsg::FileFailed { rel_path, error } => {
+                            failure = Some(PendingVerificationFailure {
+                                key: k.clone(),
+                                rel_path,
+                                error,
+                            });
+                            done = true;
+                        }
+                    }
+                }
+            }
+            if done {
+                self.verifications.remove(&k);
+            }
+            if failure.is_some() {
+                self.pending_verification_failure = failure;
+            }
+        }
         self.row_toasts
             .retain(|_, toast| toast.created_at.elapsed() < Duration::from_secs(5));
     }
@@ -420,6 +468,14 @@ impl AppState {
     }
     pub fn prod_root_for(&self, t: AssetType) -> PathBuf {
         self.config.prod_root.join(t.folder())
+    }
+
+    fn start_push_verification(&mut self, key: RowKey, plan: crate::copy::plan::Plan) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let progress = Arc::new(JobProgress::default());
+        crate::copy::job::spawn_verification(plan.files, progress.clone(), tx);
+        self.verifications
+            .insert(key, VerificationJob { progress, rx });
     }
 }
 
@@ -454,11 +510,12 @@ pub fn start_job(state: &mut AppState, key: &RowKey, direction: Direction) {
 
     let (tx, rx) = std::sync::mpsc::channel();
     let progress = Arc::new(JobProgress::default());
-    crate::copy::job::spawn(plan, progress.clone(), tx);
+    crate::copy::job::spawn(plan.clone(), progress.clone(), tx);
     state.jobs.insert(
         key.clone(),
         RowJob {
             direction,
+            plan,
             progress,
             rx,
             message: Arc::new(Mutex::new(String::new())),
@@ -543,11 +600,12 @@ pub fn execute_after_conflict(state: &mut AppState, choice: ConflictChoice) {
     }
     let (tx, rx) = std::sync::mpsc::channel();
     let progress = Arc::new(JobProgress::default());
-    crate::copy::job::spawn(plan, progress.clone(), tx);
+    crate::copy::job::spawn(plan.clone(), progress.clone(), tx);
     state.jobs.insert(
         pc.key,
         RowJob {
             direction: pc.direction,
+            plan,
             progress,
             rx,
             message: Arc::new(Mutex::new(String::new())),
@@ -618,7 +676,7 @@ fn format_active_file_action(
 }
 
 fn active_file_action_status(state: &AppState) -> Option<String> {
-    state
+    if let Some(status) = state
         .jobs
         .iter()
         .min_by(|(a, _), (b, _)| {
@@ -635,6 +693,34 @@ fn active_file_action_status(state: &AppState) -> Option<String> {
                 .ok()
                 .and_then(|file| file.clone());
             format_active_file_action(key, job.direction, current_file.as_deref())
+        })
+    {
+        return Some(status);
+    }
+
+    state
+        .verifications
+        .iter()
+        .min_by(|(a, _), (b, _)| {
+            a.asset_type
+                .order()
+                .cmp(&b.asset_type.order())
+                .then_with(|| a.slug.cmp(&b.slug))
+        })
+        .map(|(key, job)| {
+            let current_file = job
+                .progress
+                .current_file
+                .lock()
+                .ok()
+                .and_then(|file| file.clone());
+            let target = match current_file.as_deref() {
+                Some(file) if !file.is_empty() => {
+                    format!("{}/{}/{}", key.asset_type.folder(), key.slug, file)
+                }
+                _ => format!("{}/{}", key.asset_type.folder(), key.slug),
+            };
+            format!("Verifying {target}")
         })
 }
 
@@ -695,6 +781,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     dialogs::token_prompt(state, ctx);
     dialogs::draw(state, ctx);
     draw_create_prod_folder_prompt(state, ctx);
+    draw_verification_failure_prompt(state, ctx);
     draw_status_bar(state, ctx);
     let table_resp = egui::CentralPanel::default().show(ctx, |ui| table::draw(state, ui));
 
@@ -709,8 +796,68 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     });
 
     // Keep repainting while a pending update is waiting to be flushed.
-    if !state.pending_notion.is_empty() || !state.row_toasts.is_empty() || !state.jobs.is_empty() {
+    if !state.pending_notion.is_empty()
+        || !state.row_toasts.is_empty()
+        || !state.jobs.is_empty()
+        || !state.verifications.is_empty()
+    {
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
+    }
+}
+
+fn draw_verification_failure_prompt(state: &mut AppState, ctx: &egui::Context) {
+    let Some(failure) = state.pending_verification_failure.as_ref() else {
+        return;
+    };
+    let slug = failure.key.slug.clone();
+    let rel_path = failure.rel_path.clone();
+    let error = failure.error.clone();
+    let key = failure.key.clone();
+    let mut retry = false;
+    let mut ignore = false;
+
+    egui::Window::new(format!("Copy verification failed — {slug}"))
+        .collapsible(false)
+        .resizable(false)
+        .default_width(520.0)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label("The push finished, but post-copy verification found a mismatch.");
+            ui.add_space(6.0);
+            ui.label("Problem file:");
+            ui.monospace(&rel_path);
+            ui.add_space(4.0);
+            ui.label("Verification error:");
+            ui.monospace(&error);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Try again").clicked() {
+                    retry = true;
+                }
+                if ui.button("Ignore").clicked() {
+                    ignore = true;
+                }
+            });
+        });
+
+    if retry {
+        state.pending_verification_failure = None;
+        let failed_dst = state
+            .prod_root_for(key.asset_type)
+            .join(&key.slug)
+            .join(&rel_path);
+        if let Err(err) = std::fs::remove_file(&failed_dst) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                state.error_banner = Some(format!(
+                    "Could not remove failed copy before retrying {}: {err}",
+                    failed_dst.display()
+                ));
+                return;
+            }
+        }
+        start_job(state, &key, Direction::Push);
+    } else if ignore {
+        state.pending_verification_failure = None;
     }
 }
 

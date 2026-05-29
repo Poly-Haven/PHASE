@@ -114,8 +114,10 @@ fn plan_ignores_partial_files() {
     assert_eq!(plan.files[0].rel_path.to_string_lossy(), "a.exr");
 }
 
-use super::engine::{copy_one_file, CopyError};
-use super::job::{self, JobMsg, JobProgress};
+use super::engine::{
+    copy_one_file, copy_one_file_deferred_verify, verify_copied_file, CopyError, VerifyError,
+};
+use super::job::{self, JobMsg, JobProgress, VerifyMsg};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -182,6 +184,57 @@ fn copy_one_file_preserves_source_mtime() {
 }
 
 #[test]
+fn deferred_copy_can_be_verified_after_rename() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    write(&src, b"verified later");
+
+    let bytes = AtomicU64::new(0);
+    let cancel = AtomicBool::new(false);
+    copy_one_file_deferred_verify(&src, &dst, &bytes, &cancel).unwrap();
+
+    verify_copied_file(&src, &dst).unwrap();
+}
+
+#[test]
+fn post_copy_verification_reports_size_mismatch_before_hashing() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    write(&src, b"source bytes");
+    write(&dst, b"short");
+
+    let err = verify_copied_file(&src, &dst).unwrap_err();
+
+    assert!(matches!(
+        err,
+        VerifyError::SizeMismatch {
+            src_size: 12,
+            dst_size: 5
+        }
+    ));
+}
+
+#[test]
+fn post_copy_verification_reports_hash_mismatch_after_fast_checks_pass() {
+    use filetime::{set_file_mtime, FileTime};
+
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    write(&src, b"same length");
+    write(&dst, b"same LENGTH");
+    let stamp = FileTime::from_unix_time(1_700_000_000, 0);
+    set_file_mtime(&src, stamp).unwrap();
+    set_file_mtime(&dst, stamp).unwrap();
+
+    let err = verify_copied_file(&src, &dst).unwrap_err();
+
+    assert!(matches!(err, VerifyError::HashMismatch));
+}
+
+#[test]
 fn copy_worker_count_is_capped_and_never_exceeds_copyable_files() {
     assert_eq!(job::copy_worker_count(0), 1);
     assert_eq!(job::copy_worker_count(1), 1);
@@ -244,13 +297,20 @@ fn benchmark_job_copy_5gib_pull_and_push() {
 
     let push = benchmark_job_copy(Direction::Push, &local_dst, &prod_dst, worker_count);
     println!(
-        "push: copied {:.2} GiB in {:.2}s ({:.1} MiB/s, workers={})",
+        "push-copy: copied {:.2} GiB in {:.2}s ({:.1} MiB/s, workers={})",
         bytes_to_gib(push.bytes),
         push.seconds,
         bytes_to_mib(push.bytes) / push.seconds,
         worker_count.unwrap_or_else(|| job::copy_worker_count(file_count))
     );
 
+    let verify = benchmark_push_verification(push.files);
+    println!(
+        "push-verify: verified {:.2} GiB in {:.2}s ({:.1} MiB/s)",
+        bytes_to_gib(verify.bytes),
+        verify.seconds,
+        bytes_to_mib(verify.bytes) / verify.seconds,
+    );
 }
 
 struct BenchCleanup {
@@ -268,6 +328,7 @@ impl Drop for BenchCleanup {
 struct BenchResult {
     bytes: u64,
     seconds: f64,
+    files: Vec<PlannedFile>,
 }
 
 fn benchmark_job_copy(
@@ -278,6 +339,7 @@ fn benchmark_job_copy(
 ) -> BenchResult {
     let plan = build_plan(direction, src, dst).unwrap();
     let bytes = plan.total_bytes_to_copy;
+    let files = plan.files.clone();
     let progress = Arc::new(JobProgress::default());
     let (tx, rx) = mpsc::channel();
 
@@ -305,6 +367,46 @@ fn benchmark_job_copy(
     BenchResult {
         bytes,
         seconds: started.elapsed().as_secs_f64(),
+        files,
+    }
+}
+
+fn benchmark_push_verification(files: Vec<PlannedFile>) -> BenchResult {
+    let bytes = files
+        .iter()
+        .filter(|f| matches!(f.action, Action::New | Action::Overwrite))
+        .map(|f| f.size)
+        .sum();
+    let progress = Arc::new(JobProgress::default());
+    let (tx, rx) = mpsc::channel();
+
+    let started = Instant::now();
+    let handle = job::spawn_verification(files.clone(), progress.clone(), tx);
+    let mut finished = false;
+    while let Ok(msg) = rx.recv() {
+        match msg {
+            VerifyMsg::Finished => {
+                finished = true;
+                break;
+            }
+            VerifyMsg::FileFailed { rel_path, error } => {
+                panic!("benchmark verification failed for {rel_path}: {error}");
+            }
+            VerifyMsg::FileDone { .. } => {}
+        }
+    }
+    handle.join().unwrap();
+
+    assert!(
+        finished,
+        "benchmark verification worker exited without Finished"
+    );
+    assert_eq!(progress.bytes_done.load(Ordering::Relaxed), bytes);
+
+    BenchResult {
+        bytes,
+        seconds: started.elapsed().as_secs_f64(),
+        files,
     }
 }
 

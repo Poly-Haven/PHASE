@@ -4,8 +4,10 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::copy::engine::{copy_one_file, CopyError};
-use crate::copy::plan::{Action, Plan};
+use crate::copy::engine::{
+    copy_one_file, copy_one_file_deferred_verify, verify_copied_file, CopyError,
+};
+use crate::copy::plan::{Action, Direction, Plan, PlannedFile};
 
 /// Updates the UI receives while a job runs.
 #[allow(dead_code)]
@@ -14,6 +16,13 @@ pub enum JobMsg {
     FileFailed { rel_path: String, error: String },
     Finished,
     Cancelled,
+}
+
+#[allow(dead_code)]
+pub enum VerifyMsg {
+    FileDone { rel_path: String },
+    FileFailed { rel_path: String, error: String },
+    Finished,
 }
 
 /// Shared progress state the UI samples each frame.
@@ -50,6 +59,7 @@ pub(crate) fn spawn_with_worker_count(
     tx: Sender<JobMsg>,
     worker_count: Option<usize>,
 ) -> thread::JoinHandle<()> {
+    let direction = plan.direction;
     progress
         .bytes_total
         .store(plan.total_bytes_to_copy, Ordering::Relaxed);
@@ -60,7 +70,7 @@ pub(crate) fn spawn_with_worker_count(
         .collect();
     info!(
         "job start: {:?}, {} files, {} bytes",
-        plan.direction,
+        direction,
         copyable_files.len(),
         plan.total_bytes_to_copy
     );
@@ -99,12 +109,20 @@ pub(crate) fn spawn_with_worker_count(
                 if let Ok(mut current_file) = progress.current_file.lock() {
                     *current_file = Some(file.rel_path.to_string_lossy().to_string());
                 }
-                let res = copy_one_file(
-                    &file.src_abs,
-                    &file.dst_abs,
-                    &progress.bytes_done,
-                    &progress.cancel,
-                );
+                let res = match direction {
+                    Direction::Pull => copy_one_file(
+                        &file.src_abs,
+                        &file.dst_abs,
+                        &progress.bytes_done,
+                        &progress.cancel,
+                    ),
+                    Direction::Push => copy_one_file_deferred_verify(
+                        &file.src_abs,
+                        &file.dst_abs,
+                        &progress.bytes_done,
+                        &progress.cancel,
+                    ),
+                };
                 match res {
                     Ok(()) => {
                         let _ = tx.send(JobMsg::FileDone {
@@ -150,5 +168,45 @@ pub(crate) fn spawn_with_worker_count(
             info!("job finished");
             let _ = tx.send(JobMsg::Finished);
         }
+    })
+}
+
+pub fn spawn_verification(
+    files: Vec<PlannedFile>,
+    progress: Arc<JobProgress>,
+    tx: Sender<VerifyMsg>,
+) -> thread::JoinHandle<()> {
+    let verify_files: Vec<_> = files
+        .into_iter()
+        .filter(|f| matches!(f.action, Action::New | Action::Overwrite))
+        .collect();
+    let total_bytes = verify_files.iter().map(|f| f.size).sum();
+    progress.bytes_total.store(total_bytes, Ordering::Relaxed);
+
+    thread::spawn(move || {
+        for file in verify_files {
+            if let Ok(mut current_file) = progress.current_file.lock() {
+                *current_file = Some(file.rel_path.to_string_lossy().to_string());
+            }
+            match verify_copied_file(&file.src_abs, &file.dst_abs) {
+                Ok(()) => {
+                    progress.bytes_done.fetch_add(file.size, Ordering::Relaxed);
+                    let _ = tx.send(VerifyMsg::FileDone {
+                        rel_path: file.rel_path.to_string_lossy().to_string(),
+                    });
+                }
+                Err(err) => {
+                    let _ = tx.send(VerifyMsg::FileFailed {
+                        rel_path: file.rel_path.to_string_lossy().to_string(),
+                        error: err.to_string(),
+                    });
+                    return;
+                }
+            }
+        }
+        if let Ok(mut current_file) = progress.current_file.lock() {
+            *current_file = None;
+        }
+        let _ = tx.send(VerifyMsg::Finished);
     })
 }
