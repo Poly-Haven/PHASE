@@ -242,18 +242,26 @@ fn load_svg_texture(
 ) -> egui::TextureHandle {
     let mut opt = usvg::Options::default();
     opt.fontdb_mut().load_system_fonts();
+    // Resolve `fill="currentColor"` to white so egui's `tint()` can multiply
+    // it down to whatever colour the row needs at draw time.
+    opt.style_sheet = Some("svg { color: #ffffff; }".to_string());
 
     let tree = usvg::Tree::from_data(bytes, &opt).expect(debug_name);
     let size = tree.size().to_int_size();
-    let mut pixmap = tiny_skia::Pixmap::new(size.width(), size.height())
-        .expect(debug_name);
-    resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
+    // Render at 4x for crisp shrunken icons (the button is ~18px but the
+    // source SVG may be 16px or 24px; oversampling avoids aliasing).
+    let scale = 4u32;
+    let w = size.width() * scale;
+    let h = size.height() * scale;
+    let mut pixmap = tiny_skia::Pixmap::new(w, h).expect(debug_name);
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale as f32, scale as f32),
+        &mut pixmap.as_mut(),
+    );
     ctx.load_texture(
         texture_name,
-        egui::ColorImage::from_rgba_unmultiplied(
-            [size.width() as usize, size.height() as usize],
-            pixmap.data(),
-        ),
+        egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], pixmap.data()),
         egui::TextureOptions::LINEAR,
     )
 }
