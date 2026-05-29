@@ -20,32 +20,45 @@ pub struct RowMsg {
 }
 
 pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
-    let t = state.current_type;
-    match state.assets_by_type.get(&t) {
-        None | Some(AssetListState::Loading) => {
-            ui.label("Loading…");
-            return;
+    let filter = state.author_filter.clone();
+    let selected_types = state.selected_types.clone();
+    let mut rows = Vec::new();
+    let mut has_loaded_list = false;
+    let mut loading_count = 0;
+    let mut errors = Vec::new();
+
+    for t in selected_types {
+        match state.assets_by_type.get(&t) {
+            None | Some(AssetListState::Loading) => {
+                loading_count += 1;
+            }
+            Some(AssetListState::Error(msg)) => {
+                errors.push(format!("{}: {msg}", t.label()));
+            }
+            Some(AssetListState::Loaded(list)) => {
+                has_loaded_list = true;
+                let prod_root = state.prod_root_for(t);
+                rows.extend(
+                    list.iter()
+                        .filter(|a| author_matches_filter(&a.author, &filter))
+                        .map(|a| RowView::from_asset(t, a, &prod_root)),
+                );
+            }
         }
-        Some(AssetListState::Error(msg)) => {
-            ui.colored_label(colors::ERROR_BANNER, msg.clone());
-            return;
-        }
-        Some(AssetListState::Loaded(_)) => {}
     }
 
-    let prod_root = state.prod_root_for(t);
-    let filter = state.author_filter.clone();
-    let mut rows: Vec<RowView> = match state.assets_by_type.get(&t) {
-        Some(AssetListState::Loaded(list)) => list
-            .iter()
-            .filter(|a| author_matches_filter(&a.author, &filter))
-            .map(|a| RowView::from_asset(a, &prod_root))
-            .collect(),
-        _ => Vec::new(),
-    };
+    if !errors.is_empty() {
+        ui.colored_label(colors::ERROR_BANNER, errors.join(" · "));
+    }
+    if !has_loaded_list && loading_count > 0 {
+        ui.label("Loading…");
+        return;
+    }
+
     rows.sort_by(|a, b| {
         b.exists_on_prod
             .cmp(&a.exists_on_prod)
+            .then_with(|| a.asset_type.order().cmp(&b.asset_type.order()))
             .then_with(|| a.slug.to_lowercase().cmp(&b.slug.to_lowercase()))
     });
 
@@ -54,7 +67,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             for row in rows {
                 let key = RowKey {
-                    asset_type: t,
+                    asset_type: row.asset_type,
                     slug: row.slug.clone(),
                 };
                 draw_row(state, ui, &key, &row);
@@ -63,6 +76,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
 }
 
 struct RowView {
+    asset_type: super::AssetType,
     slug: String,
     author: String,
     url: String,
@@ -71,7 +85,7 @@ struct RowView {
 }
 
 impl RowView {
-    fn from_asset(a: &Asset, prod_root: &std::path::Path) -> Self {
+    fn from_asset(asset_type: super::AssetType, a: &Asset, prod_root: &std::path::Path) -> Self {
         let exists_on_prod = prod_root.join(&a.slug).is_dir();
         let mut messages = Vec::new();
         if !exists_on_prod {
@@ -81,6 +95,7 @@ impl RowView {
             });
         }
         Self {
+            asset_type,
             slug: a.slug.clone(),
             author: a.author.clone(),
             url: a.url.clone(),
