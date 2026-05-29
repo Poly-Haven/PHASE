@@ -16,7 +16,7 @@ pub const PILL_OPTION_BG: Color32 = Color32::from_rgba_premultiplied(26, 26, 26,
 pub const PILL_OPTION_BG_HOVER: Color32 = Color32::from_rgba_premultiplied(36, 36, 36, 36);
 
 // ── Row chrome ────────────────────────────────────────────────────────────────
-pub const ROW_BACKGROUND: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 128);
+pub const ROW_BACKGROUND: Color32 = Color32::from_black_alpha(60);
 /// Progress bar fill while a copy job is active.
 pub const PROGRESS_BAR: Color32 = Color32::from_rgb(50, 110, 200);
 
@@ -54,10 +54,8 @@ mod tests {
     }
 
     #[test]
-    fn row_background_is_half_transparent_black() {
-        assert_eq!(
-            super::ROW_BACKGROUND,
-            egui::Color32::from_rgba_premultiplied(0, 0, 0, 128)
-        );
+    fn row_background_is_black_tint() {
+        // 10% black: from_black_alpha(26) = (0, 0, 0, 26) — valid premultiplied.
+        assert_eq!(super::ROW_BACKGROUND, egui::Color32::from_black_alpha(26));
     }
 }
