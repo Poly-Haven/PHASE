@@ -55,7 +55,6 @@ mod tests {
 
     #[test]
     fn row_background_is_black_tint() {
-        // 10% black: from_black_alpha(26) = (0, 0, 0, 26) — valid premultiplied.
-        assert_eq!(super::ROW_BACKGROUND, egui::Color32::from_black_alpha(26));
+        assert_eq!(super::ROW_BACKGROUND, egui::Color32::from_black_alpha(60));
     }
 }
