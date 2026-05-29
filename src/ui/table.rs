@@ -105,10 +105,14 @@ fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
     }
 
     let enabled = row.exists_on_prod;
-    if ui.add_enabled(enabled, egui::Button::new("↑")).on_hover_text("Push to Prod").clicked() {
+    let push_tex = super::push_icon_texture(ui.ctx());
+    let push_btn = egui::ImageButton::new(egui::load::SizedTexture::new(push_tex.id(), egui::vec2(18.0, 18.0)));
+    if ui.add_enabled(enabled, push_btn).on_hover_text("Push to Prod").clicked() {
         super::start_job(state, key, Direction::Push);
     }
-    if ui.add_enabled(enabled, egui::Button::new("↓")).on_hover_text("Pull from Prod").clicked() {
+    let pull_tex = super::pull_icon_texture(ui.ctx());
+    let pull_btn = egui::ImageButton::new(egui::load::SizedTexture::new(pull_tex.id(), egui::vec2(18.0, 18.0)));
+    if ui.add_enabled(enabled, pull_btn).on_hover_text("Pull from Prod").clicked() {
         super::start_job(state, key, Direction::Pull);
     }
 }
