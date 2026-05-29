@@ -21,6 +21,17 @@ pub fn draw_button(ui: &mut egui::Ui) {
         .request_repaint_after(std::time::Duration::from_millis(16));
 }
 
+pub fn draw_image_at(ui: &mut egui::Ui, rect: egui::Rect, tint: egui::Color32) {
+    let texture = super::loading_texture(ui.ctx());
+    let angle = ui.input(|i| rotation_angle(i.time));
+    egui::Image::new(egui::load::SizedTexture::new(texture.id(), rect.size()))
+        .tint(tint)
+        .rotate(angle, egui::Vec2::splat(0.5))
+        .paint_at(ui, rect);
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(16));
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

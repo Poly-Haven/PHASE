@@ -1,4 +1,5 @@
 use super::{AppState, AssetListState, AssetType};
+use crate::notion::StatusGroup;
 
 pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
     ui.spacing_mut().interact_size.y = ui.spacing().interact_size.y.max(30.0);
@@ -25,6 +26,30 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
             state.config.last_tab = state.current_type.label().to_string();
             state.config.last_asset_types = super::asset_types::labels(&state.selected_types);
             let _ = crate::config::save(&state.config);
+        }
+
+        ui.separator();
+
+        let status_options: Vec<_> = StatusGroup::all()
+            .iter()
+            .map(|g| super::group_selector::OptionItem {
+                value: *g,
+                label: g.label(),
+                selected_bg: Some(super::status_groups::selected_color(*g)),
+            })
+            .collect();
+        let response = super::group_selector::draw(
+            ui,
+            "status_group_selector",
+            &status_options,
+            &state.selected_status_groups,
+        );
+        if let Some(clicked) = response.clicked {
+            state.selected_status_groups = super::status_groups::select(
+                state.selected_status_groups.clone(),
+                clicked,
+                response.additive,
+            );
         }
 
         ui.separator();
@@ -77,7 +102,7 @@ fn current_authors(state: &AppState) -> Vec<String> {
     let mut authors = Vec::new();
     for t in &state.selected_types {
         if let Some(AssetListState::Loaded(list)) = state.assets_by_type.get(t) {
-            authors.extend(list.iter().map(|a| a.author.as_str()));
+            authors.extend(list.assets.iter().map(|a| a.author.as_str()));
         }
     }
     author_filter_options_with_current(authors, &state.author_filter)
