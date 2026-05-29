@@ -81,9 +81,22 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
 }
 
 fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
-    let tex = super::notion_logo_texture(ui.ctx());
-    let btn = egui::ImageButton::new(egui::load::SizedTexture::new(tex.id(), egui::vec2(18.0, 18.0)));
-    if ui.add(btn).on_hover_text("Open in Notion").clicked() {
+    let text_color = if row.exists_on_prod {
+        ui.visuals().text_color()
+    } else {
+        egui::Color32::from_gray(110)
+    };
+    let icon_size = egui::vec2(18.0, 18.0);
+
+    let icon_button = |ui: &mut egui::Ui, tex: &egui::TextureHandle, enabled: bool, tooltip: &str| -> egui::Response {
+        let btn = egui::ImageButton::new(egui::load::SizedTexture::new(tex.id(), icon_size))
+            .frame(false)
+            .tint(text_color);
+        ui.add_enabled(enabled, btn).on_hover_text(tooltip)
+    };
+
+    let notion_tex = super::notion_logo_texture(ui.ctx());
+    if icon_button(ui, &notion_tex, true, "Open in Notion").clicked() {
         let _ = open::that(&row.url);
     }
 
@@ -106,13 +119,11 @@ fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
 
     let enabled = row.exists_on_prod;
     let push_tex = super::push_icon_texture(ui.ctx());
-    let push_btn = egui::ImageButton::new(egui::load::SizedTexture::new(push_tex.id(), egui::vec2(18.0, 18.0)));
-    if ui.add_enabled(enabled, push_btn).on_hover_text("Push to Prod").clicked() {
+    if icon_button(ui, &push_tex, enabled, "Push to Prod").clicked() {
         super::start_job(state, key, Direction::Push);
     }
     let pull_tex = super::pull_icon_texture(ui.ctx());
-    let pull_btn = egui::ImageButton::new(egui::load::SizedTexture::new(pull_tex.id(), egui::vec2(18.0, 18.0)));
-    if ui.add_enabled(enabled, pull_btn).on_hover_text("Pull from Prod").clicked() {
+    if icon_button(ui, &pull_tex, enabled, "Pull from Prod").clicked() {
         super::start_job(state, key, Direction::Pull);
     }
 }
