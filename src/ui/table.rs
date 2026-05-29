@@ -82,15 +82,23 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     }
 
     let prod_folder = state.prod_root_for(key.asset_type).join(&key.slug);
+    let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
 
     ui.allocate_ui_at_rect(row_rect, |ui| {
         ui.horizontal_centered(|ui| {
             ui.add_space(8.0);
             let text_color = if row.exists_on_prod { colors::SLUG_ACTIVE } else { colors::SLUG_MISSING };
 
-            // Slug — clickable if prod folder exists, opens it in Explorer.
+            // Slug — pre-layout to get same-frame hover detection.
+            let font_id = egui::TextStyle::Body.resolve(ui.style());
+            let galley = ui.fonts(|f| f.layout_no_wrap(row.slug.clone(), font_id, egui::Color32::WHITE));
+            let slug_size = galley.rect.size();
+            let slug_start = ui.cursor().min;
+            let slug_rect = egui::Rect::from_min_size(slug_start, slug_size);
+            let is_slug_hovered = row.exists_on_prod && ui.rect_contains_pointer(slug_rect);
+            let slug_color = if is_slug_hovered { colors::HOVER } else { text_color };
             let slug_label = egui::Label::new(
-                egui::RichText::new(&row.slug).color(text_color)
+                egui::RichText::new(&row.slug).color(slug_color)
             ).sense(egui::Sense::click());
             let slug_resp = ui.add(slug_label);
             if row.exists_on_prod {
@@ -102,11 +110,15 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
             }
 
             // Notion button — sits immediately to the right of the slug.
+            let notion_size = egui::vec2(14.0, 14.0);
             let notion_tex = super::notion_logo_texture(ui.ctx());
-            let notion_btn = egui::ImageButton::new(
-                egui::load::SizedTexture::new(notion_tex.id(), egui::vec2(14.0, 14.0))
-            ).frame(false).tint(text_color.linear_multiply(0.6));
-            if ui.add(notion_btn)
+            let (notion_rect, notion_resp) = ui.allocate_exact_size(notion_size, egui::Sense::click());
+            if ui.is_rect_visible(notion_rect) {
+                let base_tint = text_color.linear_multiply(0.6);
+                let tint = if notion_resp.hovered() { colors::HOVER } else { base_tint };
+                ui.painter().image(notion_tex.id(), notion_rect, uv_full, tint);
+            }
+            if notion_resp
                 .on_hover_text("Open in Notion")
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
@@ -145,15 +157,18 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
 fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
     let text_color = if row.exists_on_prod { colors::SLUG_ACTIVE } else { colors::SLUG_MISSING };
     let icon_size = egui::vec2(18.0, 18.0);
+    let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
 
+    // Allocate space first so we know the rect, then paint with same-frame hover tint.
     let icon_button = |ui: &mut egui::Ui, tex: &egui::TextureHandle, enabled: bool, tooltip: &str| -> egui::Response {
-        let btn = egui::ImageButton::new(egui::load::SizedTexture::new(tex.id(), icon_size))
-            .frame(false)
-            .tint(text_color);
+        let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
+        let (rect, resp) = ui.allocate_exact_size(icon_size, sense);
+        if ui.is_rect_visible(rect) {
+            let tint = if resp.hovered() && enabled { colors::HOVER } else { text_color };
+            ui.painter().image(tex.id(), rect, uv_full, tint);
+        }
         let cursor = if enabled { egui::CursorIcon::PointingHand } else { egui::CursorIcon::NotAllowed };
-        ui.add_enabled(enabled, btn)
-            .on_hover_text(tooltip)
-            .on_hover_cursor(cursor)
+        resp.on_hover_text(tooltip).on_hover_cursor(cursor)
     };
 
     if state.jobs.contains_key(key) {
@@ -177,6 +192,8 @@ fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
         return;
     }
 
+    // Padding on the far right of the action strip (RTL: first space = rightmost).
+    ui.add_space(8.0);
     let enabled = row.exists_on_prod;
     let push_tex = super::push_icon_texture(ui.ctx());
     if icon_button(ui, &push_tex, enabled, "Push to Prod").clicked() {

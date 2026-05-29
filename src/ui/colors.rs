@@ -1,5 +1,9 @@
 use egui::Color32;
 
+// ── Interaction ───────────────────────────────────────────────────────────────
+/// Tint / text color applied to any clickable element on hover.
+pub const HOVER:         Color32 = Color32::from_rgb(190, 111, 255);
+
 // ── Row text ─────────────────────────────────────────────────────────────────
 /// Slug / author text for rows whose Prod folder is present.
 pub const SLUG_ACTIVE:   Color32 = Color32::from_rgb(238, 238, 238);
