@@ -87,7 +87,7 @@ pub fn draw<T: Copy + PartialEq>(
             fill,
         );
         let label_color = if response.hovered() {
-            colors::HOVER
+            egui::Color32::WHITE
         } else if is_selected {
             colors::TEXT_PRIMARY
         } else {
@@ -100,6 +100,15 @@ pub fn draw<T: Copy + PartialEq>(
             font_id.clone(),
             label_color,
         );
+        if is_selected {
+            ui.painter().text(
+                option_rect.center() + egui::vec2(0.45, 0.0),
+                egui::Align2::CENTER_CENTER,
+                option.label,
+                font_id.clone(),
+                label_color,
+            );
+        }
         if response.clicked() {
             clicked = Some(option.value);
         }
