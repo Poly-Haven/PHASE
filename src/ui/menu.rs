@@ -92,6 +92,8 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                     }
                 }
             }
+            ui.separator();
+            ui.label(env!("CARGO_PKG_VERSION"));
         });
     });
 }
