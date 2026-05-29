@@ -224,17 +224,29 @@ fn extract_status_options(props: &serde_json::Value) -> Vec<StatusOption> {
         return Vec::new();
     };
 
-    let groups_by_id: HashMap<String, StatusGroup> = status
+    let mut groups_by_id: HashMap<String, StatusGroup> = HashMap::new();
+    let mut groups_by_option_id: HashMap<String, StatusGroup> = HashMap::new();
+    for group in status
         .get("groups")
         .and_then(|g| g.as_array())
         .into_iter()
         .flatten()
-        .filter_map(|group| {
-            let id = group.get("id")?.as_str()?.to_string();
-            let name = group.get("name")?.as_str()?;
-            Some((id, StatusGroup::from_notion_group(name)?))
-        })
-        .collect();
+    {
+        let Some(group_name) = group.get("name").and_then(|name| name.as_str()) else {
+            continue;
+        };
+        let Some(status_group) = StatusGroup::from_notion_group(group_name) else {
+            continue;
+        };
+        if let Some(group_id) = group.get("id").and_then(|id| id.as_str()) {
+            groups_by_id.insert(group_id.to_string(), status_group);
+        }
+        if let Some(option_ids) = group.get("option_ids").and_then(|ids| ids.as_array()) {
+            for option_id in option_ids.iter().filter_map(|id| id.as_str()) {
+                groups_by_option_id.insert(option_id.to_string(), status_group);
+            }
+        }
+    }
 
     let mut options: Vec<_> = status
         .get("options")
@@ -253,6 +265,7 @@ fn extract_status_options(props: &serde_json::Value) -> Vec<StatusOption> {
                 .get("group_id")
                 .and_then(|g| g.as_str())
                 .and_then(|id| groups_by_id.get(id))
+                .or_else(|| groups_by_option_id.get(&id))
                 .copied()?;
             Some(StatusOption {
                 id,
@@ -410,6 +423,38 @@ mod tests {
                     color: "green".into(),
                     group: StatusGroup::Complete,
                 },
+            ]
+        );
+    }
+
+    #[test]
+    fn extracts_status_option_groups_from_group_option_ids() {
+        let props = serde_json::json!({
+            "Status": {
+                "type": "status",
+                "status": {
+                    "options": [
+                        { "id": "todo", "name": "To do", "color": "default" },
+                        { "id": "review", "name": "Creative review", "color": "blue" },
+                        { "id": "done", "name": "Done", "color": "green" }
+                    ],
+                    "groups": [
+                        { "id": "g1", "name": "To-do", "option_ids": ["todo"] },
+                        { "id": "g2", "name": "In progress", "option_ids": ["review"] },
+                        { "id": "g3", "name": "Complete", "option_ids": ["done"] }
+                    ]
+                }
+            }
+        });
+
+        let options = extract_status_options(&props);
+
+        assert_eq!(
+            options.iter().map(|o| (&o.id, o.group)).collect::<Vec<_>>(),
+            vec![
+                (&"todo".to_string(), StatusGroup::ToDo),
+                (&"review".to_string(), StatusGroup::InProgress),
+                (&"done".to_string(), StatusGroup::Complete),
             ]
         );
     }
