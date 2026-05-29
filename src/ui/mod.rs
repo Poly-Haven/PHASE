@@ -3,6 +3,7 @@ mod authors;
 pub mod colors;
 mod dialogs;
 mod group_selector;
+mod loading_indicator;
 mod menu;
 mod table;
 
@@ -436,6 +437,17 @@ pub fn question_icon_texture(ctx: &egui::Context) -> egui::TextureHandle {
     static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
     TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "icon_question", "question.svg"))
         .clone()
+}
+
+pub fn loading_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/loading.png");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| {
+        let image = egui_extras::image::load_image_bytes(BYTES).expect("loading.png");
+        ctx.load_texture("loading_spinner", image, egui::TextureOptions::LINEAR)
+    })
+    .clone()
 }
 
 fn load_svg_texture(
