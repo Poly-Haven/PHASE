@@ -341,7 +341,11 @@ pub fn execute_after_conflict(state: &mut AppState, choice: ConflictChoice) {
 }
 
 pub fn draw(state: &mut AppState, ctx: &egui::Context) {
-    egui::TopBottomPanel::top("menu").show(ctx, |ui| menu::draw(state, ui));
+    egui::TopBottomPanel::top("menu").show(ctx, |ui| {
+        egui::Frame::none()
+            .inner_margin(egui::Margin::symmetric(0.0, 4.0))
+            .show(ui, |ui| menu::draw(state, ui));
+    });
     if let Some(err) = state.error_banner.clone() {
         egui::TopBottomPanel::top("banner").show(ctx, |ui| {
             ui.horizontal(|ui| {

@@ -20,7 +20,7 @@ pub fn draw<T: Copy + PartialEq>(
     let text_style = egui::TextStyle::Button;
     let font_id = text_style.resolve(ui.style());
     let text_color = ui.visuals().text_color();
-    let padding = egui::vec2(12.0, 5.0);
+    let padding = egui::vec2(8.4, 3.5);
     let height = ui.spacing().interact_size.y.max(28.0);
     let separator_width = 1.0;
     let rounding = height / 2.0;
@@ -56,36 +56,37 @@ pub fn draw<T: Copy + PartialEq>(
             egui::Sense::click(),
         );
         let is_selected = selected.contains(&option.value);
-        let fill = if is_selected {
-            visuals.selection.bg_fill
-        } else if response.hovered() {
-            visuals.widgets.hovered.bg_fill
+        let fill = if response.hovered() {
+            colors::PILL_OPTION_BG_HOVER
         } else {
-            egui::Color32::TRANSPARENT
+            colors::PILL_OPTION_BG
         };
-        if fill != egui::Color32::TRANSPARENT {
-            let option_rounding = if options.len() == 1 {
-                egui::Rounding::same(rounding)
-            } else if index == 0 {
-                egui::Rounding {
-                    nw: rounding,
-                    sw: rounding,
-                    ..Default::default()
-                }
-            } else if index == options.len() - 1 {
-                egui::Rounding {
-                    ne: rounding,
-                    se: rounding,
-                    ..Default::default()
-                }
-            } else {
-                egui::Rounding::ZERO
-            };
-            ui.painter()
-                .rect_filled(option_rect.shrink(1.0), option_rounding, fill);
-        }
+        let option_rounding = if options.len() == 1 {
+            egui::Rounding::same(rounding)
+        } else if index == 0 {
+            egui::Rounding {
+                nw: rounding,
+                sw: rounding,
+                ..Default::default()
+            }
+        } else if index == options.len() - 1 {
+            egui::Rounding {
+                ne: rounding,
+                se: rounding,
+                ..Default::default()
+            }
+        } else {
+            egui::Rounding::ZERO
+        };
+        ui.painter().rect_filled(
+            option_rect.shrink2(egui::vec2(0.0, 1.0)),
+            option_rounding,
+            fill,
+        );
         let label_color = if response.hovered() {
             colors::HOVER
+        } else if is_selected {
+            colors::TEXT_PRIMARY
         } else {
             text_color
         };
@@ -104,8 +105,8 @@ pub fn draw<T: Copy + PartialEq>(
         x += option_width;
         if index + 1 < options.len() {
             let separator_rect = egui::Rect::from_min_size(
-                egui::pos2(x, rect.top() + 6.0),
-                egui::vec2(separator_width, height - 12.0),
+                egui::pos2(x, rect.top() + 1.0),
+                egui::vec2(separator_width, height - 2.0),
             );
             ui.painter().rect_filled(
                 separator_rect,

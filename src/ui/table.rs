@@ -126,9 +126,9 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
         ui.horizontal_centered(|ui| {
             ui.add_space(8.0);
             let text_color = if row.exists_on_prod {
-                colors::SLUG_ACTIVE
+                colors::TEXT_PRIMARY
             } else {
-                colors::SLUG_MISSING
+                colors::TEXT_DISABLED
             };
 
             // Slug — pre-layout to get same-frame hover detection.
@@ -217,9 +217,9 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
 
 fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
     let text_color = if row.exists_on_prod {
-        colors::SLUG_ACTIVE
+        colors::TEXT_PRIMARY
     } else {
-        colors::SLUG_MISSING
+        colors::TEXT_DISABLED
     };
     let icon_size = egui::vec2(18.0, 18.0);
     let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
