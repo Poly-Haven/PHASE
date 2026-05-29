@@ -1,12 +1,12 @@
 use anyhow::{anyhow, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 pub const HDRIS_DB_ID:    &str = "21f373ac-61c1-80d0-8e55-cd46d121d1d5";
 pub const TEXTURES_DB_ID: &str = "215373ac-61c1-80dd-8a97-edb25bb6a5f8";
 const NOTION_VERSION: &str = "2022-06-28";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asset {
     pub slug:   String,
     pub author: String,

@@ -1,5 +1,6 @@
 mod config;
 mod copy;
+mod cache;
 mod notion;
 mod ui;
 
@@ -51,7 +52,9 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.state.pump();
         ui::draw(&mut self.state, ctx);
-        if !self.state.jobs.is_empty() || !self.state.notion_rx.is_empty() {
+        if !self.state.jobs.is_empty() || !self.state.notion_rx.is_empty()
+            || !self.state.pending_notion.is_empty()
+        {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
