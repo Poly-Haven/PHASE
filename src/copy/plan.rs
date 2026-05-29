@@ -24,7 +24,7 @@ pub struct PlannedFile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction { Pull, Push }
 
-const PULL_EXCLUDED_EXT: &[&str] = &["tif", "tiff", "nef"];
+const PULL_EXCLUDED_EXT: &[&str] = &["tif", "tiff", "nef", "cr2", "cr3", "arw", "rw2", "orf", "raf", "dng"];
 const MTIME_TOLERANCE_SECS: i64 = 2;
 
 pub fn is_excluded_for_pull(file_name: &str) -> bool {
