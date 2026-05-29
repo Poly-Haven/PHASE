@@ -14,6 +14,15 @@ fn init_logging() {
     }
 }
 
+fn load_app_icon() -> egui::IconData {
+    let bytes = include_bytes!("assets/app_logo.png");
+    let image = image::load_from_memory(bytes)
+        .expect("decode app_logo.png")
+        .to_rgba8();
+    let (width, height) = image.dimensions();
+    egui::IconData { rgba: image.into_raw(), width, height }
+}
+
 fn main() -> eframe::Result<()> {
     init_logging();
     log::info!("PHASE {} starting", env!("CARGO_PKG_VERSION"));
@@ -22,7 +31,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 700.0])
-            .with_min_inner_size([600.0, 400.0]),
+            .with_min_inner_size([600.0, 400.0])
+            .with_icon(load_app_icon()),
         ..Default::default()
     };
     eframe::run_native(
