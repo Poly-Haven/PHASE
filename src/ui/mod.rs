@@ -595,6 +595,68 @@ fn fmt_duration(duration: Duration) -> String {
     }
 }
 
+fn format_active_file_action(
+    key: &RowKey,
+    direction: Direction,
+    current_file: Option<&str>,
+) -> String {
+    let verb = match direction {
+        Direction::Pull => "Downloading",
+        Direction::Push => "Uploading",
+    };
+    let target = match current_file {
+        Some(file) if !file.is_empty() => {
+            format!("{}/{}/{}", key.asset_type.folder(), key.slug, file)
+        }
+        _ => format!("{}/{}", key.asset_type.folder(), key.slug),
+    };
+    let suffix = match direction {
+        Direction::Pull => "from Prod",
+        Direction::Push => "to Prod",
+    };
+    format!("{verb} {target} {suffix}")
+}
+
+fn active_file_action_status(state: &AppState) -> Option<String> {
+    state
+        .jobs
+        .iter()
+        .min_by(|(a, _), (b, _)| {
+            a.asset_type
+                .order()
+                .cmp(&b.asset_type.order())
+                .then_with(|| a.slug.cmp(&b.slug))
+        })
+        .map(|(key, job)| {
+            let current_file = job
+                .progress
+                .current_file
+                .lock()
+                .ok()
+                .and_then(|file| file.clone());
+            format_active_file_action(key, job.direction, current_file.as_deref())
+        })
+}
+
+fn draw_status_bar(state: &AppState, ctx: &egui::Context) {
+    egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+        egui::Frame::none()
+            .inner_margin(egui::Margin::symmetric(4.0, 2.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let status = active_file_action_status(state).unwrap_or_default();
+                    ui.label(egui::RichText::new(status).color(colors::TEXT_DISABLED));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(env!("CARGO_PKG_VERSION"))
+                                .color(colors::TEXT_DISABLED),
+                        );
+                    });
+                });
+            });
+    });
+}
+
 pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     let gained_focus = ctx.input(|i| state.focus_refresh.update(i.focused));
     if gained_focus {
@@ -633,6 +695,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     dialogs::token_prompt(state, ctx);
     dialogs::draw(state, ctx);
     draw_create_prod_folder_prompt(state, ctx);
+    draw_status_bar(state, ctx);
     let table_resp = egui::CentralPanel::default().show(ctx, |ui| table::draw(state, ui));
 
     // Track cursor movement inside the table panel for the 2s safety guard.
@@ -646,7 +709,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     });
 
     // Keep repainting while a pending update is waiting to be flushed.
-    if !state.pending_notion.is_empty() || !state.row_toasts.is_empty() {
+    if !state.pending_notion.is_empty() || !state.row_toasts.is_empty() || !state.jobs.is_empty() {
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }
 }
@@ -678,6 +741,8 @@ fn draw_create_prod_folder_prompt(state: &mut AppState, ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
+    use crate::copy::plan::Direction;
+
     #[test]
     fn prod_folder_structure_creates_expected_subfolders() {
         let temp = tempfile::tempdir().unwrap();
@@ -687,6 +752,23 @@ mod tests {
         assert!(temp.path().join("raw").is_dir());
         assert!(temp.path().join("staging").is_dir());
         assert!(temp.path().join("work").is_dir());
+    }
+
+    #[test]
+    fn active_file_action_status_includes_direction_asset_and_file() {
+        let key = super::RowKey {
+            asset_type: super::AssetType::Hdris,
+            slug: "foo".into(),
+        };
+
+        assert_eq!(
+            super::format_active_file_action(&key, Direction::Pull, Some("bar.xyz")),
+            "Downloading HDRIs/foo/bar.xyz from Prod"
+        );
+        assert_eq!(
+            super::format_active_file_action(&key, Direction::Push, Some("bar.xyz")),
+            "Uploading HDRIs/foo/bar.xyz to Prod"
+        );
     }
 }
 

@@ -1,7 +1,7 @@
 use log::{info, warn};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::copy::engine::{copy_one_file, CopyError};
@@ -16,33 +16,49 @@ pub enum JobMsg {
     Cancelled,
 }
 
-/// Shared, lock-free progress state the UI samples each frame.
+/// Shared progress state the UI samples each frame.
 #[derive(Default)]
 pub struct JobProgress {
-    pub bytes_done:  AtomicU64,
+    pub bytes_done: AtomicU64,
     pub bytes_total: AtomicU64,
-    pub cancel:      AtomicBool,
+    pub cancel: AtomicBool,
+    pub current_file: Mutex<Option<String>>,
 }
 
 impl JobProgress {
     pub fn fraction(&self) -> f32 {
         let t = self.bytes_total.load(Ordering::Relaxed);
-        if t == 0 { return 0.0; }
+        if t == 0 {
+            return 0.0;
+        }
         (self.bytes_done.load(Ordering::Relaxed) as f64 / t as f64) as f32
     }
 }
 
 /// Spawn a worker thread that copies all `New`/`Overwrite` files sequentially.
 pub fn spawn(plan: Plan, progress: Arc<JobProgress>, tx: Sender<JobMsg>) -> thread::JoinHandle<()> {
-    progress.bytes_total.store(plan.total_bytes_to_copy, Ordering::Relaxed);
-    info!("job start: {:?}, {} files, {} bytes",
-        plan.direction, plan.files.len(), plan.total_bytes_to_copy);
+    progress
+        .bytes_total
+        .store(plan.total_bytes_to_copy, Ordering::Relaxed);
+    info!(
+        "job start: {:?}, {} files, {} bytes",
+        plan.direction,
+        plan.files.len(),
+        plan.total_bytes_to_copy
+    );
     thread::spawn(move || {
-        for file in plan.files.iter().filter(|f| matches!(f.action, Action::New | Action::Overwrite)) {
+        for file in plan
+            .files
+            .iter()
+            .filter(|f| matches!(f.action, Action::New | Action::Overwrite))
+        {
             if progress.cancel.load(Ordering::Relaxed) {
                 info!("job cancelled");
                 let _ = tx.send(JobMsg::Cancelled);
                 return;
+            }
+            if let Ok(mut current_file) = progress.current_file.lock() {
+                *current_file = Some(file.rel_path.to_string_lossy().to_string());
             }
             let res = copy_one_file(
                 &file.src_abs,
