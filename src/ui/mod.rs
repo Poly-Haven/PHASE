@@ -213,15 +213,23 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
 
 pub fn notion_logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
     use std::sync::OnceLock;
-    static BYTES: &[u8] = include_bytes!("../assets/notion_logo.png");
+    static BYTES: &[u8] = include_bytes!("../assets/notion.svg");
     static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
     TEX.get_or_init(|| {
-        let image = image::load_from_memory(BYTES).expect("decode notion_logo.png").to_rgba8();
-        let size = [image.width() as usize, image.height() as usize];
-        let pixels = image.into_raw();
+        let mut opt = usvg::Options::default();
+        opt.fontdb_mut().load_system_fonts();
+
+        let tree = usvg::Tree::from_data(BYTES, &opt).expect("decode notion.svg");
+        let size = tree.size().to_int_size();
+        let mut pixmap = tiny_skia::Pixmap::new(size.width(), size.height())
+            .expect("allocate notion.svg pixmap");
+        resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
         ctx.load_texture(
             "notion_logo",
-            egui::ColorImage::from_rgba_unmultiplied(size, &pixels),
+            egui::ColorImage::from_rgba_unmultiplied(
+                [size.width() as usize, size.height() as usize],
+                pixmap.data(),
+            ),
             egui::TextureOptions::LINEAR,
         )
     }).clone()
