@@ -29,7 +29,7 @@ fn default_prod_root() -> PathBuf {
     PathBuf::from(r"P:\Assets")
 }
 fn default_local_root() -> PathBuf {
-    PathBuf::from(r"C:\PHASE\Assets")
+    PathBuf::from(r"C:\PHASE")
 }
 
 impl Default for Config {
