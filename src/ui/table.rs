@@ -359,7 +359,7 @@ fn status_pill_button(
     });
     let icon_size = egui::vec2(10.0, 10.0);
     let padding = egui::vec2(8.0, 3.0);
-    let height = 22.0;
+    let height = 18.0;
     let width = text_width + icon_size.x + padding.x * 3.0;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     let bg = notion_color(&status.color);
