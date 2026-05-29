@@ -17,6 +17,7 @@ pub enum MsgKind {
 pub struct RowMsg {
     pub kind: MsgKind,
     pub text: String,
+    pub link: Option<String>,
 }
 
 pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
@@ -44,7 +45,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                         .iter()
                         .filter(|a| author_matches_filter(&a.author, &filter))
                         .filter(|a| status_matches_filter(&a.status, &status_groups))
-                        .map(|a| RowView::from_asset(t, a, &prod_root)),
+                        .map(|a| RowView::from_asset(t, a, &prod_root, &state.published_assets)),
                 );
             }
         }
@@ -90,13 +91,33 @@ struct RowView {
 }
 
 impl RowView {
-    fn from_asset(asset_type: super::AssetType, a: &Asset, prod_root: &std::path::Path) -> Self {
+    fn from_asset(
+        asset_type: super::AssetType,
+        a: &Asset,
+        prod_root: &std::path::Path,
+        published_assets: &crate::polyhaven::PublishedAssets,
+    ) -> Self {
         let exists_on_prod = prod_root.join(&a.slug).is_dir();
         let mut messages = Vec::new();
-        if !exists_on_prod {
+        if let Some(text) = crate::slug::message(&a.slug) {
             messages.push(RowMsg {
                 kind: MsgKind::Error,
+                text,
+                link: None,
+            });
+        }
+        if !exists_on_prod {
+            messages.push(RowMsg {
+                kind: MsgKind::Warning,
                 text: "Prod folder missing".into(),
+                link: None,
+            });
+        }
+        if should_warn_published_slug(published_assets, &a.slug, &a.status) {
+            messages.push(RowMsg {
+                kind: MsgKind::Warning,
+                text: "Published asset with this slug found".into(),
+                link: Some(format!("https://polyhaven.com/a/{}", a.slug)),
             });
         }
         Self {
@@ -127,7 +148,14 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     }
 
     let prod_folder = state.prod_root_for(key.asset_type).join(&key.slug);
+    let local_folder = state.local_root_for(key.asset_type).join(&key.slug);
     let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    let row_response = ui.interact(
+        row_rect,
+        ui.id().with(("row-context", key.asset_type, &key.slug)),
+        egui::Sense::click(),
+    );
+    row_response.context_menu(|ui| draw_context_menu(ui, &local_folder, &prod_folder, &row.url));
 
     ui.allocate_ui_at_rect(row_rect, |ui| {
         ui.horizontal_centered(|ui| {
@@ -143,9 +171,9 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
             let galley =
                 ui.fonts(|f| f.layout_no_wrap(row.slug.clone(), font_id, egui::Color32::WHITE));
             let slug_size = galley.rect.size();
-            let slug_start = ui.cursor().min;
+            let slug_start = egui::pos2(ui.cursor().min.x, row_rect.center().y - slug_size.y / 2.0);
             let slug_rect = egui::Rect::from_min_size(slug_start, slug_size);
-            let is_slug_hovered = row.exists_on_prod && ui.rect_contains_pointer(slug_rect);
+            let is_slug_hovered = ui.rect_contains_pointer(slug_rect);
             let slug_color = if is_slug_hovered {
                 colors::HOVER
             } else {
@@ -154,14 +182,22 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
             let slug_label = egui::Label::new(egui::RichText::new(&row.slug).color(slug_color))
                 .sense(egui::Sense::click());
             let slug_resp = ui.add(slug_label);
-            if row.exists_on_prod {
-                slug_resp
-                    .on_hover_text("Open in Explorer")
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked()
-                    .then(|| {
-                        let _ = open::that(&prod_folder);
-                    });
+            let slug_resp = slug_resp
+                .on_hover_text(if row.exists_on_prod {
+                    "Open in Explorer"
+                } else {
+                    "Create Prod folder"
+                })
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if slug_resp.clicked() {
+                if row.exists_on_prod {
+                    let _ = open::that(&prod_folder);
+                } else if crate::slug::is_valid(&row.slug) {
+                    state.pending_prod_folder_create = Some(key.clone());
+                } else {
+                    state.error_banner =
+                        Some("Cannot create Prod folder: slug has invalid characters".into());
+                }
             }
 
             // Notion button — sits immediately to the right of the slug.
@@ -193,6 +229,10 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
             draw_status_pill(state, ui, key, row);
 
             // Row messages (icons + text, left-to-right after author).
+            if let Some(toast) = state.row_toasts.get(key) {
+                draw_toast(ui, toast);
+            }
+
             for msg in &row.messages {
                 ui.add_space(8.0);
                 let (tex, color) = match msg.kind {
@@ -210,8 +250,27 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                     ))
                     .tint(color),
                 );
-                ui.add_space(3.0);
+                ui.add_space(2.0);
                 ui.colored_label(color, &msg.text);
+                if let Some(link) = &msg.link {
+                    ui.add_space(2.0);
+                    let tex = super::external_link_texture(ui.ctx());
+                    let resp = ui.add(
+                        egui::Image::new(egui::load::SizedTexture::new(
+                            tex.id(),
+                            egui::vec2(12.0, 12.0),
+                        ))
+                        .tint(color)
+                        .sense(egui::Sense::click()),
+                    );
+                    if resp
+                        .on_hover_text("Open on polyhaven.com")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        let _ = open::that(link);
+                    }
+                }
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -297,6 +356,14 @@ fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
 
     // Padding on the far right of the action strip (RTL: first space = rightmost).
     ui.add_space(8.0);
+    ui.menu_button("v", |ui| {
+        let local_folder = state.local_root_for(key.asset_type).join(&key.slug);
+        let prod_folder = state.prod_root_for(key.asset_type).join(&key.slug);
+        draw_context_menu(ui, &local_folder, &prod_folder, &row.url);
+    })
+    .response
+    .on_hover_cursor(egui::CursorIcon::PointingHand);
+    ui.add_space(6.0);
     let enabled = row.exists_on_prod;
     let push_tex = super::push_icon_texture(ui.ctx());
     if icon_button(ui, &push_tex, enabled, "Push to Prod").clicked() {
@@ -323,8 +390,9 @@ fn draw_status_pill(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
         ui.memory_mut(|mem| mem.toggle_popup(popup_id));
     }
 
+    let popup_width = status_dropdown_width(ui, &options);
     egui::popup::popup_below_widget(ui, popup_id, &response, |ui| {
-        ui.set_min_width(220.0);
+        ui.set_min_width(popup_width);
         for group in StatusGroup::all() {
             let group_options: Vec<_> = options
                 .iter()
@@ -335,14 +403,103 @@ fn draw_status_pill(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
             }
             ui.strong(format!("{}:", group.label()));
             for option in group_options {
-                if ui.button(&option.name).clicked() {
+                let resp = colored_status_option(
+                    ui,
+                    &option.name,
+                    notion_color(&option.color),
+                    popup_width,
+                );
+                if resp.clicked() {
                     super::start_status_update(state, key, &row.page_id, option.clone());
                     ui.close_menu();
                 }
             }
+
             ui.add_space(4.0);
         }
     });
+}
+
+fn draw_context_menu(
+    ui: &mut egui::Ui,
+    local_folder: &std::path::Path,
+    prod_folder: &std::path::Path,
+    notion_url: &str,
+) {
+    if ui.button("Open local folder").clicked() {
+        let _ = open::that(local_folder);
+        ui.close_menu();
+    }
+    if ui.button("Open prod folder").clicked() {
+        let _ = open::that(prod_folder);
+        ui.close_menu();
+    }
+    if ui.button("Open in Notion").clicked() {
+        let _ = open::that(notion_url);
+        ui.close_menu();
+    }
+}
+
+fn draw_toast(ui: &mut egui::Ui, toast: &super::RowToast) {
+    let age = toast.created_at.elapsed().as_secs_f32();
+    let alpha = if age > 3.0 {
+        (1.0 - (age - 3.0) / 2.0).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let color = colors::MSG_QUESTION.linear_multiply(alpha);
+    ui.add_space(8.0);
+    let tex = super::check_texture(ui.ctx());
+    ui.add(
+        egui::Image::new(egui::load::SizedTexture::new(
+            tex.id(),
+            egui::vec2(14.0, 14.0),
+        ))
+        .tint(color),
+    );
+    ui.add_space(2.0);
+    ui.colored_label(color, &toast.text);
+}
+
+fn status_dropdown_width(ui: &egui::Ui, options: &[StatusOption]) -> f32 {
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let max_label = options
+        .iter()
+        .map(|option| {
+            ui.fonts(|fonts| {
+                fonts
+                    .layout_no_wrap(option.name.clone(), font_id.clone(), egui::Color32::WHITE)
+                    .rect
+                    .width()
+            })
+        })
+        .fold(0.0, f32::max);
+    (max_label + 24.0).max(120.0)
+}
+
+fn colored_status_option(
+    ui: &mut egui::Ui,
+    label: &str,
+    bg: egui::Color32,
+    width: f32,
+) -> egui::Response {
+    let height = 20.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    let fill = if response.hovered() {
+        bg.linear_multiply(1.25)
+    } else {
+        bg
+    };
+    ui.painter()
+        .rect_filled(rect.shrink2(egui::vec2(1.0, 1.0)), 4.0, fill);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::TextStyle::Button.resolve(ui.style()),
+        egui::Color32::WHITE,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn status_pill_button(
@@ -428,6 +585,18 @@ fn status_matches_filter(status: &Option<AssetStatus>, selected: &[StatusGroup])
         .unwrap_or(false)
 }
 
+fn should_warn_published_slug(
+    published_assets: &crate::polyhaven::PublishedAssets,
+    slug: &str,
+    status: &Option<AssetStatus>,
+) -> bool {
+    published_assets.slugs.contains(slug)
+        && status
+            .as_ref()
+            .map(|status| status.group != StatusGroup::Complete)
+            .unwrap_or(true)
+}
+
 fn notion_color(color: &str) -> egui::Color32 {
     match color {
         "red" => egui::Color32::from_rgb(180, 68, 68),
@@ -446,6 +615,7 @@ fn notion_color(color: &str) -> egui::Color32 {
 #[cfg(test)]
 mod tests {
     use crate::notion::{AssetStatus, StatusGroup};
+    use std::collections::HashSet;
 
     #[test]
     fn author_filter_matches_any_person_in_multi_author_combination() {
@@ -474,6 +644,41 @@ mod tests {
         assert!(!super::status_matches_filter(
             &None,
             &[StatusGroup::InProgress]
+        ));
+    }
+
+    #[test]
+    fn published_slug_warning_only_shows_for_non_complete_statuses() {
+        let published = crate::polyhaven::PublishedAssets {
+            slugs: HashSet::from(["known_slug".to_string()]),
+        };
+        let in_progress = Some(AssetStatus {
+            id: "a".into(),
+            name: "Creative review".into(),
+            color: "blue".into(),
+            group: StatusGroup::InProgress,
+        });
+        let complete = Some(AssetStatus {
+            id: "b".into(),
+            name: "Done".into(),
+            color: "green".into(),
+            group: StatusGroup::Complete,
+        });
+
+        assert!(super::should_warn_published_slug(
+            &published,
+            "known_slug",
+            &in_progress
+        ));
+        assert!(!super::should_warn_published_slug(
+            &published,
+            "known_slug",
+            &complete
+        ));
+        assert!(!super::should_warn_published_slug(
+            &published,
+            "other_slug",
+            &in_progress
         ));
     }
 }

@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::copy::job::{JobMsg, JobProgress};
@@ -88,8 +88,14 @@ pub struct RowJob {
     pub direction: Direction,
     pub progress: Arc<JobProgress>,
     pub rx: Receiver<JobMsg>,
+    pub started_at: Instant,
     #[allow(dead_code)]
     pub message: Arc<Mutex<String>>,
+}
+
+pub struct RowToast {
+    pub text: String,
+    pub created_at: Instant,
 }
 
 pub struct PendingConflict {
@@ -124,6 +130,11 @@ pub struct AppState {
     pub status_updates: HashMap<RowKey, StatusUpdateJob>,
     pub notion_rx: HashMap<AssetType, Receiver<Result<AssetList, String>>>,
     pub pending_conflict: Option<PendingConflict>,
+    pub pending_prod_folder_create: Option<RowKey>,
+    pub row_toasts: HashMap<RowKey, RowToast>,
+    pub published_assets: crate::polyhaven::PublishedAssets,
+    pub published_rx: Option<Receiver<Result<crate::polyhaven::PublishedAssets, String>>>,
+    pub refreshing_published: bool,
     pub token_prompt_open: bool,
     pub token_input: String,
     /// Asset types whose background fetch is currently in flight.
@@ -165,6 +176,12 @@ impl AppState {
             status_updates: HashMap::new(),
             notion_rx: HashMap::new(),
             pending_conflict: None,
+            pending_prod_folder_create: None,
+            row_toasts: HashMap::new(),
+            published_assets: crate::cache::load(crate::polyhaven::cache_name())
+                .unwrap_or_default(),
+            published_rx: None,
+            refreshing_published: false,
             token_prompt_open: false,
             token_input: String::new(),
             refreshing: HashSet::new(),
@@ -211,12 +228,26 @@ impl AppState {
     }
 
     pub fn refresh_all_asset_types(&mut self) {
+        self.refresh_published_assets();
         if self.config.notion_token.is_empty() {
             return;
         }
         for t in AssetType::all() {
             self.refresh(*t);
         }
+    }
+
+    pub fn refresh_published_assets(&mut self) {
+        if self.refreshing_published {
+            return;
+        }
+        self.refreshing_published = true;
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            let res = crate::polyhaven::fetch_published_assets().map_err(|e| e.to_string());
+            let _ = tx.send(res);
+        });
+        self.published_rx = Some(rx);
     }
 
     /// Drain Notion + job channels each frame.
@@ -256,6 +287,20 @@ impl AppState {
                 let _ = crate::cache::save(t.cache_name(), &list);
                 self.assets_by_type.insert(t, AssetListState::Loaded(list));
             }
+
+            if let Some(res) = self.published_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                self.published_rx = None;
+                self.refreshing_published = false;
+                match res {
+                    Ok(assets) => {
+                        let _ = crate::cache::save(crate::polyhaven::cache_name(), &assets);
+                        self.published_assets = assets;
+                    }
+                    Err(msg) => {
+                        self.error_banner = Some(format!("Published asset refresh failed: {msg}"));
+                    }
+                }
+            }
         }
 
         let status_keys: Vec<RowKey> = self.status_updates.keys().cloned().collect();
@@ -288,6 +333,7 @@ impl AppState {
         let keys: Vec<RowKey> = self.jobs.keys().cloned().collect();
         for k in keys {
             let mut done = false;
+            let mut finished_successfully = false;
             let mut err_msg: Option<String> = None;
             if let Some(job) = self.jobs.get(&k) {
                 while let Ok(msg) = job.rx.try_recv() {
@@ -297,7 +343,11 @@ impl AppState {
                             err_msg = Some(format!("{}: {rel_path} — {error}", k.slug));
                             done = true;
                         }
-                        JobMsg::Finished | JobMsg::Cancelled => {
+                        JobMsg::Finished => {
+                            done = true;
+                            finished_successfully = true;
+                        }
+                        JobMsg::Cancelled => {
                             done = true;
                         }
                     }
@@ -307,9 +357,28 @@ impl AppState {
                 self.error_banner = Some(m);
             }
             if done {
-                self.jobs.remove(&k);
+                if let Some(job) = self.jobs.remove(&k) {
+                    if finished_successfully {
+                        let action = match job.direction {
+                            Direction::Pull => "Pulled from prod",
+                            Direction::Push => "Pushed to prod",
+                        };
+                        self.row_toasts.insert(
+                            k,
+                            RowToast {
+                                text: format!(
+                                    "{action} in {}",
+                                    fmt_duration(job.started_at.elapsed())
+                                ),
+                                created_at: Instant::now(),
+                            },
+                        );
+                    }
+                }
             }
         }
+        self.row_toasts
+            .retain(|_, toast| toast.created_at.elapsed() < Duration::from_secs(5));
     }
 
     pub fn local_root_for(&self, t: AssetType) -> PathBuf {
@@ -359,6 +428,7 @@ pub fn start_job(state: &mut AppState, key: &RowKey, direction: Direction) {
             progress,
             rx,
             message: Arc::new(Mutex::new(String::new())),
+            started_at: Instant::now(),
         },
     );
 }
@@ -447,8 +517,38 @@ pub fn execute_after_conflict(state: &mut AppState, choice: ConflictChoice) {
             progress,
             rx,
             message: Arc::new(Mutex::new(String::new())),
+            started_at: Instant::now(),
         },
     );
+}
+
+pub fn create_prod_folder(state: &mut AppState, key: &RowKey) {
+    if !crate::slug::is_valid(&key.slug) {
+        state.error_banner = Some("Cannot create Prod folder: slug has invalid characters".into());
+        return;
+    }
+    let root = state.prod_root_for(key.asset_type).join(&key.slug);
+    let primary = match key.asset_type {
+        AssetType::Hdris | AssetType::Textures => "raw",
+    };
+    for subfolder in [primary, "staging", "work"] {
+        if let Err(err) = std::fs::create_dir_all(root.join(subfolder)) {
+            state.error_banner = Some(format!(
+                "Could not create Prod folder for {}: {err}",
+                key.slug
+            ));
+            return;
+        }
+    }
+}
+
+fn fmt_duration(duration: Duration) -> String {
+    let secs = duration.as_secs().max(1);
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m {}s", secs / 60, secs % 60)
+    }
 }
 
 pub fn draw(state: &mut AppState, ctx: &egui::Context) {
@@ -474,6 +574,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     }
     dialogs::token_prompt(state, ctx);
     dialogs::draw(state, ctx);
+    draw_create_prod_folder_prompt(state, ctx);
     let table_resp = egui::CentralPanel::default().show(ctx, |ui| table::draw(state, ui));
 
     // Track cursor movement inside the table panel for the 2s safety guard.
@@ -487,9 +588,34 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     });
 
     // Keep repainting while a pending update is waiting to be flushed.
-    if !state.pending_notion.is_empty() {
+    if !state.pending_notion.is_empty() || !state.row_toasts.is_empty() {
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }
+}
+
+fn draw_create_prod_folder_prompt(state: &mut AppState, ctx: &egui::Context) {
+    let Some(key) = state.pending_prod_folder_create.clone() else {
+        return;
+    };
+    egui::Window::new("Create Prod folder?")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label(format!(
+                "Do you want to create the folder for {}?",
+                key.slug
+            ));
+            ui.horizontal(|ui| {
+                if ui.button("Create").clicked() {
+                    create_prod_folder(state, &key);
+                    state.pending_prod_folder_create = None;
+                }
+                if ui.button("Cancel").clicked() {
+                    state.pending_prod_folder_create = None;
+                }
+            });
+        });
 }
 
 pub fn notion_logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
@@ -564,6 +690,22 @@ pub fn chevron_down_texture(ctx: &egui::Context) -> egui::TextureHandle {
     static BYTES: &[u8] = include_bytes!("../assets/chevron-down.svg");
     static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
     TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "chevron_down", "chevron-down.svg"))
+        .clone()
+}
+
+pub fn external_link_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/box-arrow-up-right.svg");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "external_link", "box-arrow-up-right.svg"))
+        .clone()
+}
+
+pub fn check_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/check.svg");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "check_icon", "check.svg"))
         .clone()
 }
 
