@@ -7,8 +7,15 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
         for t in [AssetType::Hdris, AssetType::Textures] {
             let selected = state.current_type == t;
             if ui.selectable_label(selected, t.label()).clicked() && !selected {
+                // Save the current filter before switching.
+                let old_label = state.current_type.label().to_string();
+                state.config.last_filters.insert(old_label, state.author_filter.clone());
                 state.current_type = t;
-                state.author_filter.clear();
+                // Restore the filter for the new tab.
+                state.author_filter = state.config.last_filters
+                    .get(t.label()).cloned().unwrap_or_default();
+                state.config.last_tab = t.label().to_string();
+                let _ = crate::config::save(&state.config);
             }
         }
 
@@ -20,6 +27,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
         } else {
             state.author_filter.clone()
         };
+        let filter_before = state.author_filter.clone();
         egui::ComboBox::from_id_source("author_filter")
             .selected_text(display)
             .show_ui(ui, |ui| {
@@ -28,6 +36,11 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                     ui.selectable_value(&mut state.author_filter, a.clone(), a);
                 }
             });
+        if state.author_filter != filter_before {
+            let label = state.current_type.label().to_string();
+            state.config.last_filters.insert(label, state.author_filter.clone());
+            let _ = crate::config::save(&state.config);
+        }
 
         ui.separator();
 

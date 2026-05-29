@@ -11,6 +11,12 @@ pub struct Config {
     pub prod_root: PathBuf,
     #[serde(default = "default_local_root")]
     pub local_root: PathBuf,
+    /// Last selected asset-type tab ("HDRIs" or "Textures").
+    #[serde(default)]
+    pub last_tab: String,
+    /// Last author filter per asset-type label.
+    #[serde(default)]
+    pub last_filters: std::collections::HashMap<String, String>,
 }
 
 fn default_prod_root() -> PathBuf  { PathBuf::from(r"P:\Assets") }
@@ -20,8 +26,10 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             notion_token: String::new(),
-            prod_root:  default_prod_root(),
-            local_root: default_local_root(),
+            prod_root:    default_prod_root(),
+            local_root:   default_local_root(),
+            last_tab:     String::new(),
+            last_filters: std::collections::HashMap::new(),
         }
     }
 }
