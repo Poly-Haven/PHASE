@@ -38,3 +38,17 @@ pub const ASSET_TYPE_MODELS: Color32 = Color32::from_rgb(161, 208, 77);
 pub const STATUS_TODO: Color32 = ACCENT;
 pub const STATUS_IN_PROGRESS: Color32 = Color32::from_rgb(70, 130, 220);
 pub const STATUS_COMPLETE: Color32 = Color32::from_rgb(60, 175, 80);
+
+pub fn colored_background(color: Color32) -> Color32 {
+    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 51)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn colored_backgrounds_are_eighty_percent_transparent() {
+        let bg = super::colored_background(super::ACCENT);
+
+        assert_eq!(bg.a(), 51);
+    }
+}

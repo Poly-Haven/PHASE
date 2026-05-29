@@ -57,8 +57,9 @@ pub fn draw<T: Copy + PartialEq>(
             egui::Sense::click(),
         );
         let is_selected = selected.contains(&option.value);
+        let selected_color = option.selected_bg.unwrap_or(colors::ACCENT);
         let fill = if is_selected {
-            option.selected_bg.unwrap_or(colors::ACCENT)
+            colors::colored_background(selected_color)
         } else if response.hovered() {
             colors::PILL_OPTION_BG_HOVER
         } else {
@@ -86,6 +87,13 @@ pub fn draw<T: Copy + PartialEq>(
             option_rounding,
             fill,
         );
+        if is_selected {
+            ui.painter().rect_stroke(
+                option_rect.shrink2(egui::vec2(0.5, 1.5)),
+                option_rounding,
+                egui::Stroke::new(1.0, selected_color),
+            );
+        }
         let label_color = if response.hovered() {
             egui::Color32::WHITE
         } else if is_selected {

@@ -528,18 +528,27 @@ pub fn create_prod_folder(state: &mut AppState, key: &RowKey) {
         return;
     }
     let root = state.prod_root_for(key.asset_type).join(&key.slug);
-    let primary = match key.asset_type {
+    if let Err(err) = create_prod_folder_structure_at(&root, key.asset_type) {
+        state.error_banner = Some(format!(
+            "Could not create Prod folder for {}: {err}",
+            key.slug
+        ));
+        return;
+    }
+    let _ = open::that(root);
+}
+
+fn create_prod_folder_structure_at(
+    root: &std::path::Path,
+    asset_type: AssetType,
+) -> std::io::Result<()> {
+    let primary = match asset_type {
         AssetType::Hdris | AssetType::Textures => "raw",
     };
     for subfolder in [primary, "staging", "work"] {
-        if let Err(err) = std::fs::create_dir_all(root.join(subfolder)) {
-            state.error_banner = Some(format!(
-                "Could not create Prod folder for {}: {err}",
-                key.slug
-            ));
-            return;
-        }
+        std::fs::create_dir_all(root.join(subfolder))?;
     }
+    Ok(())
 }
 
 fn fmt_duration(duration: Duration) -> String {
@@ -616,6 +625,20 @@ fn draw_create_prod_folder_prompt(state: &mut AppState, ctx: &egui::Context) {
                 }
             });
         });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn prod_folder_structure_creates_expected_subfolders() {
+        let temp = tempfile::tempdir().unwrap();
+
+        super::create_prod_folder_structure_at(temp.path(), super::AssetType::Hdris).unwrap();
+
+        assert!(temp.path().join("raw").is_dir());
+        assert!(temp.path().join("staging").is_dir());
+        assert!(temp.path().join("work").is_dir());
+    }
 }
 
 pub fn notion_logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
