@@ -14,21 +14,33 @@ pub struct Config {
     /// Last selected asset-type tab ("HDRIs" or "Textures").
     #[serde(default)]
     pub last_tab: String,
+    /// Last selected asset-type labels. Replaces `last_tab` while keeping it for migration.
+    #[serde(default)]
+    pub last_asset_types: Vec<String>,
+    /// Last selected author filter, shared across asset-type selections.
+    #[serde(default)]
+    pub last_author_filter: String,
     /// Last author filter per asset-type label.
     #[serde(default)]
     pub last_filters: std::collections::HashMap<String, String>,
 }
 
-fn default_prod_root() -> PathBuf  { PathBuf::from(r"P:\Assets") }
-fn default_local_root() -> PathBuf { PathBuf::from(r"C:\PHASE\Assets") }
+fn default_prod_root() -> PathBuf {
+    PathBuf::from(r"P:\Assets")
+}
+fn default_local_root() -> PathBuf {
+    PathBuf::from(r"C:\PHASE\Assets")
+}
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             notion_token: String::new(),
-            prod_root:    default_prod_root(),
-            local_root:   default_local_root(),
-            last_tab:     String::new(),
+            prod_root: default_prod_root(),
+            local_root: default_local_root(),
+            last_tab: String::new(),
+            last_asset_types: Vec::new(),
+            last_author_filter: String::new(),
             last_filters: std::collections::HashMap::new(),
         }
     }
@@ -63,7 +75,8 @@ pub fn load() -> Result<Config> {
         return Ok(Config::default());
     }
     let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let cfg: Config =
+        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     Ok(cfg)
 }
 

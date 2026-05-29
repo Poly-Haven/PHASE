@@ -1,29 +1,29 @@
 use super::{AppState, AssetListState, AssetType};
 
 pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
+    ui.spacing_mut().interact_size.y = ui.spacing().interact_size.y.max(30.0);
     ui.horizontal(|ui| {
         ui.add_space(4.0);
 
-        for t in [AssetType::Hdris, AssetType::Textures] {
-            let selected = state.current_type == t;
-            if ui.selectable_label(selected, t.label()).clicked() && !selected {
-                // Save the current filter before switching.
-                let old_label = state.current_type.label().to_string();
-                state
-                    .config
-                    .last_filters
-                    .insert(old_label, state.author_filter.clone());
-                state.current_type = t;
-                // Restore the filter for the new tab.
-                state.author_filter = state
-                    .config
-                    .last_filters
-                    .get(t.label())
-                    .cloned()
-                    .unwrap_or_default();
-                state.config.last_tab = t.label().to_string();
-                let _ = crate::config::save(&state.config);
-            }
+        let options: Vec<_> = AssetType::all()
+            .iter()
+            .map(|t| super::group_selector::OptionItem {
+                value: *t,
+                label: t.label(),
+            })
+            .collect();
+        let response =
+            super::group_selector::draw(ui, "asset_type_selector", &options, &state.selected_types);
+        if let Some(clicked) = response.clicked {
+            state.selected_types = super::asset_types::select(
+                state.selected_types.clone(),
+                clicked,
+                response.additive,
+            );
+            state.current_type = state.selected_types.first().copied().unwrap_or(clicked);
+            state.config.last_tab = state.current_type.label().to_string();
+            state.config.last_asset_types = super::asset_types::labels(&state.selected_types);
+            let _ = crate::config::save(&state.config);
         }
 
         ui.separator();
@@ -44,16 +44,15 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                 }
             });
         if state.author_filter != filter_before {
-            let label = state.current_type.label().to_string();
-            state
-                .config
-                .last_filters
-                .insert(label, state.author_filter.clone());
+            state.config.last_author_filter = state.author_filter.clone();
             let _ = crate::config::save(&state.config);
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let is_loading = state.refreshing.contains(&state.current_type);
+            let is_loading = state
+                .selected_types
+                .iter()
+                .any(|t| state.refreshing.contains(t));
             let refresh_label = if is_loading {
                 "Loading…"
             } else {
@@ -64,7 +63,9 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {
-                state.refresh(state.current_type);
+                for t in state.selected_types.clone() {
+                    state.refresh(t);
+                }
             }
             ui.separator();
             ui.label(env!("CARGO_PKG_VERSION"));
@@ -73,14 +74,29 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
 }
 
 fn current_authors(state: &AppState) -> Vec<String> {
-    let Some(AssetListState::Loaded(list)) = state.assets_by_type.get(&state.current_type) else {
-        return Vec::new();
-    };
-    author_filter_options(list.iter().map(|a| a.author.as_str()))
+    let mut authors = Vec::new();
+    for t in &state.selected_types {
+        if let Some(AssetListState::Loaded(list)) = state.assets_by_type.get(t) {
+            authors.extend(list.iter().map(|a| a.author.as_str()));
+        }
+    }
+    author_filter_options_with_current(authors, &state.author_filter)
 }
 
 fn author_filter_options<'a>(authors: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     super::authors::filter_options(authors)
+}
+
+fn author_filter_options_with_current<'a>(
+    authors: impl IntoIterator<Item = &'a str>,
+    current: &str,
+) -> Vec<String> {
+    let mut options = author_filter_options(authors);
+    if !current.is_empty() && !options.iter().any(|option| option == current) {
+        options.push(current.to_string());
+        options.sort();
+    }
+    options
 }
 
 #[cfg(test)]
@@ -88,6 +104,13 @@ mod tests {
     #[test]
     fn author_filter_options_split_multi_author_combinations_into_people() {
         let options = super::author_filter_options(["Alice, Bob", "Bob, Carol", "Alice", ""]);
+
+        assert_eq!(options, vec!["Alice", "Bob", "Carol"]);
+    }
+
+    #[test]
+    fn author_filter_options_include_current_selection_even_without_matching_assets() {
+        let options = super::author_filter_options_with_current(["Alice, Bob"], "Carol");
 
         assert_eq!(options, vec!["Alice", "Bob", "Carol"]);
     }
