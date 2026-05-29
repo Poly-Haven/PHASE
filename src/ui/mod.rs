@@ -2,6 +2,7 @@ mod asset_types;
 mod authors;
 pub mod colors;
 mod dialogs;
+mod focus_refresh;
 mod group_selector;
 mod loading_indicator;
 mod menu;
@@ -121,6 +122,7 @@ pub struct AppState {
     pub pending_notion: HashMap<AssetType, Vec<Asset>>,
     /// Last time the pointer moved while inside the table area.
     pub cursor_moved_in_table_at: Option<Instant>,
+    pub focus_refresh: focus_refresh::State,
 }
 
 impl AppState {
@@ -156,6 +158,7 @@ impl AppState {
             refreshing: HashSet::new(),
             pending_notion: HashMap::new(),
             cursor_moved_in_table_at: None,
+            focus_refresh: focus_refresh::State::default(),
         };
         s.token_prompt_open = s.config.notion_token.is_empty();
         s.token_input = s.config.notion_token.clone();
@@ -165,14 +168,13 @@ impl AppState {
                 s.assets_by_type.insert(t, AssetListState::Loaded(cached));
             }
         }
-        if !s.config.notion_token.is_empty() {
-            s.refresh(AssetType::Hdris);
-            s.refresh(AssetType::Textures);
-        }
         s
     }
 
     pub fn refresh(&mut self, t: AssetType) {
+        if self.refreshing.contains(&t) {
+            return;
+        }
         if self.config.notion_token.is_empty() {
             self.assets_by_type.insert(
                 t,
@@ -194,6 +196,15 @@ impl AppState {
             let _ = tx.send(res);
         });
         self.notion_rx.insert(t, rx);
+    }
+
+    pub fn refresh_all_asset_types(&mut self) {
+        if self.config.notion_token.is_empty() {
+            return;
+        }
+        for t in AssetType::all() {
+            self.refresh(*t);
+        }
     }
 
     /// Drain Notion + job channels each frame.
@@ -348,6 +359,11 @@ pub fn execute_after_conflict(state: &mut AppState, choice: ConflictChoice) {
 }
 
 pub fn draw(state: &mut AppState, ctx: &egui::Context) {
+    let gained_focus = ctx.input(|i| state.focus_refresh.update(i.focused));
+    if gained_focus {
+        state.refresh_all_asset_types();
+    }
+
     egui::TopBottomPanel::top("menu").show(ctx, |ui| {
         egui::Frame::none()
             .inner_margin(egui::Margin::symmetric(0.0, 4.0))
