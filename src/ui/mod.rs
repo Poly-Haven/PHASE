@@ -216,21 +216,44 @@ pub fn notion_logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
     static BYTES: &[u8] = include_bytes!("../assets/notion.svg");
     static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
     TEX.get_or_init(|| {
-        let mut opt = usvg::Options::default();
-        opt.fontdb_mut().load_system_fonts();
-
-        let tree = usvg::Tree::from_data(BYTES, &opt).expect("decode notion.svg");
-        let size = tree.size().to_int_size();
-        let mut pixmap = tiny_skia::Pixmap::new(size.width(), size.height())
-            .expect("allocate notion.svg pixmap");
-        resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
-        ctx.load_texture(
-            "notion_logo",
-            egui::ColorImage::from_rgba_unmultiplied(
-                [size.width() as usize, size.height() as usize],
-                pixmap.data(),
-            ),
-            egui::TextureOptions::LINEAR,
-        )
+        load_svg_texture(ctx, BYTES, "notion_logo", "notion.svg")
     }).clone()
+}
+
+pub fn pull_icon_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/box-arrow-in-down.svg");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "pull_icon", "box-arrow-in-down.svg")).clone()
+}
+
+pub fn push_icon_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/cloud-upload-fill.svg");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "push_icon", "cloud-upload-fill.svg")).clone()
+}
+
+fn load_svg_texture(
+    ctx: &egui::Context,
+    bytes: &[u8],
+    texture_name: &'static str,
+    debug_name: &'static str,
+) -> egui::TextureHandle {
+    let mut opt = usvg::Options::default();
+    opt.fontdb_mut().load_system_fonts();
+
+    let tree = usvg::Tree::from_data(bytes, &opt).expect(debug_name);
+    let size = tree.size().to_int_size();
+    let mut pixmap = tiny_skia::Pixmap::new(size.width(), size.height())
+        .expect(debug_name);
+    resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
+    ctx.load_texture(
+        texture_name,
+        egui::ColorImage::from_rgba_unmultiplied(
+            [size.width() as usize, size.height() as usize],
+            pixmap.data(),
+        ),
+        egui::TextureOptions::LINEAR,
+    )
 }
