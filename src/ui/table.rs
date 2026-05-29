@@ -63,11 +63,26 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
         ui.painter().rect_filled(fill, 2.0, colors::PROGRESS_BAR);
     }
 
+    let prod_folder = state.prod_root_for(key.asset_type).join(&key.slug);
+
     ui.allocate_ui_at_rect(row_rect, |ui| {
         ui.horizontal_centered(|ui| {
             ui.add_space(8.0);
             let text_color = if row.exists_on_prod { colors::SLUG_ACTIVE } else { colors::SLUG_MISSING };
-            ui.colored_label(text_color, &row.slug);
+
+            // Slug — clickable if prod folder exists, opens it in Explorer.
+            let slug_label = egui::Label::new(
+                egui::RichText::new(&row.slug).color(text_color)
+            ).sense(egui::Sense::click());
+            let slug_resp = ui.add(slug_label);
+            if row.exists_on_prod {
+                slug_resp
+                    .on_hover_text("Open in Explorer")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                    .then(|| { let _ = open::that(&prod_folder); });
+            }
+
             ui.add_space(16.0);
             ui.colored_label(text_color.linear_multiply(0.8), &row.author);
 
