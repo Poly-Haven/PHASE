@@ -75,6 +75,24 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let gear_tex = super::gear_texture(ui.ctx());
+            let gear_resp = ui.add(
+                egui::Image::new(egui::load::SizedTexture::new(
+                    gear_tex.id(),
+                    egui::vec2(16.0, 16.0),
+                ))
+                .tint(super::colors::TEXT_PRIMARY)
+                .sense(egui::Sense::click()),
+            );
+            if gear_resp
+                .on_hover_text("Settings")
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                state.open_settings();
+            }
+            ui.add_space(6.0);
+
             let is_loading = state
                 .selected_types
                 .iter()
