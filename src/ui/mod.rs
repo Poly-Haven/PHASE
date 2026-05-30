@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::copy::job::{JobMsg, JobProgress, VerifyMsg};
-use crate::copy::plan::{build_plan, Action, Direction};
+use crate::copy::plan::{build_plan_with_pull_filter, Action, Direction, PullFilterMode};
 use crate::notion::{AssetList, AssetStatus, StatusOption, HDRIS_DB_ID, TEXTURES_DB_ID};
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
@@ -151,6 +151,9 @@ pub struct AppState {
     pub refreshing_published: bool,
     pub token_prompt_open: bool,
     pub token_input: String,
+    pub settings_open: bool,
+    pub settings_local_root_input: String,
+    pub settings_skip_pull_raw_tif_if_many_work_tifs: bool,
     /// Asset types whose background fetch is currently in flight.
     pub refreshing: HashSet<AssetType>,
     /// Notion results buffered while the cursor is active in the table.
@@ -204,6 +207,9 @@ impl AppState {
             refreshing_published: false,
             token_prompt_open: false,
             token_input: String::new(),
+            settings_open: false,
+            settings_local_root_input: String::new(),
+            settings_skip_pull_raw_tif_if_many_work_tifs: false,
             refreshing: HashSet::new(),
             pending_notion: HashMap::new(),
             cursor_moved_in_table_at: None,
@@ -212,6 +218,9 @@ impl AppState {
         };
         s.token_prompt_open = s.config.notion_token.is_empty();
         s.token_input = s.config.notion_token.clone();
+        s.settings_local_root_input = s.config.local_root.display().to_string();
+        s.settings_skip_pull_raw_tif_if_many_work_tifs =
+            s.config.skip_pull_raw_tif_if_many_work_tifs;
         // Warm the UI from cache immediately, then refresh in the background.
         for t in [AssetType::Hdris, AssetType::Textures] {
             if let Some(cached) = crate::cache::load(t.cache_name()) {
@@ -470,6 +479,13 @@ impl AppState {
         self.config.prod_root.join(t.folder())
     }
 
+    pub fn open_settings(&mut self) {
+        self.settings_local_root_input = self.config.local_root.display().to_string();
+        self.settings_skip_pull_raw_tif_if_many_work_tifs =
+            self.config.skip_pull_raw_tif_if_many_work_tifs;
+        self.settings_open = true;
+    }
+
     fn start_push_verification(&mut self, key: RowKey, plan: crate::copy::plan::Plan) {
         let (tx, rx) = std::sync::mpsc::channel();
         let progress = Arc::new(JobProgress::default());
@@ -491,7 +507,14 @@ pub fn start_job(state: &mut AppState, key: &RowKey, direction: Direction) {
         ),
     };
 
-    let plan = match build_plan(direction, &src_root, &dst_root) {
+    let pull_filter = match direction {
+        Direction::Pull if state.config.skip_pull_raw_tif_if_many_work_tifs => {
+            PullFilterMode::SkipRawAndTifWhenWorkTifsExceed { threshold: 30 }
+        }
+        Direction::Pull => PullFilterMode::None,
+        Direction::Push => PullFilterMode::None,
+    };
+    let plan = match build_plan_with_pull_filter(direction, &src_root, &dst_root, pull_filter) {
         Ok(p) => p,
         Err(e) => {
             state.error_banner = Some(format!("Plan failed: {e}"));
@@ -779,6 +802,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         });
     }
     dialogs::token_prompt(state, ctx);
+    dialogs::settings(state, ctx);
     dialogs::draw(state, ctx);
     draw_create_prod_folder_prompt(state, ctx);
     draw_verification_failure_prompt(state, ctx);
@@ -1015,6 +1039,14 @@ pub fn check_texture(ctx: &egui::Context) -> egui::TextureHandle {
     static BYTES: &[u8] = include_bytes!("../assets/check.svg");
     static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
     TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "check_icon", "check.svg"))
+        .clone()
+}
+
+pub fn gear_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/gear-fill.svg");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "gear_icon", "gear-fill.svg"))
         .clone()
 }
 

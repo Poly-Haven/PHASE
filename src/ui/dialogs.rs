@@ -87,3 +87,72 @@ pub fn token_prompt(state: &mut AppState, ctx: &egui::Context) {
         state.token_prompt_open = false;
     }
 }
+
+pub fn settings(state: &mut AppState, ctx: &egui::Context) {
+    if !state.settings_open {
+        return;
+    }
+
+    let mut save = false;
+    let mut close = false;
+    egui::Window::new("Settings")
+        .collapsible(false)
+        .resizable(false)
+        .default_width(560.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label("Local root path");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.settings_local_root_input)
+                        .desired_width(420.0),
+                );
+                if ui
+                    .button("Select...")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_directory(&state.config.local_root)
+                        .pick_folder()
+                    {
+                        state.settings_local_root_input = path.display().to_string();
+                    }
+                }
+            });
+
+            ui.add_space(8.0);
+            ui.checkbox(
+                &mut state.settings_skip_pull_raw_tif_if_many_work_tifs,
+                "Skip pulling RAW and TIF files if >30 TIFs exist in /work",
+            );
+
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    save = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+        });
+
+    if save {
+        let local_root = state.settings_local_root_input.trim();
+        if local_root.is_empty() {
+            state.error_banner = Some("Local root path cannot be empty".into());
+            return;
+        }
+        state.config.local_root = std::path::PathBuf::from(local_root);
+        state.config.skip_pull_raw_tif_if_many_work_tifs =
+            state.settings_skip_pull_raw_tif_if_many_work_tifs;
+        if let Err(e) = crate::config::save(&state.config) {
+            state.error_banner = Some(format!("Failed to save config: {e}"));
+        } else {
+            state.settings_open = false;
+        }
+    } else if close {
+        state.settings_open = false;
+    }
+}

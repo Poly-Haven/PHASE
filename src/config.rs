@@ -23,6 +23,8 @@ pub struct Config {
     /// Last author filter per asset-type label.
     #[serde(default)]
     pub last_filters: std::collections::HashMap<String, String>,
+    #[serde(default = "default_skip_pull_raw_tif_if_many_work_tifs")]
+    pub skip_pull_raw_tif_if_many_work_tifs: bool,
 }
 
 fn default_prod_root() -> PathBuf {
@@ -30,6 +32,9 @@ fn default_prod_root() -> PathBuf {
 }
 fn default_local_root() -> PathBuf {
     PathBuf::from(r"C:\PHASE")
+}
+fn default_skip_pull_raw_tif_if_many_work_tifs() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -42,7 +47,29 @@ impl Default for Config {
             last_asset_types: Vec::new(),
             last_author_filter: String::new(),
             last_filters: std::collections::HashMap::new(),
+            skip_pull_raw_tif_if_many_work_tifs: default_skip_pull_raw_tif_if_many_work_tifs(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn skip_pull_raw_tif_if_many_work_tifs_defaults_to_enabled() {
+        assert!(super::Config::default().skip_pull_raw_tif_if_many_work_tifs);
+    }
+
+    #[test]
+    fn missing_skip_pull_raw_tif_if_many_work_tifs_config_field_defaults_to_enabled() {
+        let cfg: super::Config = toml::from_str(
+            r#"
+notion_token = ""
+local_root = "C:\\PHASE"
+"#,
+        )
+        .unwrap();
+
+        assert!(cfg.skip_pull_raw_tif_if_many_work_tifs);
     }
 }
 

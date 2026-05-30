@@ -103,6 +103,98 @@ fn push_includes_tif_and_nef() {
 }
 
 #[test]
+fn conditional_pull_filter_skips_raw_and_tif_when_work_has_more_than_30_tifs() {
+    let src = tempdir().unwrap();
+    let dst = tempdir().unwrap();
+    write(&src.path().join("raw.NEF"), b"raw-bytes");
+    write(&src.path().join("scan.tif"), b"tif-bytes");
+    write(&src.path().join("preview.exr"), b"preview");
+    for i in 0..31 {
+        write(
+            &src.path().join(format!("work/frame_{i:03}.tif")),
+            b"work-tif",
+        );
+    }
+
+    let plan = build_plan_with_pull_filter(
+        Direction::Pull,
+        src.path(),
+        dst.path(),
+        PullFilterMode::SkipRawAndTifWhenWorkTifsExceed { threshold: 30 },
+    )
+    .unwrap();
+    let names: Vec<_> = plan
+        .files
+        .iter()
+        .map(|f| f.rel_path.to_string_lossy().replace('\\', "/"))
+        .collect();
+
+    assert!(names.contains(&"preview.exr".to_string()));
+    assert!(!names.iter().any(|n| n.ends_with(".NEF")));
+    assert!(!names.iter().any(|n| n.ends_with(".tif")));
+}
+
+#[test]
+fn conditional_pull_filter_includes_raw_and_tif_when_work_has_30_or_fewer_tifs() {
+    let src = tempdir().unwrap();
+    let dst = tempdir().unwrap();
+    write(&src.path().join("raw.NEF"), b"raw-bytes");
+    write(&src.path().join("scan.tif"), b"tif-bytes");
+    for i in 0..30 {
+        write(
+            &src.path().join(format!("work/frame_{i:03}.tif")),
+            b"work-tif",
+        );
+    }
+
+    let plan = build_plan_with_pull_filter(
+        Direction::Pull,
+        src.path(),
+        dst.path(),
+        PullFilterMode::SkipRawAndTifWhenWorkTifsExceed { threshold: 30 },
+    )
+    .unwrap();
+    let names: Vec<_> = plan
+        .files
+        .iter()
+        .map(|f| f.rel_path.to_string_lossy().replace('\\', "/"))
+        .collect();
+
+    assert!(names.contains(&"raw.NEF".to_string()));
+    assert!(names.contains(&"scan.tif".to_string()));
+}
+
+#[test]
+fn disabled_conditional_pull_filter_includes_raw_and_tif_even_with_many_work_tifs() {
+    let src = tempdir().unwrap();
+    let dst = tempdir().unwrap();
+    write(&src.path().join("raw.NEF"), b"raw-bytes");
+    write(&src.path().join("scan.tif"), b"tif-bytes");
+    for i in 0..31 {
+        write(
+            &src.path().join(format!("work/frame_{i:03}.tif")),
+            b"work-tif",
+        );
+    }
+
+    let plan = build_plan_with_pull_filter(
+        Direction::Pull,
+        src.path(),
+        dst.path(),
+        PullFilterMode::None,
+    )
+    .unwrap();
+    let names: Vec<_> = plan
+        .files
+        .iter()
+        .map(|f| f.rel_path.to_string_lossy().replace('\\', "/"))
+        .collect();
+
+    assert!(names.contains(&"raw.NEF".to_string()));
+    assert!(names.contains(&"scan.tif".to_string()));
+}
+
+#[test]
 fn plan_ignores_partial_files() {
     let src = tempdir().unwrap();
     let dst = tempdir().unwrap();
