@@ -734,7 +734,7 @@ fn draw_status_bar(state: &AppState, ctx: &egui::Context) {
                     ui.label(egui::RichText::new(status).color(colors::TEXT_DISABLED));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
-                            egui::RichText::new(env!("CARGO_PKG_VERSION"))
+                            egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                                 .color(colors::TEXT_DISABLED),
                         );
                     });
