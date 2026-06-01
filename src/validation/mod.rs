@@ -1,16 +1,18 @@
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+mod dismissed;
+mod local_freshness;
+mod needs_review;
+mod root_entries;
+pub(crate) mod workers;
+
 use std::ffi::OsStr;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
-use std::thread;
-
-use walkdir::WalkDir;
 
 use crate::notion::AssetStatus;
 use crate::ui::{AssetType, RowKey};
+
+pub use dismissed::{dismissal_key, load_dismissed_warning_keys, save_dismissed_warning_keys};
+pub use workers::spawn;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Severity {
@@ -39,222 +41,110 @@ pub enum Msg {
     Finished,
 }
 
-pub fn spawn(requests: Vec<Request>, tx: Sender<Msg>) {
-    thread::spawn(move || {
-        for request in requests {
-            let findings = validate_asset(
-                request.key.asset_type,
-                &request.key.slug,
-                request.status.as_ref(),
-                &request.local_root,
-                &request.prod_root,
-            );
-            if tx
-                .send(Msg::RowValidated {
-                    key: request.key,
-                    findings,
-                })
-                .is_err()
-            {
-                return;
-            }
-        }
-        let _ = tx.send(Msg::Finished);
-    });
+#[derive(Clone)]
+pub(crate) struct ValidationContext {
+    pub key: RowKey,
+    pub status: Option<AssetStatus>,
+    pub local_root: PathBuf,
+    pub prod_root: PathBuf,
 }
 
-pub fn validate_asset(
+impl From<&Request> for ValidationContext {
+    fn from(request: &Request) -> Self {
+        Self {
+            key: request.key.clone(),
+            status: request.status.clone(),
+            local_root: request.local_root.clone(),
+            prod_root: request.prod_root.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Check {
+    _name: &'static str,
+    weight: usize,
+    run: fn(&ValidationContext) -> Vec<Finding>,
+}
+
+impl Check {
+    #[cfg(test)]
+    pub(crate) fn name(self) -> &'static str {
+        self._name
+    }
+
+    pub(crate) fn weight(self) -> usize {
+        self.weight
+    }
+
+    pub(crate) fn run(self, ctx: &ValidationContext) -> Vec<Finding> {
+        (self.run)(ctx)
+    }
+}
+
+pub(crate) fn all_checks() -> &'static [Check] {
+    const CHECKS: &[Check] = &[
+        Check {
+            _name: "root-entries",
+            weight: 1,
+            run: root_entries::run,
+        },
+        Check {
+            _name: "local-freshness",
+            weight: 1,
+            run: local_freshness::run,
+        },
+        Check {
+            _name: "needs-review",
+            weight: 1,
+            run: needs_review::run,
+        },
+    ];
+    CHECKS
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn validate_asset(
     asset_type: AssetType,
     slug: &str,
     status: Option<&AssetStatus>,
     local_root: &Path,
     prod_root: &Path,
 ) -> Vec<Finding> {
-    let mut findings = Vec::new();
-
-    if local_root.is_dir() {
-        if let Some(finding) = validate_root_entries(asset_type, local_root) {
-            findings.push(finding);
-        }
-    }
-
-    if local_root.is_dir() && prod_root.is_dir() && local_is_newer_or_extra(local_root, prod_root) {
-        findings.push(Finding {
-            severity: if is_needs_review(status) {
-                Severity::Warning
-            } else {
-                Severity::Info
-            },
-            text: "Local files newer than Prod. Push?".into(),
-            dismiss_id: None,
-        });
-    }
-
-    if is_needs_review(status) && prod_root.is_dir() {
-        findings.extend(validate_needs_review_requirements(
-            asset_type, slug, prod_root,
-        ));
-    }
-
-    findings
-}
-
-fn validate_root_entries(asset_type: AssetType, local_root: &Path) -> Option<Finding> {
-    let primary = match asset_type {
-        AssetType::Hdris | AssetType::Textures => "raw",
+    let ctx = ValidationContext {
+        key: RowKey {
+            asset_type,
+            slug: slug.to_string(),
+        },
+        status: status.cloned(),
+        local_root: local_root.to_path_buf(),
+        prod_root: prod_root.to_path_buf(),
     };
-    let mut unexpected = Vec::new();
-    let read_dir = std::fs::read_dir(local_root).ok()?;
-    for entry in read_dir.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if path.is_dir() {
-            if !matches!(name.as_str(), "work" | "staging") && name != primary {
-                unexpected.push(name);
-            }
-        } else if !is_harmless_root_file(entry.file_name().as_os_str()) {
-            unexpected.push(name);
-        }
-    }
-    if unexpected.is_empty() {
-        None
-    } else {
-        unexpected.sort_unstable();
-        Some(Finding {
-            severity: Severity::Error,
-            text: format!("Unexpected root entries: {}", unexpected.join(", ")),
-            dismiss_id: None,
-        })
-    }
+    all_checks()
+        .iter()
+        .flat_map(|check| check.run(&ctx))
+        .collect()
 }
 
-fn local_is_newer_or_extra(local_root: &Path, prod_root: &Path) -> bool {
-    for entry in WalkDir::new(local_root).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let rel = match entry.path().strip_prefix(local_root) {
-            Ok(rel) => rel,
-            Err(_) => continue,
-        };
-        if is_harmless_root_file(entry.file_name()) {
-            continue;
-        }
-        let prod_path = prod_root.join(rel);
-        if !prod_path.is_file() {
-            return true;
-        }
-        let local_mtime = match std::fs::metadata(entry.path()).and_then(|meta| meta.modified()) {
-            Ok(time) => time,
-            Err(_) => continue,
-        };
-        let prod_mtime = match std::fs::metadata(&prod_path).and_then(|meta| meta.modified()) {
-            Ok(time) => time,
-            Err(_) => continue,
-        };
-        if local_mtime > prod_mtime {
-            return true;
-        }
-    }
-    false
+pub(crate) fn send_finished(tx: &Sender<Msg>) {
+    let _ = tx.send(Msg::Finished);
 }
 
-fn validate_needs_review_requirements(
-    asset_type: AssetType,
-    slug: &str,
-    prod_root: &Path,
-) -> Vec<Finding> {
-    let staging = prod_root.join("staging");
-    let mut findings = Vec::new();
-    match asset_type {
-        AssetType::Hdris => {
-            if !staging.join(format!("{slug}.exr")).is_file() {
-                findings.push(Finding {
-                    severity: Severity::Error,
-                    text: format!("Missing /staging/{slug}.exr in Prod"),
-                    dismiss_id: None,
-                });
-            }
-            if !staging.join("colorchart.zip").is_file() {
-                findings.push(Finding {
-                    severity: Severity::Warning,
-                    text: "Missing /staging/colorchart.zip in Prod".into(),
-                    dismiss_id: Some("missing-colorchart-zip"),
-                });
-            }
-        }
-        AssetType::Textures => {
-            if !staging.join(format!("{slug}.blend")).is_file() {
-                findings.push(Finding {
-                    severity: Severity::Error,
-                    text: format!("Missing /staging/{slug}.blend in Prod"),
-                    dismiss_id: None,
-                });
-            }
-            if !staging.join("textures").is_dir() {
-                findings.push(Finding {
-                    severity: Severity::Error,
-                    text: "Missing /staging/textures in Prod".into(),
-                    dismiss_id: None,
-                });
-            }
-        }
-    }
-    findings
-}
-
-fn is_needs_review(status: Option<&AssetStatus>) -> bool {
+pub(crate) fn is_needs_review(status: Option<&AssetStatus>) -> bool {
     status
         .map(|status| status.name.eq_ignore_ascii_case("Needs review"))
         .unwrap_or(false)
 }
 
-fn is_harmless_root_file(name: &OsStr) -> bool {
+pub(crate) fn is_harmless_root_file(name: &OsStr) -> bool {
     matches!(
         name.to_string_lossy().to_ascii_lowercase().as_str(),
         "thumbs.db" | "desktop.ini" | ".ds_store" | "ehthumbs.db"
     )
 }
 
-#[derive(Default, Serialize, Deserialize)]
-struct DismissedWarningsFile {
-    keys: Vec<String>,
-}
-
-pub fn dismissal_key(key: &RowKey, dismiss_id: &str) -> String {
-    format!("{}/{}:{}", key.asset_type.folder(), key.slug, dismiss_id)
-}
-
-pub fn load_dismissed_warning_keys() -> Result<HashSet<String>> {
-    load_dismissed_warning_keys_from(&dismissed_warning_path()?)
-}
-
-pub fn save_dismissed_warning_keys(keys: &HashSet<String>) -> Result<()> {
-    save_dismissed_warning_keys_to(&dismissed_warning_path()?, keys)
-}
-
-fn dismissed_warning_path() -> Result<PathBuf> {
-    Ok(crate::config::app_dir()?.join("dismissed_validation_warnings.json"))
-}
-
-fn load_dismissed_warning_keys_from(path: &Path) -> Result<HashSet<String>> {
-    if !path.exists() {
-        return Ok(HashSet::new());
-    }
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let file: DismissedWarningsFile =
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    Ok(file.keys.into_iter().collect())
-}
-
-fn save_dismissed_warning_keys_to(path: &Path, keys: &HashSet<String>) -> Result<()> {
-    let mut sorted_keys = keys.iter().cloned().collect::<Vec<_>>();
-    sorted_keys.sort();
-    let text = serde_json::to_string_pretty(&DismissedWarningsFile { keys: sorted_keys })
-        .context("serialising dismissed warnings")?;
-    fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
-}
+#[cfg(test)]
+pub(crate) use dismissed::{load_dismissed_warning_keys_from, save_dismissed_warning_keys_to};
 
 #[cfg(test)]
 mod tests {
@@ -451,5 +341,22 @@ mod tests {
         let loaded = load_dismissed_warning_keys_from(&path).unwrap();
 
         assert_eq!(loaded, keys);
+    }
+
+    #[test]
+    fn all_current_checks_have_weight_one() {
+        let weights = all_checks()
+            .iter()
+            .map(|check| (check.name(), check.weight()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            weights,
+            vec![
+                ("root-entries", 1),
+                ("local-freshness", 1),
+                ("needs-review", 1)
+            ]
+        );
     }
 }
