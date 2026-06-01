@@ -127,6 +127,10 @@ pub struct UpdateInstallJob {
     pub rx: Receiver<Result<(), String>>,
 }
 
+pub struct ValidationJob {
+    pub rx: Receiver<crate::validation::Msg>,
+}
+
 #[derive(Copy, Clone)]
 pub enum ConflictChoice {
     OverwriteAll,
@@ -170,6 +174,8 @@ pub struct AppState {
     /// Rebuilt when Notion data loads, window gains focus, a job finishes,
     /// or a prod folder is created — never on every frame.
     pub prod_folder_cache: HashMap<RowKey, bool>,
+    pub validation_results: HashMap<RowKey, Vec<crate::validation::Finding>>,
+    pub validation_job: Option<ValidationJob>,
     pub update_check_rx: Option<Receiver<Result<Option<crate::updater::UpdateInfo>, String>>>,
     pub pending_update: Option<crate::updater::UpdateInfo>,
     pub update_dialog_open: bool,
@@ -234,6 +240,8 @@ impl AppState {
             cursor_moved_in_table_at: None,
             focus_refresh: focus_refresh::State::default(),
             prod_folder_cache: HashMap::new(),
+            validation_results: HashMap::new(),
+            validation_job: None,
             update_check_rx: None,
             pending_update: None,
             update_dialog_open: false,
@@ -358,6 +366,49 @@ impl AppState {
         self.published_rx = Some(rx);
     }
 
+    pub fn start_validation_for_loaded_assets(&mut self) {
+        let mut keys = Vec::new();
+        for &asset_type in AssetType::all() {
+            if let Some(AssetListState::Loaded(list)) = self.assets_by_type.get(&asset_type) {
+                keys.extend(list.assets.iter().map(|asset| RowKey {
+                    asset_type,
+                    slug: asset.slug.clone(),
+                }));
+            }
+        }
+        self.start_validation_for_keys(keys);
+    }
+
+    pub fn start_validation_for_keys(&mut self, keys: Vec<RowKey>) {
+        let requests = self.validation_requests_for_keys(&keys);
+        if requests.is_empty() {
+            return;
+        }
+        let (tx, rx) = channel();
+        crate::validation::spawn(requests, tx);
+        self.validation_job = Some(ValidationJob { rx });
+    }
+
+    fn validation_requests_for_keys(&self, keys: &[RowKey]) -> Vec<crate::validation::Request> {
+        let mut requests = Vec::new();
+        for key in keys {
+            let Some(AssetListState::Loaded(list)) = self.assets_by_type.get(&key.asset_type)
+            else {
+                continue;
+            };
+            let Some(asset) = list.assets.iter().find(|asset| asset.slug == key.slug) else {
+                continue;
+            };
+            requests.push(crate::validation::Request {
+                key: key.clone(),
+                status: asset.status.clone(),
+                local_root: self.local_root_for(key.asset_type).join(&key.slug),
+                prod_root: self.prod_root_for(key.asset_type).join(&key.slug),
+            });
+        }
+        requests
+    }
+
     /// Drain Notion + job channels each frame.
     pub fn pump(&mut self) {
         if let Some(res) = self
@@ -409,6 +460,7 @@ impl AppState {
                             let _ = crate::cache::save(t.cache_name(), &list);
                             self.assets_by_type.insert(t, AssetListState::Loaded(list));
                             self.rebuild_prod_folder_cache();
+                            self.start_validation_for_loaded_assets();
                         }
                     }
                     Err(msg) => {
@@ -426,6 +478,7 @@ impl AppState {
                 self.assets_by_type.insert(t, AssetListState::Loaded(list));
             }
             self.rebuild_prod_folder_cache();
+            self.start_validation_for_loaded_assets();
 
             if let Some(res) = self.published_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
                 self.published_rx = None;
@@ -462,11 +515,31 @@ impl AppState {
                     }
                     Err(msg) => {
                         set_asset_status(self, &key, job.previous);
+                        self.start_validation_for_keys(vec![key.clone()]);
                         self.error_banner =
                             Some(format!("Status update failed for {}: {msg}", key.slug));
                     }
                 }
             }
+        }
+
+        let mut validation_finished = false;
+        while let Some(msg) = self
+            .validation_job
+            .as_ref()
+            .and_then(|job| job.rx.try_recv().ok())
+        {
+            match msg {
+                crate::validation::Msg::RowValidated { key, findings } => {
+                    self.validation_results.insert(key, findings);
+                }
+                crate::validation::Msg::Finished => {
+                    validation_finished = true;
+                }
+            }
+        }
+        if validation_finished {
+            self.validation_job = None;
         }
 
         let keys: Vec<RowKey> = self.jobs.keys().cloned().collect();
@@ -638,6 +711,7 @@ pub fn start_status_update(
         return;
     }
     let previous = set_asset_status(state, key, Some(status_from_option(&requested)));
+    state.start_validation_for_keys(vec![key.clone()]);
     let (tx, rx) = std::sync::mpsc::channel();
     let token = state.config.notion_token.clone();
     let page_id = page_id.to_string();
@@ -903,6 +977,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     if gained_focus {
         state.refresh_all_asset_types();
         state.rebuild_prod_folder_cache();
+        state.start_validation_for_loaded_assets();
     }
 
     egui::TopBottomPanel::top("menu").show(ctx, |ui| {
@@ -934,6 +1009,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         || !state.row_toasts.is_empty()
         || !state.jobs.is_empty()
         || !state.verifications.is_empty()
+        || state.validation_job.is_some()
         || state.update_check_rx.is_some()
         || state.update_install.is_some()
     {
@@ -1126,6 +1202,8 @@ mod tests {
             cursor_moved_in_table_at: None,
             focus_refresh: super::focus_refresh::State::default(),
             prod_folder_cache: HashMap::new(),
+            validation_results: HashMap::new(),
+            validation_job: None,
             update_check_rx: None,
             pending_update: None,
             update_dialog_open: false,
