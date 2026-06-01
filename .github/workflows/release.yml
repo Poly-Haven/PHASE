@@ -46,7 +46,7 @@ jobs:
           $previous = $tags | Where-Object { $_ -ne $current } | Select-Object -First 1
           if ($previous) {
             $range = "$previous..$current"
-            "# PHASE $current`n`nChanges since $previous:`n" | Set-Content release-notes.md
+            "# PHASE $current`n`nChanges since ${previous}:`n" | Set-Content release-notes.md
             git log $range --pretty=format:"- %s (%h)" | Add-Content release-notes.md
           } else {
             "# PHASE $current`n`nInitial release.`n" | Set-Content release-notes.md
