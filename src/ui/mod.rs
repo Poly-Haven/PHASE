@@ -131,6 +131,14 @@ pub struct ValidationJob {
     pub rx: Receiver<crate::validation::Msg>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VisibleValidationScope {
+    pub keys: Vec<RowKey>,
+    selected_types: Vec<AssetType>,
+    selected_status_groups: Vec<crate::notion::StatusGroup>,
+    author_filters: Vec<String>,
+}
+
 #[derive(Copy, Clone)]
 pub enum ConflictChoice {
     OverwriteAll,
@@ -177,6 +185,7 @@ pub struct AppState {
     pub dismissed_warning_keys: HashSet<String>,
     pub validation_results: HashMap<RowKey, Vec<crate::validation::Finding>>,
     pub validation_job: Option<ValidationJob>,
+    pub visible_validation_scope: VisibleValidationScope,
     pub update_check_rx: Option<Receiver<Result<Option<crate::updater::UpdateInfo>, String>>>,
     pub pending_update: Option<crate::updater::UpdateInfo>,
     pub update_dialog_open: bool,
@@ -245,6 +254,7 @@ impl AppState {
                 .unwrap_or_default(),
             validation_results: HashMap::new(),
             validation_job: None,
+            visible_validation_scope: VisibleValidationScope::default(),
             update_check_rx: None,
             pending_update: None,
             update_dialog_open: false,
@@ -369,17 +379,48 @@ impl AppState {
         self.published_rx = Some(rx);
     }
 
-    pub fn start_validation_for_loaded_assets(&mut self) {
+    pub fn visible_validation_scope_snapshot(&self) -> VisibleValidationScope {
         let mut keys = Vec::new();
-        for &asset_type in AssetType::all() {
+        for &asset_type in &self.selected_types {
             if let Some(AssetListState::Loaded(list)) = self.assets_by_type.get(&asset_type) {
-                keys.extend(list.assets.iter().map(|asset| RowKey {
-                    asset_type,
-                    slug: asset.slug.clone(),
-                }));
+                keys.extend(
+                    list.assets
+                        .iter()
+                        .filter(|asset| {
+                            table::asset_matches_filters(
+                                asset,
+                                &self.author_filters,
+                                &self.selected_status_groups,
+                            )
+                        })
+                        .map(|asset| RowKey {
+                            asset_type,
+                            slug: asset.slug.clone(),
+                        }),
+                );
             }
         }
-        self.start_validation_for_keys(keys);
+        VisibleValidationScope {
+            keys,
+            selected_types: self.selected_types.clone(),
+            selected_status_groups: self.selected_status_groups.clone(),
+            author_filters: self.author_filters.clone(),
+        }
+    }
+
+    pub fn start_validation_for_visible_assets(&mut self) {
+        let scope = self.visible_validation_scope_snapshot();
+        self.visible_validation_scope = scope.clone();
+        self.start_validation_for_keys(scope.keys);
+    }
+
+    pub fn start_validation_if_visible_scope_changed(&mut self) {
+        let scope = self.visible_validation_scope_snapshot();
+        if scope == self.visible_validation_scope {
+            return;
+        }
+        self.visible_validation_scope = scope.clone();
+        self.start_validation_for_keys(scope.keys);
     }
 
     pub fn start_validation_for_keys(&mut self, keys: Vec<RowKey>) {
@@ -472,7 +513,7 @@ impl AppState {
                             let _ = crate::cache::save(t.cache_name(), &list);
                             self.assets_by_type.insert(t, AssetListState::Loaded(list));
                             self.rebuild_prod_folder_cache();
-                            self.start_validation_for_loaded_assets();
+                            self.start_validation_for_visible_assets();
                         }
                     }
                     Err(msg) => {
@@ -490,7 +531,7 @@ impl AppState {
                 self.assets_by_type.insert(t, AssetListState::Loaded(list));
             }
             self.rebuild_prod_folder_cache();
-            self.start_validation_for_loaded_assets();
+            self.start_validation_for_visible_assets();
 
             if let Some(res) = self.published_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
                 self.published_rx = None;
@@ -989,7 +1030,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     if gained_focus {
         state.refresh_all_asset_types();
         state.rebuild_prod_folder_cache();
-        state.start_validation_for_loaded_assets();
+        state.start_validation_for_visible_assets();
     }
 
     egui::TopBottomPanel::top("menu").show(ctx, |ui| {
@@ -997,6 +1038,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             .inner_margin(egui::Margin::symmetric(0.0, 4.0))
             .show(ui, |ui| menu::draw(state, ui));
     });
+    state.start_validation_if_visible_scope_changed();
     dialogs::token_prompt(state, ctx);
     dialogs::settings(state, ctx);
     dialogs::draw(state, ctx);
@@ -1171,7 +1213,7 @@ mod tests {
     use crate::config::Config;
     use crate::copy::job::JobProgress;
     use crate::copy::plan::{Direction, Plan};
-    use crate::notion::{AssetList, StatusGroup};
+    use crate::notion::{Asset, AssetList, AssetStatus, StatusGroup};
 
     fn test_state() -> super::AppState {
         let current_type = super::AssetType::Hdris;
@@ -1217,6 +1259,7 @@ mod tests {
             dismissed_warning_keys: HashSet::new(),
             validation_results: HashMap::new(),
             validation_job: None,
+            visible_validation_scope: super::VisibleValidationScope::default(),
             update_check_rx: None,
             pending_update: None,
             update_dialog_open: false,
@@ -1254,7 +1297,23 @@ mod tests {
                     collect_shape_text(shape, texts);
                 }
             }
+
             _ => {}
+        }
+    }
+
+    fn asset(slug: &str, author: &str, group: StatusGroup) -> Asset {
+        Asset {
+            page_id: slug.into(),
+            slug: slug.into(),
+            author: author.into(),
+            url: String::new(),
+            status: Some(AssetStatus {
+                id: format!("{slug}-status"),
+                name: group.label().into(),
+                color: "default".into(),
+                group,
+            }),
         }
     }
 
@@ -1283,6 +1342,91 @@ mod tests {
         assert_eq!(
             super::format_active_file_action(&key, Direction::Push, Some("bar.xyz")),
             "Uploading HDRIs/foo/bar.xyz to Prod"
+        );
+    }
+
+    #[test]
+    fn visible_validation_keys_follow_asset_type_author_and_status_filters() {
+        let mut state = test_state();
+        state.assets_by_type.insert(
+            super::AssetType::Hdris,
+            super::AssetListState::Loaded(AssetList {
+                assets: vec![
+                    asset("visible_hdri", "Alice", StatusGroup::InProgress),
+                    asset("wrong_author", "Bob", StatusGroup::InProgress),
+                    asset("wrong_status", "Alice", StatusGroup::Complete),
+                ],
+                statuses: Vec::new(),
+            }),
+        );
+        state.assets_by_type.insert(
+            super::AssetType::Textures,
+            super::AssetListState::Loaded(AssetList {
+                assets: vec![asset("hidden_texture", "Alice", StatusGroup::InProgress)],
+                statuses: Vec::new(),
+            }),
+        );
+        state.selected_types = vec![super::AssetType::Hdris];
+        state.selected_status_groups = vec![StatusGroup::InProgress];
+        state.author_filters = vec!["Alice".into()];
+
+        let keys = state.visible_validation_scope_snapshot().keys;
+
+        assert_eq!(
+            keys,
+            vec![super::RowKey {
+                asset_type: super::AssetType::Hdris,
+                slug: "visible_hdri".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn starting_visible_validation_keeps_cached_results_in_memory() {
+        let mut state = test_state();
+        let stale_key = super::RowKey {
+            asset_type: super::AssetType::Hdris,
+            slug: "previously_visible".into(),
+        };
+        state.validation_results.insert(
+            stale_key.clone(),
+            vec![crate::validation::Finding {
+                severity: crate::validation::Severity::Warning,
+                text: "Cached warning".into(),
+                dismiss_id: None,
+            }],
+        );
+
+        state.start_validation_for_visible_assets();
+
+        assert!(state.validation_results.contains_key(&stale_key));
+    }
+
+    #[test]
+    fn visible_validation_scope_changes_when_filters_change_even_if_keys_do_not() {
+        let mut state = test_state();
+        state.assets_by_type.insert(
+            super::AssetType::Hdris,
+            super::AssetListState::Loaded(AssetList {
+                assets: vec![asset("visible_hdri", "Alice", StatusGroup::InProgress)],
+                statuses: Vec::new(),
+            }),
+        );
+        state.selected_types = vec![super::AssetType::Hdris];
+        state.selected_status_groups = vec![StatusGroup::InProgress];
+        state.author_filters = Vec::new();
+        let all_authors_scope = state.visible_validation_scope_snapshot();
+
+        state.author_filters = vec!["Alice".into()];
+        let alice_scope = state.visible_validation_scope_snapshot();
+
+        assert_ne!(alice_scope, all_authors_scope);
+        assert_eq!(
+            alice_scope.keys,
+            vec![super::RowKey {
+                asset_type: super::AssetType::Hdris,
+                slug: "visible_hdri".into()
+            }]
         );
     }
 

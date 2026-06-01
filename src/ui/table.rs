@@ -45,8 +45,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                 rows.extend(
                     list.assets
                         .iter()
-                        .filter(|a| author_matches_filter(&a.author, &filters))
-                        .filter(|a| status_matches_filter(&a.status, &status_groups))
+                        .filter(|a| asset_matches_filters(a, &filters, &status_groups))
                         .map(|a| {
                             let key = super::RowKey {
                                 asset_type: t,
@@ -751,6 +750,14 @@ fn fmt_bytes(b: u64) -> String {
     } else {
         format!("{b:.0} B")
     }
+}
+
+pub(super) fn asset_matches_filters(
+    asset: &Asset,
+    filters: &[String],
+    selected: &[StatusGroup],
+) -> bool {
+    author_matches_filter(&asset.author, filters) && status_matches_filter(&asset.status, selected)
 }
 
 fn author_matches_filter(author: &str, filters: &[String]) -> bool {
