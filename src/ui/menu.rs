@@ -137,8 +137,9 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
 
 fn author_filter_option(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {
     let height = ui.spacing().interact_size.y;
+    let icon_size = egui::vec2(12.0, 12.0);
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), height),
+        egui::vec2(ui.available_width() + icon_size.x, height),
         egui::Sense::click(),
     );
 
@@ -156,7 +157,6 @@ fn author_filter_option(ui: &mut egui::Ui, selected: bool, label: &str) -> egui:
             .rect_filled(rect, row_visuals.rounding, row_visuals.bg_fill);
     }
 
-    let icon_size = egui::vec2(12.0, 12.0);
     let icon_rect = egui::Rect::from_center_size(
         egui::pos2(rect.left() + 4.0 + icon_size.x / 2.0, rect.center().y),
         icon_size,
