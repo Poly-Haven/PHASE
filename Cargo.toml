@@ -1,6 +1,6 @@
 [package]
 name = "phase"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "PHASE — internal asset pipeline tool"
 
@@ -20,6 +20,8 @@ filetime    = "0.2"
 open        = "5"
 rfd         = "0.14"
 dirs        = "5"
+semver      = "1"
+self_update = { version = "0.44", default-features = false, features = ["reqwest", "rustls", "archive-zip", "compression-zip-deflate"] }
 anyhow      = "1"
 thiserror   = "1"
 log         = "0.4"
