@@ -136,20 +136,50 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
 }
 
 fn author_filter_option(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {
-    ui.horizontal(|ui| {
-        let size = egui::vec2(12.0, 12.0);
-        if selected {
-            let tex = super::check_texture(ui.ctx());
-            ui.add(
-                egui::Image::new(egui::load::SizedTexture::new(tex.id(), size))
-                    .tint(super::colors::TEXT_PRIMARY),
-            );
-        } else {
-            ui.allocate_space(size);
-        }
-        ui.selectable_label(selected, label)
-    })
-    .inner
+    let height = ui.spacing().interact_size.y;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click(),
+    );
+
+    let visuals = ui.visuals();
+    let row_visuals = if selected {
+        visuals.widgets.active
+    } else if response.hovered() {
+        visuals.widgets.hovered
+    } else {
+        visuals.widgets.inactive
+    };
+
+    if selected || response.hovered() {
+        ui.painter()
+            .rect_filled(rect, row_visuals.rounding, row_visuals.bg_fill);
+    }
+
+    let icon_size = egui::vec2(12.0, 12.0);
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 4.0 + icon_size.x / 2.0, rect.center().y),
+        icon_size,
+    );
+    if selected {
+        let tex = super::check_texture(ui.ctx());
+        ui.painter().image(
+            tex.id(),
+            icon_rect,
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+            super::colors::TEXT_PRIMARY,
+        );
+    }
+
+    ui.painter().text(
+        egui::pos2(icon_rect.right() + 4.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::TextStyle::Button.resolve(ui.style()),
+        super::colors::TEXT_PRIMARY,
+    );
+
+    response
 }
 
 fn current_authors(state: &AppState) -> Vec<String> {
