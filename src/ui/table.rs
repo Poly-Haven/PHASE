@@ -18,6 +18,7 @@ pub struct RowMsg {
     pub kind: MsgKind,
     pub text: String,
     pub link: Option<String>,
+    pub dismiss_key: Option<String>,
 }
 
 pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
@@ -63,6 +64,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                                 exists,
                                 &state.published_assets,
                                 &validation_findings,
+                                &state.dismissed_warning_keys,
                             )
                         }),
                 );
@@ -134,13 +136,19 @@ impl RowView {
         exists_on_prod: bool,
         published_assets: &crate::polyhaven::PublishedAssets,
         validation_findings: &[crate::validation::Finding],
+        dismissed_warning_keys: &std::collections::HashSet<String>,
     ) -> Self {
         let mut messages = Vec::new();
+        let key = RowKey {
+            asset_type,
+            slug: a.slug.clone(),
+        };
         if let Some(text) = crate::slug::message(&a.slug) {
             messages.push(RowMsg {
                 kind: MsgKind::Error,
                 text,
                 link: None,
+                dismiss_key: None,
             });
         }
         if !exists_on_prod {
@@ -148,6 +156,7 @@ impl RowView {
                 kind: MsgKind::Warning,
                 text: "Prod folder missing".into(),
                 link: None,
+                dismiss_key: None,
             });
         }
         if should_warn_published_slug(published_assets, &a.slug, &a.status) {
@@ -155,6 +164,7 @@ impl RowView {
                 kind: MsgKind::Warning,
                 text: "Published asset with this slug found".into(),
                 link: Some(format!("https://polyhaven.com/a/{}", a.slug)),
+                dismiss_key: None,
             });
         }
         for finding in validation_findings {
@@ -162,8 +172,12 @@ impl RowView {
                 kind: Self::msg_kind_from_validation_severity(finding.severity),
                 text: finding.text.clone(),
                 link: None,
+                dismiss_key: finding
+                    .dismiss_id
+                    .map(|dismiss_id| crate::validation::dismissal_key(&key, dismiss_id)),
             });
         }
+        let messages = Self::visible_row_messages(&messages, dismissed_warning_keys);
         Self {
             asset_type,
             slug: a.slug.clone(),
@@ -174,6 +188,28 @@ impl RowView {
             exists_on_prod,
             messages,
         }
+    }
+
+    fn visible_row_messages(
+        messages: &[RowMsg],
+        dismissed_warning_keys: &std::collections::HashSet<String>,
+    ) -> Vec<RowMsg> {
+        let filtered = messages
+            .iter()
+            .filter(|msg| {
+                msg.dismiss_key
+                    .as_ref()
+                    .map(|key| !dismissed_warning_keys.contains(key))
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        filtered
+            .iter()
+            .find(|msg| matches!(msg.kind, MsgKind::Error))
+            .cloned()
+            .map(|msg| vec![msg])
+            .unwrap_or(filtered)
     }
 
     fn msg_kind_from_validation_severity(severity: crate::validation::Severity) -> MsgKind {
@@ -325,42 +361,63 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
 
             for msg in &row.messages {
                 ui.add_space(8.0);
-                let (tex, color) = match msg.kind {
-                    MsgKind::Info => (super::info_icon_texture(ui.ctx()), colors::MSG_INFO),
-                    MsgKind::Warning => (super::warn_icon_texture(ui.ctx()), colors::MSG_WARNING),
-                    MsgKind::Error => (super::error_icon_texture(ui.ctx()), colors::MSG_ERROR),
-                    MsgKind::Question => {
-                        (super::question_icon_texture(ui.ctx()), colors::MSG_QUESTION)
-                    }
-                };
-                ui.add(
-                    egui::Image::new(egui::load::SizedTexture::new(
-                        tex.id(),
-                        egui::vec2(14.0, 14.0),
-                    ))
-                    .tint(color),
-                );
-                ui.add_space(2.0);
-                ui.colored_label(color, &msg.text);
-                if let Some(link) = &msg.link {
-                    ui.add_space(2.0);
-                    let tex = super::external_link_texture(ui.ctx());
-                    let resp = ui.add(
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = (ui.spacing().item_spacing.x - 4.0).max(0.0);
+                    let (tex, color) = match msg.kind {
+                        MsgKind::Info => (super::info_icon_texture(ui.ctx()), colors::MSG_INFO),
+                        MsgKind::Warning => {
+                            (super::warn_icon_texture(ui.ctx()), colors::MSG_WARNING)
+                        }
+                        MsgKind::Error => (super::error_icon_texture(ui.ctx()), colors::MSG_ERROR),
+                        MsgKind::Question => {
+                            (super::question_icon_texture(ui.ctx()), colors::MSG_QUESTION)
+                        }
+                    };
+                    ui.add(
                         egui::Image::new(egui::load::SizedTexture::new(
                             tex.id(),
-                            egui::vec2(12.0, 12.0),
+                            egui::vec2(14.0, 14.0),
                         ))
-                        .tint(color)
-                        .sense(egui::Sense::click()),
+                        .tint(color),
                     );
-                    if resp
-                        .on_hover_text("Open on polyhaven.com")
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked()
-                    {
-                        let _ = open::that(link);
+                    ui.colored_label(color, &msg.text);
+                    if let Some(link) = &msg.link {
+                        let tex = super::external_link_texture(ui.ctx());
+                        let resp = ui.add(
+                            egui::Image::new(egui::load::SizedTexture::new(
+                                tex.id(),
+                                egui::vec2(12.0, 12.0),
+                            ))
+                            .tint(color)
+                            .sense(egui::Sense::click()),
+                        );
+                        if resp
+                            .on_hover_text("Open on polyhaven.com")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            let _ = open::that(link);
+                        }
                     }
-                }
+                    if let Some(dismiss_key) = &msg.dismiss_key {
+                        let tex = super::x_icon_texture(ui.ctx());
+                        let resp = ui.add(
+                            egui::Image::new(egui::load::SizedTexture::new(
+                                tex.id(),
+                                egui::vec2(12.0, 12.0),
+                            ))
+                            .tint(egui::Color32::WHITE)
+                            .sense(egui::Sense::click()),
+                        );
+                        if resp
+                            .on_hover_text("Dismiss")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            state.dismiss_warning(dismiss_key.clone());
+                        }
+                    }
+                });
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -892,5 +949,61 @@ mod tests {
 
         assert!(!availability.enabled);
         assert_eq!(availability.tooltip, "Prod folder missing");
+    }
+
+    #[test]
+    fn dismissed_messages_are_filtered_out() {
+        let messages = vec![
+            RowMsg {
+                kind: MsgKind::Warning,
+                text: "Missing /staging/colorchart.zip in Prod".into(),
+                link: None,
+                dismiss_key: Some("HDRIs/sunny_field:missing-colorchart-zip".into()),
+            },
+            RowMsg {
+                kind: MsgKind::Info,
+                text: "Local files newer than Prod. Push?".into(),
+                link: None,
+                dismiss_key: None,
+            },
+        ];
+        let dismissed = std::collections::HashSet::from([
+            "HDRIs/sunny_field:missing-colorchart-zip".to_string(),
+        ]);
+
+        let visible = RowView::visible_row_messages(&messages, &dismissed);
+
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].text, "Local files newer than Prod. Push?");
+    }
+
+    #[test]
+    fn first_error_hides_all_other_messages() {
+        let messages = vec![
+            RowMsg {
+                kind: MsgKind::Warning,
+                text: "Published asset with this slug found".into(),
+                link: None,
+                dismiss_key: None,
+            },
+            RowMsg {
+                kind: MsgKind::Error,
+                text: "Unexpected root entries: renders".into(),
+                link: None,
+                dismiss_key: None,
+            },
+            RowMsg {
+                kind: MsgKind::Warning,
+                text: "Missing /staging/colorchart.zip in Prod".into(),
+                link: None,
+                dismiss_key: Some("HDRIs/sunny_field:missing-colorchart-zip".into()),
+            },
+        ];
+
+        let visible = RowView::visible_row_messages(&messages, &std::collections::HashSet::new());
+
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].text, "Unexpected root entries: renders");
+        assert!(matches!(visible[0].kind, MsgKind::Error));
     }
 }

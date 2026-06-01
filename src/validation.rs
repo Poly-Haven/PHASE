@@ -1,4 +1,8 @@
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::ffi::OsStr;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::thread;
@@ -19,6 +23,7 @@ pub enum Severity {
 pub struct Finding {
     pub severity: Severity,
     pub text: String,
+    pub dismiss_id: Option<&'static str>,
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +86,7 @@ pub fn validate_asset(
                 Severity::Info
             },
             text: "Local files newer than Prod. Push?".into(),
+            dismiss_id: None,
         });
     }
 
@@ -117,6 +123,7 @@ fn validate_root_entries(asset_type: AssetType, local_root: &Path) -> Option<Fin
         Some(Finding {
             severity: Severity::Error,
             text: format!("Unexpected root entries: {}", unexpected.join(", ")),
+            dismiss_id: None,
         })
     }
 }
@@ -165,12 +172,14 @@ fn validate_needs_review_requirements(
                 findings.push(Finding {
                     severity: Severity::Error,
                     text: format!("Missing /staging/{slug}.exr in Prod"),
+                    dismiss_id: None,
                 });
             }
             if !staging.join("colorchart.zip").is_file() {
                 findings.push(Finding {
                     severity: Severity::Warning,
                     text: "Missing /staging/colorchart.zip in Prod".into(),
+                    dismiss_id: Some("missing-colorchart-zip"),
                 });
             }
         }
@@ -179,12 +188,14 @@ fn validate_needs_review_requirements(
                 findings.push(Finding {
                     severity: Severity::Error,
                     text: format!("Missing /staging/{slug}.blend in Prod"),
+                    dismiss_id: None,
                 });
             }
             if !staging.join("textures").is_dir() {
                 findings.push(Finding {
                     severity: Severity::Error,
                     text: "Missing /staging/textures in Prod".into(),
+                    dismiss_id: None,
                 });
             }
         }
@@ -203,6 +214,46 @@ fn is_harmless_root_file(name: &OsStr) -> bool {
         name.to_string_lossy().to_ascii_lowercase().as_str(),
         "thumbs.db" | "desktop.ini" | ".ds_store" | "ehthumbs.db"
     )
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct DismissedWarningsFile {
+    keys: Vec<String>,
+}
+
+pub fn dismissal_key(key: &RowKey, dismiss_id: &str) -> String {
+    format!("{}/{}:{}", key.asset_type.folder(), key.slug, dismiss_id)
+}
+
+pub fn load_dismissed_warning_keys() -> Result<HashSet<String>> {
+    load_dismissed_warning_keys_from(&dismissed_warning_path()?)
+}
+
+pub fn save_dismissed_warning_keys(keys: &HashSet<String>) -> Result<()> {
+    save_dismissed_warning_keys_to(&dismissed_warning_path()?, keys)
+}
+
+fn dismissed_warning_path() -> Result<PathBuf> {
+    Ok(crate::config::app_dir()?.join("dismissed_validation_warnings.json"))
+}
+
+fn load_dismissed_warning_keys_from(path: &Path) -> Result<HashSet<String>> {
+    if !path.exists() {
+        return Ok(HashSet::new());
+    }
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let file: DismissedWarningsFile =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(file.keys.into_iter().collect())
+}
+
+fn save_dismissed_warning_keys_to(path: &Path, keys: &HashSet<String>) -> Result<()> {
+    let mut sorted_keys = keys.iter().cloned().collect::<Vec<_>>();
+    sorted_keys.sort();
+    let text = serde_json::to_string_pretty(&DismissedWarningsFile { keys: sorted_keys })
+        .context("serialising dismissed warnings")?;
+    fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -364,5 +415,41 @@ mod tests {
             finding.severity == Severity::Error
                 && finding.text == "Missing /staging/textures in Prod"
         }));
+    }
+
+    #[test]
+    fn colorchart_warning_is_marked_dismissable() {
+        let temp = tempdir().unwrap();
+        let local_root = temp.path().join("local");
+        let prod_root = temp.path().join("prod");
+        fs::create_dir_all(prod_root.join("staging")).unwrap();
+
+        let findings = validate_asset(
+            AssetType::Hdris,
+            "sunny_field",
+            Some(&needs_review_status()),
+            &local_root,
+            &prod_root,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.text == "Missing /staging/colorchart.zip in Prod"
+                && finding.dismiss_id == Some("missing-colorchart-zip")
+        }));
+    }
+
+    #[test]
+    fn dismissed_warning_file_round_trips() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("dismissed.json");
+        let keys = std::collections::HashSet::from([
+            "HDRIs/sunny_field:missing-colorchart-zip".to_string(),
+            "Textures/forest_floor:other".to_string(),
+        ]);
+
+        save_dismissed_warning_keys_to(&path, &keys).unwrap();
+        let loaded = load_dismissed_warning_keys_from(&path).unwrap();
+
+        assert_eq!(loaded, keys);
     }
 }
