@@ -583,7 +583,7 @@ fn draw_context_menu(
 fn draw_row_context_button(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
     let icon_size = egui::vec2(18.0, 18.0);
     let (rect, response) = ui.allocate_exact_size(icon_size, egui::Sense::click());
-    let tex = super::chevron_down_texture(ui.ctx());
+    let tex = row_context_texture(ui.ctx());
     let tint = if response.hovered() {
         colors::HOVER
     } else if row.exists_on_prod {
@@ -593,7 +593,7 @@ fn draw_row_context_button(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey
     };
     ui.painter().image(
         tex.id(),
-        rect.shrink(3.0),
+        row_context_icon_rect(rect),
         egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
         tint,
     );
@@ -610,6 +610,14 @@ fn draw_row_context_button(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey
         let prod_folder = state.prod_root_for(key.asset_type).join(&key.slug);
         draw_context_menu(ui, &local_folder, &prod_folder, &row.url);
     });
+}
+
+fn row_context_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    super::list_texture(ctx)
+}
+
+fn row_context_icon_rect(rect: egui::Rect) -> egui::Rect {
+    rect.shrink(1.0)
 }
 
 fn draw_toast(ui: &mut egui::Ui, toast: &super::RowToast) {
@@ -956,6 +964,23 @@ mod tests {
 
         assert!(!availability.enabled);
         assert_eq!(availability.tooltip, "Prod folder missing");
+    }
+
+    #[test]
+    fn row_context_button_uses_list_icon_texture() {
+        let ctx = egui::Context::default();
+        let texture = row_context_texture(&ctx);
+
+        assert_eq!(texture.name(), "list_icon");
+    }
+
+    #[test]
+    fn row_context_icon_uses_nearly_full_button_area() {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(18.0, 18.0));
+
+        let icon_rect = row_context_icon_rect(rect);
+
+        assert_eq!(icon_rect.size(), egui::vec2(16.0, 16.0));
     }
 
     #[test]
