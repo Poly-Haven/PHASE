@@ -1562,6 +1562,14 @@ pub fn chevron_down_texture(ctx: &egui::Context) -> egui::TextureHandle {
         .clone()
 }
 
+pub fn list_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/list.svg");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "list_icon", "list.svg"))
+        .clone()
+}
+
 pub fn x_icon_texture(ctx: &egui::Context) -> egui::TextureHandle {
     use std::sync::OnceLock;
     static BYTES: &[u8] = include_bytes!("../assets/x.svg");
