@@ -248,7 +248,7 @@ fn extract_status_options(props: &serde_json::Value) -> Vec<StatusOption> {
         }
     }
 
-    let mut options: Vec<_> = status
+    status
         .get("options")
         .and_then(|o| o.as_array())
         .into_iter()
@@ -274,14 +274,7 @@ fn extract_status_options(props: &serde_json::Value) -> Vec<StatusOption> {
                 group,
             })
         })
-        .collect();
-    options.sort_by(|a, b| {
-        a.group
-            .order()
-            .cmp(&b.group.order())
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    options
+        .collect()
 }
 
 fn extract_status(
@@ -424,6 +417,37 @@ mod tests {
                     group: StatusGroup::Complete,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn preserves_status_options_in_notion_order() {
+        let props = serde_json::json!({
+            "Status": {
+                "type": "status",
+                "status": {
+                    "options": [
+                        { "id": "creative-review", "name": "Creative review", "color": "blue", "group_id": "g2" },
+                        { "id": "awaiting-payment", "name": "Awaiting payment", "color": "yellow", "group_id": "g2" },
+                        { "id": "todo", "name": "To do", "color": "default", "group_id": "g1" }
+                    ],
+                    "groups": [
+                        { "id": "g1", "name": "To-do" },
+                        { "id": "g2", "name": "In progress" },
+                        { "id": "g3", "name": "Complete" }
+                    ]
+                }
+            }
+        });
+
+        let options = extract_status_options(&props);
+
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["creative-review", "awaiting-payment", "todo"]
         );
     }
 
