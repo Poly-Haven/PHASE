@@ -123,6 +123,10 @@ pub struct StatusUpdateJob {
     pub requested: StatusOption,
 }
 
+pub struct UpdateInstallJob {
+    pub rx: Receiver<Result<(), String>>,
+}
+
 #[derive(Copy, Clone)]
 pub enum ConflictChoice {
     OverwriteAll,
@@ -166,6 +170,10 @@ pub struct AppState {
     /// Rebuilt when Notion data loads, window gains focus, a job finishes,
     /// or a prod folder is created — never on every frame.
     pub prod_folder_cache: HashMap<RowKey, bool>,
+    pub update_check_rx: Option<Receiver<Result<Option<crate::updater::UpdateInfo>, String>>>,
+    pub pending_update: Option<crate::updater::UpdateInfo>,
+    pub update_dialog_open: bool,
+    pub update_install: Option<UpdateInstallJob>,
 }
 
 impl AppState {
@@ -226,6 +234,10 @@ impl AppState {
             cursor_moved_in_table_at: None,
             focus_refresh: focus_refresh::State::default(),
             prod_folder_cache: HashMap::new(),
+            update_check_rx: None,
+            pending_update: None,
+            update_dialog_open: false,
+            update_install: None,
         };
         s.token_prompt_open = s.config.notion_token.is_empty();
         s.token_input = s.config.notion_token.clone();
@@ -239,7 +251,36 @@ impl AppState {
             }
         }
         s.rebuild_prod_folder_cache();
+        s.start_update_check();
         s
+    }
+
+    fn start_update_check(&mut self) {
+        if self.update_check_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            let res = crate::updater::check_for_update().map_err(|err| err.to_string());
+            let _ = tx.send(res);
+        });
+        self.update_check_rx = Some(rx);
+    }
+
+    pub fn start_update_install(&mut self) {
+        if self.update_install.is_some() {
+            return;
+        }
+        let Some(update) = self.pending_update.clone() else {
+            return;
+        };
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            let res = crate::updater::install_update_and_restart(&update.tag)
+                .map_err(|err| err.to_string());
+            let _ = tx.send(res);
+        });
+        self.update_install = Some(UpdateInstallJob { rx });
     }
 
     pub fn refresh(&mut self, t: AssetType) {
@@ -319,6 +360,35 @@ impl AppState {
 
     /// Drain Notion + job channels each frame.
     pub fn pump(&mut self) {
+        if let Some(res) = self
+            .update_check_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.update_check_rx = None;
+            match res {
+                Ok(Some(info)) => {
+                    self.update_dialog_open = info.minor_or_major_update;
+                    self.pending_update = Some(info);
+                }
+                Ok(None) => {}
+                Err(msg) => {
+                    log::warn!("Update check failed: {msg}");
+                }
+            }
+        }
+
+        if let Some(res) = self
+            .update_install
+            .as_ref()
+            .and_then(|job| job.rx.try_recv().ok())
+        {
+            self.update_install = None;
+            if let Err(msg) = res {
+                self.error_banner = Some(format!("Update failed: {msg}"));
+            }
+        }
+
         let cursor_guard = self
             .cursor_moved_in_table_at
             .map(|t| t.elapsed().as_secs_f32() < 2.0)
@@ -758,7 +828,7 @@ fn active_file_action_status(state: &AppState) -> Option<String> {
         })
 }
 
-fn draw_status_bar(state: &AppState, ctx: &egui::Context) {
+fn draw_status_bar(state: &mut AppState, ctx: &egui::Context) {
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
         egui::Frame::none()
             .inner_margin(egui::Margin::symmetric(4.0, 2.0))
@@ -767,14 +837,37 @@ fn draw_status_bar(state: &AppState, ctx: &egui::Context) {
                     let status = active_file_action_status(state).unwrap_or_default();
                     ui.label(egui::RichText::new(status).color(colors::TEXT_DISABLED));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                                .color(colors::TEXT_DISABLED),
-                        );
+                        draw_version_status(state, ui);
                     });
                 });
             });
     });
+}
+
+fn draw_version_status(state: &mut AppState, ui: &mut egui::Ui) {
+    let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+    if state.update_install.is_some() {
+        ui.label(egui::RichText::new("Installing update...").color(colors::TEXT_DISABLED));
+        return;
+    }
+    if state.pending_update.is_some() {
+        let response = ui
+            .add(
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "{current} - New version available! Click to update"
+                    ))
+                    .color(colors::HOVER),
+                )
+                .sense(egui::Sense::click()),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if response.clicked() {
+            state.start_update_install();
+        }
+    } else {
+        ui.label(egui::RichText::new(current).color(colors::TEXT_DISABLED));
+    }
 }
 
 pub fn draw(state: &mut AppState, ctx: &egui::Context) {
@@ -815,6 +908,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     dialogs::token_prompt(state, ctx);
     dialogs::settings(state, ctx);
     dialogs::draw(state, ctx);
+    draw_update_prompt(state, ctx);
     draw_create_prod_folder_prompt(state, ctx);
     draw_verification_failure_prompt(state, ctx);
     draw_status_bar(state, ctx);
@@ -835,8 +929,60 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         || !state.row_toasts.is_empty()
         || !state.jobs.is_empty()
         || !state.verifications.is_empty()
+        || state.update_check_rx.is_some()
+        || state.update_install.is_some()
     {
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
+    }
+}
+
+fn draw_update_prompt(state: &mut AppState, ctx: &egui::Context) {
+    if !state.update_dialog_open {
+        return;
+    }
+    let Some(update) = state.pending_update.clone() else {
+        state.update_dialog_open = false;
+        return;
+    };
+
+    let mut install = false;
+    let mut close = false;
+    let mut notes = update.notes.clone();
+    egui::Window::new(format!("PHASE {} available", update.tag))
+        .collapsible(false)
+        .resizable(true)
+        .default_width(620.0)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label(format!("A new PHASE version is available: {}", update.tag));
+            ui.add_space(8.0);
+            ui.label("Release notes:");
+            egui::ScrollArea::vertical()
+                .max_height(280.0)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut notes)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(12)
+                            .interactive(false),
+                    );
+                });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Update").clicked() {
+                    install = true;
+                }
+                if ui.button("Not now").clicked() {
+                    close = true;
+                }
+            });
+        });
+
+    if install {
+        state.update_dialog_open = false;
+        state.start_update_install();
+    } else if close {
+        state.update_dialog_open = false;
     }
 }
 

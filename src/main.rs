@@ -7,6 +7,7 @@ mod notion;
 mod polyhaven;
 mod slug;
 mod ui;
+mod updater;
 
 use ui::AppState;
 
