@@ -58,6 +58,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
         let display = author_filter_display(&state.author_filters);
         let filters_before = state.author_filters.clone();
         egui::ComboBox::from_id_source("author_filter")
+            .width(author_filter_combo_width(ui.spacing().combo_width))
             .selected_text(display)
             .show_ui(ui, |ui| {
                 let all_selected = state.author_filters.is_empty();
@@ -139,7 +140,7 @@ fn author_filter_option(ui: &mut egui::Ui, selected: bool, label: &str) -> egui:
     let height = ui.spacing().interact_size.y;
     let icon_size = egui::vec2(12.0, 12.0);
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width() + icon_size.x, height),
+        egui::vec2(author_filter_row_width(ui.available_width()), height),
         egui::Sense::click(),
     );
 
@@ -180,6 +181,14 @@ fn author_filter_option(ui: &mut egui::Ui, selected: bool, label: &str) -> egui:
     );
 
     response
+}
+
+fn author_filter_row_width(available_width: f32) -> f32 {
+    available_width
+}
+
+fn author_filter_combo_width(default_width: f32) -> f32 {
+    default_width + 12.0
 }
 
 fn current_authors(state: &AppState) -> Vec<String> {
@@ -261,6 +270,16 @@ mod tests {
     fn author_filter_options_include_current_selection_even_without_matching_assets() {
         let options = super::author_filter_options_with_current(["Alice, Bob"], &["Carol".into()]);
         assert_eq!(options, vec!["Alice", "Bob", "Carol"]);
+    }
+
+    #[test]
+    fn author_filter_row_width_does_not_add_padding_per_row() {
+        assert_eq!(super::author_filter_row_width(200.0), 200.0);
+    }
+
+    #[test]
+    fn author_filter_combo_width_adds_padding_once() {
+        assert_eq!(super::author_filter_combo_width(200.0), 212.0);
     }
 
     #[test]
