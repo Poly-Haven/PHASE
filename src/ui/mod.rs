@@ -834,14 +834,42 @@ fn draw_status_bar(state: &mut AppState, ctx: &egui::Context) {
             .inner_margin(egui::Margin::symmetric(4.0, 2.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let status = active_file_action_status(state).unwrap_or_default();
-                    ui.label(egui::RichText::new(status).color(colors::TEXT_DISABLED));
+                    draw_status_bar_primary(state, ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         draw_version_status(state, ui);
                     });
                 });
             });
     });
+}
+
+fn draw_status_bar_primary(state: &mut AppState, ui: &mut egui::Ui) {
+    if let Some(err) = state.error_banner.clone() {
+        ui.horizontal(|ui| {
+            ui.colored_label(colors::ERROR_BANNER, err);
+            let tex = x_icon_texture(ui.ctx());
+            let resp = ui.add(
+                egui::Image::new(egui::load::SizedTexture::new(
+                    tex.id(),
+                    egui::vec2(14.0, 14.0),
+                ))
+                .tint(egui::Color32::WHITE)
+                .sense(egui::Sense::click()),
+            );
+            if resp
+                .on_hover_text("Dismiss")
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                state.error_banner = None;
+            }
+        });
+        return;
+    }
+
+    if let Some(status) = active_file_action_status(state) {
+        ui.label(egui::RichText::new(status).color(colors::TEXT_DISABLED));
+    }
 }
 
 fn draw_version_status(state: &mut AppState, ui: &mut egui::Ui) {
@@ -882,29 +910,6 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             .inner_margin(egui::Margin::symmetric(0.0, 4.0))
             .show(ui, |ui| menu::draw(state, ui));
     });
-    if let Some(err) = state.error_banner.clone() {
-        egui::TopBottomPanel::top("banner").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.colored_label(colors::ERROR_BANNER, err);
-                let tex = x_icon_texture(ui.ctx());
-                let resp = ui.add(
-                    egui::Image::new(egui::load::SizedTexture::new(
-                        tex.id(),
-                        egui::vec2(14.0, 14.0),
-                    ))
-                    .tint(egui::Color32::WHITE)
-                    .sense(egui::Sense::click()),
-                );
-                if resp
-                    .on_hover_text("Dismiss")
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    state.error_banner = None;
-                }
-            });
-        });
-    }
     dialogs::token_prompt(state, ctx);
     dialogs::settings(state, ctx);
     dialogs::draw(state, ctx);
@@ -1069,7 +1074,98 @@ fn draw_create_prod_folder_prompt(state: &mut AppState, ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
-    use crate::copy::plan::Direction;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{mpsc::channel, Arc, Mutex};
+    use std::time::Instant;
+
+    use egui::{epaint::ClippedShape, Pos2, RawInput, Rect, Vec2};
+
+    use crate::config::Config;
+    use crate::copy::job::JobProgress;
+    use crate::copy::plan::{Direction, Plan};
+    use crate::notion::{AssetList, StatusGroup};
+
+    fn test_state() -> super::AppState {
+        let current_type = super::AssetType::Hdris;
+        let mut assets_by_type = HashMap::new();
+        assets_by_type.insert(
+            current_type,
+            super::AssetListState::Loaded(AssetList {
+                assets: Vec::new(),
+                statuses: Vec::new(),
+            }),
+        );
+
+        super::AppState {
+            config: Config::default(),
+            current_type,
+            selected_types: vec![current_type],
+            selected_status_groups: StatusGroup::default_filter(),
+            author_filter: String::new(),
+            author_filters: Vec::new(),
+            assets_by_type,
+            error_banner: None,
+            jobs: HashMap::new(),
+            verifications: HashMap::new(),
+            status_updates: HashMap::new(),
+            notion_rx: HashMap::new(),
+            pending_conflict: None,
+            pending_verification_failure: None,
+            pending_prod_folder_create: None,
+            row_toasts: HashMap::new(),
+            published_assets: crate::polyhaven::PublishedAssets::default(),
+            published_rx: None,
+            refreshing_published: false,
+            token_prompt_open: false,
+            token_input: String::new(),
+            settings_open: false,
+            settings_local_root_input: String::new(),
+            settings_skip_pull_raw_tif_if_many_work_tifs: true,
+            refreshing: HashSet::new(),
+            pending_notion: HashMap::new(),
+            cursor_moved_in_table_at: None,
+            focus_refresh: super::focus_refresh::State::default(),
+            prod_folder_cache: HashMap::new(),
+            update_check_rx: None,
+            pending_update: None,
+            update_dialog_open: false,
+            update_install: None,
+        }
+    }
+
+    fn render_text_shapes(state: &mut super::AppState) -> Vec<(String, Pos2)> {
+        let ctx = egui::Context::default();
+        let output = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0))),
+                ..Default::default()
+            },
+            |ctx| super::draw(state, ctx),
+        );
+        let mut texts = Vec::new();
+        collect_text_shapes(&output.shapes, &mut texts);
+        texts
+    }
+
+    fn collect_text_shapes(shapes: &[ClippedShape], texts: &mut Vec<(String, Pos2)>) {
+        for clipped in shapes {
+            collect_shape_text(&clipped.shape, texts);
+        }
+    }
+
+    fn collect_shape_text(shape: &egui::epaint::Shape, texts: &mut Vec<(String, Pos2)>) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                texts.push((text.galley.job.text.clone(), text.pos));
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_shape_text(shape, texts);
+                }
+            }
+            _ => {}
+        }
+    }
 
     #[test]
     fn prod_folder_structure_creates_expected_subfolders() {
@@ -1097,6 +1193,62 @@ mod tests {
             super::format_active_file_action(&key, Direction::Push, Some("bar.xyz")),
             "Uploading HDRIs/foo/bar.xyz to Prod"
         );
+    }
+
+    #[test]
+    fn error_message_renders_in_bottom_status_bar_area() {
+        let mut state = test_state();
+        state.error_banner = Some("Cannot create Prod folder".into());
+
+        let texts = render_text_shapes(&mut state);
+        let y = texts
+            .iter()
+            .find_map(|(text, pos)| (text == "Cannot create Prod folder").then_some(pos.y))
+            .expect("error text should be rendered");
+
+        assert!(
+            y > 600.0,
+            "expected error text near the bottom status bar, got y={y}"
+        );
+    }
+
+    #[test]
+    fn error_message_replaces_active_progress_text_while_visible() {
+        let mut state = test_state();
+        state.error_banner = Some("Cannot create Prod folder".into());
+        let key = super::RowKey {
+            asset_type: super::AssetType::Hdris,
+            slug: "foo".into(),
+        };
+        let progress = Arc::new(JobProgress::default());
+        *progress.current_file.lock().unwrap() = Some("bar.xyz".into());
+        let (_tx, rx) = channel();
+        state.jobs.insert(
+            key.clone(),
+            super::RowJob {
+                direction: Direction::Push,
+                plan: Plan {
+                    direction: Direction::Push,
+                    src_root: std::path::PathBuf::from(r"C:\src"),
+                    dst_root: std::path::PathBuf::from(r"C:\dst"),
+                    files: Vec::new(),
+                    total_bytes_to_copy: 0,
+                },
+                progress,
+                rx,
+                started_at: Instant::now(),
+                message: Arc::new(Mutex::new(String::new())),
+            },
+        );
+
+        let texts = render_text_shapes(&mut state);
+
+        assert!(texts
+            .iter()
+            .any(|(text, _)| text == "Cannot create Prod folder"));
+        assert!(!texts
+            .iter()
+            .any(|(text, _)| { text.contains("Uploading HDRIs/foo/bar.xyz to Prod") }));
     }
 }
 
