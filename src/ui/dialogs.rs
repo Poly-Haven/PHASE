@@ -2,12 +2,22 @@ use super::{AppState, ConflictChoice};
 use crate::copy::plan::Action;
 
 pub fn draw(state: &mut AppState, ctx: &egui::Context) {
-    let Some(pc) = state.pending_conflict.as_ref() else { return; };
+    let Some(pc) = state.pending_conflict.as_ref() else {
+        return;
+    };
     let slug = pc.key.slug.clone();
-    let conflicts: Vec<(String, &'static str)> = pc.plan.files.iter()
+    let conflicts: Vec<(String, &'static str)> = pc
+        .plan
+        .files
+        .iter()
         .filter_map(|f| match f.action {
-            Action::Conflict { dest_newer: true }  => Some((f.rel_path.to_string_lossy().to_string(), "Newer at destination")),
-            Action::Conflict { dest_newer: false } => Some((f.rel_path.to_string_lossy().to_string(), "Newer at source")),
+            Action::Conflict { dest_newer: true } => Some((
+                f.rel_path.to_string_lossy().to_string(),
+                "Newer at destination",
+            )),
+            Action::Conflict { dest_newer: false } => {
+                Some((f.rel_path.to_string_lossy().to_string(), "Newer at source"))
+            }
             _ => None,
         })
         .collect();
@@ -22,21 +32,32 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         .show(ctx, |ui| {
             ui.label(format!("{} file(s) in conflict:", conflicts.len()));
             ui.add_space(6.0);
-            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                for (path, note) in &conflicts {
-                    ui.horizontal(|ui| {
-                        ui.monospace(path);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.weak(*note);
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    for (path, note) in &conflicts {
+                        ui.horizontal(|ui| {
+                            ui.monospace(path);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.weak(*note);
+                                },
+                            );
                         });
-                    });
-                }
-            });
+                    }
+                });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Overwrite All").clicked() { choice = Some(ConflictChoice::OverwriteAll); }
-                if ui.button("Copy Only New").clicked() { choice = Some(ConflictChoice::CopyOnlyNew); }
-                if ui.button("Cancel").clicked()        { choice = Some(ConflictChoice::Cancel); }
+                if ui.button("Overwrite All").clicked() {
+                    choice = Some(ConflictChoice::OverwriteAll);
+                }
+                if ui.button("Copy Only New").clicked() {
+                    choice = Some(ConflictChoice::CopyOnlyNew);
+                }
+                if ui.button("Cancel").clicked() {
+                    choice = Some(ConflictChoice::Cancel);
+                }
             });
         });
 
@@ -50,11 +71,14 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
 }
 
 pub fn token_prompt(state: &mut AppState, ctx: &egui::Context) {
-    if !state.token_prompt_open { return; }
+    if !state.token_prompt_open {
+        return;
+    }
     let mut save = false;
     let mut close = false;
     egui::Window::new("Notion token required")
-        .collapsible(false).resizable(false)
+        .collapsible(false)
+        .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             ui.label("Paste your Notion integration token. It will be saved to");
@@ -71,8 +95,12 @@ pub fn token_prompt(state: &mut AppState, ctx: &egui::Context) {
             );
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Save").clicked()   { save = true; }
-                if ui.button("Cancel").clicked() { close = true; }
+                if ui.button("Save").clicked() {
+                    save = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
             });
         });
     if save {
