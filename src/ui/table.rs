@@ -25,6 +25,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
     let status_groups = state.selected_status_groups.clone();
     let selected_types = state.selected_types.clone();
     let mut rows = Vec::new();
+    let mut status_options = Vec::new();
     let mut has_loaded_list = false;
     let mut loading_count = 0;
     let mut errors = Vec::new();
@@ -39,6 +40,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
             }
             Some(AssetListState::Loaded(list)) => {
                 has_loaded_list = true;
+                status_options.extend(list.statuses.iter().cloned());
                 rows.extend(
                     list.assets
                         .iter()
@@ -65,12 +67,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
         return;
     }
 
-    rows.sort_by(|a, b| {
-        b.exists_on_prod
-            .cmp(&a.exists_on_prod)
-            .then_with(|| a.asset_type.order().cmp(&b.asset_type.order()))
-            .then_with(|| a.slug.to_lowercase().cmp(&b.slug.to_lowercase()))
-    });
+    sort_rows(&mut rows, &status_options);
 
     egui::ScrollArea::vertical()
         .auto_shrink([false; 2])
@@ -83,6 +80,29 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                 draw_row(state, ui, &key, row);
             }
         });
+}
+
+fn sort_rows(rows: &mut [RowView], status_options: &[StatusOption]) {
+    rows.sort_by(|a, b| {
+        a.asset_type
+            .order()
+            .cmp(&b.asset_type.order())
+            .then_with(|| {
+                status_order(&a.status, status_options)
+                    .cmp(&status_order(&b.status, status_options))
+            })
+            .then_with(|| a.slug.to_lowercase().cmp(&b.slug.to_lowercase()))
+    });
+}
+
+fn status_order(status: &Option<AssetStatus>, status_options: &[StatusOption]) -> usize {
+    let Some(status) = status else {
+        return usize::MAX;
+    };
+    status_options
+        .iter()
+        .position(|option| option.id == status.id)
+        .unwrap_or(usize::MAX)
 }
 
 struct RowView {
@@ -647,8 +667,31 @@ fn notion_color(color: &str) -> egui::Color32 {
 
 #[cfg(test)]
 mod tests {
-    use crate::notion::{AssetStatus, StatusGroup};
+    use super::*;
+    use crate::notion::{AssetStatus, StatusGroup, StatusOption};
     use std::collections::HashSet;
+
+    fn row(slug: &str, status: Option<AssetStatus>) -> RowView {
+        RowView {
+            asset_type: crate::ui::AssetType::Hdris,
+            slug: slug.into(),
+            author: String::new(),
+            url: String::new(),
+            page_id: String::new(),
+            status,
+            exists_on_prod: true,
+            messages: Vec::new(),
+        }
+    }
+
+    fn status(id: &str, name: &str) -> AssetStatus {
+        AssetStatus {
+            id: id.into(),
+            name: name.into(),
+            color: "default".into(),
+            group: StatusGroup::InProgress,
+        }
+    }
 
     #[test]
     fn author_filter_matches_any_person_in_multi_author_combination() {
@@ -713,5 +756,39 @@ mod tests {
             "other_slug",
             &in_progress
         ));
+    }
+
+    #[test]
+    fn rows_sort_by_notion_status_order_then_slug_case_insensitive() {
+        let status_options = vec![
+            StatusOption {
+                id: "creative-review".into(),
+                name: "Creative review".into(),
+                color: "blue".into(),
+                group: StatusGroup::InProgress,
+            },
+            StatusOption {
+                id: "awaiting-payment".into(),
+                name: "Awaiting payment".into(),
+                color: "yellow".into(),
+                group: StatusGroup::InProgress,
+            },
+        ];
+        let mut rows = vec![
+            row(
+                "zebra",
+                Some(status("awaiting-payment", "Awaiting payment")),
+            ),
+            row("Beta", Some(status("creative-review", "Creative review"))),
+            row("alpha", Some(status("creative-review", "Creative review"))),
+            row("missing", None),
+        ];
+
+        sort_rows(&mut rows, &status_options);
+
+        assert_eq!(
+            rows.iter().map(|row| row.slug.as_str()).collect::<Vec<_>>(),
+            vec!["alpha", "Beta", "zebra", "missing"]
+        );
     }
 }
