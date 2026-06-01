@@ -136,6 +136,7 @@ pub struct AppState {
     pub selected_types: Vec<AssetType>,
     pub selected_status_groups: Vec<crate::notion::StatusGroup>,
     pub author_filter: String,
+    pub author_filters: Vec<String>,
     pub assets_by_type: HashMap<AssetType, AssetListState>,
     pub error_banner: Option<String>,
     pub jobs: HashMap<RowKey, RowJob>,
@@ -184,12 +185,22 @@ impl AppState {
         } else {
             config.last_author_filter.clone()
         };
+        let author_filters = if config.last_author_filters.is_empty() {
+            if author_filter.is_empty() {
+                Vec::new()
+            } else {
+                vec![author_filter.clone()]
+            }
+        } else {
+            config.last_author_filters.clone()
+        };
 
         let mut s = Self {
             current_type,
             selected_types,
             selected_status_groups: crate::notion::StatusGroup::default_filter(),
             author_filter,
+            author_filters,
             config,
             assets_by_type: HashMap::new(),
             error_banner: None,
