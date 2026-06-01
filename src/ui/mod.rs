@@ -174,6 +174,7 @@ pub struct AppState {
     /// Rebuilt when Notion data loads, window gains focus, a job finishes,
     /// or a prod folder is created — never on every frame.
     pub prod_folder_cache: HashMap<RowKey, bool>,
+    pub dismissed_warning_keys: HashSet<String>,
     pub validation_results: HashMap<RowKey, Vec<crate::validation::Finding>>,
     pub validation_job: Option<ValidationJob>,
     pub update_check_rx: Option<Receiver<Result<Option<crate::updater::UpdateInfo>, String>>>,
@@ -240,6 +241,8 @@ impl AppState {
             cursor_moved_in_table_at: None,
             focus_refresh: focus_refresh::State::default(),
             prod_folder_cache: HashMap::new(),
+            dismissed_warning_keys: crate::validation::load_dismissed_warning_keys()
+                .unwrap_or_default(),
             validation_results: HashMap::new(),
             validation_job: None,
             update_check_rx: None,
@@ -387,6 +390,15 @@ impl AppState {
         let (tx, rx) = channel();
         crate::validation::spawn(requests, tx);
         self.validation_job = Some(ValidationJob { rx });
+    }
+
+    pub fn dismiss_warning(&mut self, dismiss_key: String) {
+        self.dismissed_warning_keys.insert(dismiss_key);
+        if let Err(err) =
+            crate::validation::save_dismissed_warning_keys(&self.dismissed_warning_keys)
+        {
+            self.error_banner = Some(format!("Failed to save dismissed warnings: {err}"));
+        }
     }
 
     fn validation_requests_for_keys(&self, keys: &[RowKey]) -> Vec<crate::validation::Request> {
@@ -1202,6 +1214,7 @@ mod tests {
             cursor_moved_in_table_at: None,
             focus_refresh: super::focus_refresh::State::default(),
             prod_folder_cache: HashMap::new(),
+            dismissed_warning_keys: HashSet::new(),
             validation_results: HashMap::new(),
             validation_job: None,
             update_check_rx: None,
