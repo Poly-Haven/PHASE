@@ -8,6 +8,7 @@ mod polyhaven;
 mod slug;
 mod ui;
 mod updater;
+mod validation;
 
 use ui::AppState;
 
@@ -85,6 +86,7 @@ impl eframe::App for App {
             || self.state.published_rx.is_some()
             || !self.state.status_updates.is_empty()
             || !self.state.row_toasts.is_empty()
+            || self.state.validation_job.is_some()
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }

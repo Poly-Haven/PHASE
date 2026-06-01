@@ -52,7 +52,18 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                                 slug: a.slug.clone(),
                             };
                             let exists = *state.prod_folder_cache.get(&key).unwrap_or(&false);
-                            RowView::from_asset(t, a, exists, &state.published_assets)
+                            let validation_findings = state
+                                .validation_results
+                                .get(&key)
+                                .cloned()
+                                .unwrap_or_default();
+                            RowView::from_asset(
+                                t,
+                                a,
+                                exists,
+                                &state.published_assets,
+                                &validation_findings,
+                            )
                         }),
                 );
             }
@@ -122,6 +133,7 @@ impl RowView {
         a: &Asset,
         exists_on_prod: bool,
         published_assets: &crate::polyhaven::PublishedAssets,
+        validation_findings: &[crate::validation::Finding],
     ) -> Self {
         let mut messages = Vec::new();
         if let Some(text) = crate::slug::message(&a.slug) {
@@ -145,6 +157,13 @@ impl RowView {
                 link: Some(format!("https://polyhaven.com/a/{}", a.slug)),
             });
         }
+        for finding in validation_findings {
+            messages.push(RowMsg {
+                kind: Self::msg_kind_from_validation_severity(finding.severity),
+                text: finding.text.clone(),
+                link: None,
+            });
+        }
         Self {
             asset_type,
             slug: a.slug.clone(),
@@ -155,6 +174,51 @@ impl RowView {
             exists_on_prod,
             messages,
         }
+    }
+
+    fn msg_kind_from_validation_severity(severity: crate::validation::Severity) -> MsgKind {
+        match severity {
+            crate::validation::Severity::Info => MsgKind::Info,
+            crate::validation::Severity::Warning => MsgKind::Warning,
+            crate::validation::Severity::Error => MsgKind::Error,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowAction {
+    Push,
+    Pull,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ActionAvailability {
+    enabled: bool,
+    tooltip: &'static str,
+}
+
+fn row_action_availability(
+    action: RowAction,
+    has_prod_folder: bool,
+    has_local_folder: bool,
+) -> ActionAvailability {
+    match action {
+        RowAction::Push if !has_local_folder => ActionAvailability {
+            enabled: false,
+            tooltip: "Local folder missing",
+        },
+        RowAction::Push => ActionAvailability {
+            enabled: true,
+            tooltip: "Push to Prod",
+        },
+        RowAction::Pull if !has_prod_folder => ActionAvailability {
+            enabled: false,
+            tooltip: "Prod folder missing",
+        },
+        RowAction::Pull => ActionAvailability {
+            enabled: true,
+            tooltip: "Pull from Prod",
+        },
     }
 }
 
@@ -309,13 +373,12 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
 }
 
 fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
-    let text_color = if row.exists_on_prod {
-        colors::TEXT_PRIMARY
-    } else {
-        colors::TEXT_DISABLED
-    };
     let icon_size = egui::vec2(18.0, 18.0);
     let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    let local_exists = state
+        .local_root_for(key.asset_type)
+        .join(&key.slug)
+        .is_dir();
 
     // Allocate space first so we know the rect, then paint with same-frame hover tint.
     let icon_button = |ui: &mut egui::Ui,
@@ -330,10 +393,15 @@ fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
         };
         let (rect, resp) = ui.allocate_exact_size(icon_size, sense);
         if ui.is_rect_visible(rect) {
+            let base_tint = if enabled {
+                colors::TEXT_PRIMARY
+            } else {
+                colors::TEXT_DISABLED
+            };
             let tint = if resp.hovered() && enabled {
                 colors::HOVER
             } else {
-                text_color
+                base_tint
             };
             ui.painter().image(tex.id(), rect, uv_full, tint);
         }
@@ -379,13 +447,14 @@ fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
     ui.add_space(8.0);
     draw_row_context_button(state, ui, key, row);
     ui.add_space(6.0);
-    let enabled = row.exists_on_prod;
+    let push = row_action_availability(RowAction::Push, row.exists_on_prod, local_exists);
+    let pull = row_action_availability(RowAction::Pull, row.exists_on_prod, local_exists);
     let push_tex = super::push_icon_texture(ui.ctx());
-    if icon_button(ui, &push_tex, enabled, "Push to Prod").clicked() {
+    if icon_button(ui, &push_tex, push.enabled, push.tooltip).clicked() {
         super::start_job(state, key, Direction::Push);
     }
     let pull_tex = super::pull_icon_texture(ui.ctx());
-    if icon_button(ui, &pull_tex, enabled, "Pull from Prod").clicked() {
+    if icon_button(ui, &pull_tex, pull.enabled, pull.tooltip).clicked() {
         super::start_job(state, key, Direction::Pull);
     }
 }
@@ -799,5 +868,29 @@ mod tests {
             rows.iter().map(|row| row.slug.as_str()).collect::<Vec<_>>(),
             vec!["alpha", "Beta", "zebra", "missing"]
         );
+    }
+
+    #[test]
+    fn push_action_is_disabled_when_local_folder_is_missing() {
+        let availability = row_action_availability(RowAction::Push, true, false);
+
+        assert!(!availability.enabled);
+        assert_eq!(availability.tooltip, "Local folder missing");
+    }
+
+    #[test]
+    fn push_action_is_enabled_when_local_folder_exists() {
+        let availability = row_action_availability(RowAction::Push, true, true);
+
+        assert!(availability.enabled);
+        assert_eq!(availability.tooltip, "Push to Prod");
+    }
+
+    #[test]
+    fn pull_action_still_depends_on_prod_folder() {
+        let availability = row_action_availability(RowAction::Pull, false, false);
+
+        assert!(!availability.enabled);
+        assert_eq!(availability.tooltip, "Prod folder missing");
     }
 }
