@@ -55,22 +55,43 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
         ui.separator();
 
         let authors = current_authors(state);
-        let display = if state.author_filter.is_empty() {
-            "All authors".to_string()
-        } else {
-            state.author_filter.clone()
-        };
-        let filter_before = state.author_filter.clone();
+        let display = author_filter_display(&state.author_filters);
+        let filters_before = state.author_filters.clone();
         egui::ComboBox::from_id_source("author_filter")
             .selected_text(display)
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut state.author_filter, String::new(), "All authors");
-                for a in authors {
-                    ui.selectable_value(&mut state.author_filter, a.clone(), a);
+                let all_selected = state.author_filters.is_empty();
+                let all_response = author_filter_option(ui, all_selected, "All authors");
+                if all_response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    state.author_filters.clear();
+                    state.author_filter.clear();
+                }
+                for (index, author) in authors.iter().enumerate() {
+                    let selected = state.author_filters.iter().any(|filter| filter == author);
+                    let response = author_filter_option(ui, selected, author);
+                    if response
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        let shift = ui.input(|input| input.modifiers.shift);
+                        state.author_filters = super::authors::select_author_filters(
+                            state.author_filters.clone(),
+                            &authors,
+                            index,
+                            shift,
+                        );
+                        state.author_filter =
+                            state.author_filters.first().cloned().unwrap_or_default();
+                    }
                 }
             });
-        if state.author_filter != filter_before {
+        if state.author_filters != filters_before {
+            state.author_filter = state.author_filters.first().cloned().unwrap_or_default();
             state.config.last_author_filter = state.author_filter.clone();
+            state.config.last_author_filters = state.author_filters.clone();
             let _ = crate::config::save(&state.config);
         }
 
@@ -114,6 +135,23 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
     });
 }
 
+fn author_filter_option(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {
+    ui.horizontal(|ui| {
+        let size = egui::vec2(12.0, 12.0);
+        if selected {
+            let tex = super::check_texture(ui.ctx());
+            ui.add(
+                egui::Image::new(egui::load::SizedTexture::new(tex.id(), size))
+                    .tint(super::colors::TEXT_PRIMARY),
+            );
+        } else {
+            ui.allocate_space(size);
+        }
+        ui.selectable_label(selected, label)
+    })
+    .inner
+}
+
 fn current_authors(state: &AppState) -> Vec<String> {
     let status_filter = &state.selected_status_groups;
     let mut authors = Vec::new();
@@ -132,7 +170,7 @@ fn current_authors(state: &AppState) -> Vec<String> {
             );
         }
     }
-    author_filter_options_with_current(authors, &state.author_filter)
+    author_filter_options_with_current(authors, &state.author_filters)
 }
 
 fn author_filter_options<'a>(authors: impl IntoIterator<Item = &'a str>) -> Vec<String> {
@@ -141,14 +179,27 @@ fn author_filter_options<'a>(authors: impl IntoIterator<Item = &'a str>) -> Vec<
 
 fn author_filter_options_with_current<'a>(
     authors: impl IntoIterator<Item = &'a str>,
-    current: &str,
+    current: &[String],
 ) -> Vec<String> {
     let mut options = author_filter_options(authors);
-    if !current.is_empty() && !options.iter().any(|option| option == current) {
-        options.push(current.to_string());
+    for selected in current {
+        if !options.iter().any(|option| option == selected) {
+            options.push(selected.clone());
+        }
+    }
+    if !current.is_empty() {
         options.sort();
     }
     options
+}
+
+fn author_filter_display(selected: &[String]) -> String {
+    match selected {
+        [] => "All authors".to_string(),
+        [single] => single.clone(),
+        [first, second] => format!("{first}, {second}"),
+        selected => format!("{} authors", selected.len()),
+    }
 }
 
 #[cfg(test)]
@@ -178,7 +229,7 @@ mod tests {
 
     #[test]
     fn author_filter_options_include_current_selection_even_without_matching_assets() {
-        let options = super::author_filter_options_with_current(["Alice, Bob"], "Carol");
+        let options = super::author_filter_options_with_current(["Alice, Bob"], &["Carol".into()]);
         assert_eq!(options, vec!["Alice", "Bob", "Carol"]);
     }
 

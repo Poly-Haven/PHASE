@@ -21,7 +21,7 @@ pub struct RowMsg {
 }
 
 pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
-    let filter = state.author_filter.clone();
+    let filters = state.author_filters.clone();
     let status_groups = state.selected_status_groups.clone();
     let selected_types = state.selected_types.clone();
     let mut rows = Vec::new();
@@ -44,7 +44,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                 rows.extend(
                     list.assets
                         .iter()
-                        .filter(|a| author_matches_filter(&a.author, &filter))
+                        .filter(|a| author_matches_filter(&a.author, &filters))
                         .filter(|a| status_matches_filter(&a.status, &status_groups))
                         .map(|a| {
                             let key = super::RowKey {
@@ -627,8 +627,8 @@ fn fmt_bytes(b: u64) -> String {
     }
 }
 
-fn author_matches_filter(author: &str, filter: &str) -> bool {
-    super::authors::contains(author, filter)
+fn author_matches_filter(author: &str, filters: &[String]) -> bool {
+    super::authors::contains_any(author, filters)
 }
 
 fn status_matches_filter(status: &Option<AssetStatus>, selected: &[StatusGroup]) -> bool {
@@ -695,9 +695,18 @@ mod tests {
 
     #[test]
     fn author_filter_matches_any_person_in_multi_author_combination() {
-        assert!(super::author_matches_filter("Alice, Bob", "Alice"));
-        assert!(super::author_matches_filter("Alice, Bob", "Bob"));
-        assert!(!super::author_matches_filter("Alice, Bob", "Carol"));
+        assert!(super::author_matches_filter(
+            "Alice, Bob",
+            &["Alice".to_string()]
+        ));
+        assert!(super::author_matches_filter(
+            "Alice, Bob",
+            &["Bob".to_string()]
+        ));
+        assert!(!super::author_matches_filter(
+            "Alice, Bob",
+            &["Carol".to_string()]
+        ));
     }
 
     #[test]
