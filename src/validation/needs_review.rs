@@ -1,8 +1,10 @@
 use crate::ui::AssetType;
-use crate::validation::{is_needs_review, Finding, Severity, ValidationContext};
+use crate::validation::{is_complete_status, is_needs_review, status_has_passed_review, Finding, Severity, ValidationContext};
 
 pub(crate) fn run(ctx: &ValidationContext) -> Vec<Finding> {
-    if !is_needs_review(ctx.status.as_ref()) || !ctx.prod_root.is_dir() {
+    let is_active = is_needs_review(ctx.status.as_ref())
+        || status_has_passed_review(ctx.status.as_ref(), &ctx.status_options);
+    if !is_active || is_complete_status(ctx.status.as_ref()) || !ctx.prod_root.is_dir() {
         return Vec::new();
     }
 

@@ -141,28 +141,6 @@ fn status_order(status: &Option<AssetStatus>, status_options: &[StatusOption]) -
         .unwrap_or(usize::MAX)
 }
 
-fn status_has_passed_review(status: &Option<AssetStatus>, status_options: &[StatusOption]) -> bool {
-    let Some(status) = status else {
-        return false;
-    };
-    let Some(status_order) = status_options
-        .iter()
-        .find(|option| option.id == status.id)
-        .map(|option| option.sort_order)
-    else {
-        return false;
-    };
-    let Some(review_order) = status_options
-        .iter()
-        .filter(|option| option.name.to_lowercase().contains("review"))
-        .map(|option| option.sort_order)
-        .max()
-    else {
-        return false;
-    };
-    status_order > review_order
-}
-
 struct RowView {
     asset_type: super::AssetType,
     slug: String,
@@ -226,7 +204,7 @@ impl RowView {
                 dismiss_key: None,
             });
         }
-        if exists_local && status_has_passed_review(&a.status, status_options) {
+        if exists_local && crate::validation::status_has_passed_review(a.status.as_ref(), status_options) {
             messages.push(RowMsg {
                 kind: MsgKind::Info,
                 text: "Passed review;".into(),
@@ -1225,12 +1203,12 @@ mod tests {
             },
         ];
 
-        assert!(!super::status_has_passed_review(
-            &Some(status("review", "Creative review")),
+        assert!(!crate::validation::status_has_passed_review(
+            Some(&status("review", "Creative review")),
             &statuses
         ));
-        assert!(super::status_has_passed_review(
-            &Some(status("approved", "Approved")),
+        assert!(crate::validation::status_has_passed_review(
+            Some(&status("approved", "Approved")),
             &statuses
         ));
     }
