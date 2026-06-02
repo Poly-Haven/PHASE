@@ -407,20 +407,16 @@ impl AppState {
     /// Kick off a background rebuild of the prod-folder existence cache.
     /// When the thread finishes, `pump()` will receive the result and swap it in.
     pub fn rebuild_prod_folder_cache(&mut self) {
-        let mut to_check: Vec<(RowKey, std::path::PathBuf)> = Vec::new();
-        for &t in AssetType::all() {
-            let prod_root = self.prod_root_for(t);
-            if let Some(AssetListState::Loaded(list)) = self.assets_by_type.get(&t) {
-                for asset in &list.assets {
-                    let key = RowKey {
-                        asset_type: t,
-                        slug: asset.slug.clone(),
-                    };
-                    to_check.push((key, prod_root.join(&asset.slug)));
-                }
-            }
-        }
+        let to_check: Vec<(RowKey, std::path::PathBuf)> = self
+            .visible_asset_keys()
+            .into_iter()
+            .map(|key| {
+                let path = self.prod_root_for(key.asset_type).join(&key.slug);
+                (key, path)
+            })
+            .collect();
         if to_check.is_empty() {
+            self.prod_folder_cache.clear();
             return;
         }
         let (tx, rx) = channel();
@@ -435,18 +431,9 @@ impl AppState {
     /// Synchronously rebuild the local-folder existence cache (local disk — fast).
     pub fn rebuild_local_folder_cache(&mut self) {
         self.local_folder_cache.clear();
-        for &t in AssetType::all() {
-            let local_root = self.local_root_for(t);
-            if let Some(AssetListState::Loaded(list)) = self.assets_by_type.get(&t) {
-                for asset in &list.assets {
-                    let key = RowKey {
-                        asset_type: t,
-                        slug: asset.slug.clone(),
-                    };
-                    self.local_folder_cache
-                        .insert(key, local_root.join(&asset.slug).is_dir());
-                }
-            }
+        for key in self.visible_asset_keys() {
+            let exists = self.local_root_for(key.asset_type).join(&key.slug).is_dir();
+            self.local_folder_cache.insert(key, exists);
         }
     }
 
@@ -476,6 +463,16 @@ impl AppState {
     }
 
     pub fn visible_validation_scope_snapshot(&self) -> VisibleValidationScope {
+        let keys = self.visible_asset_keys();
+        VisibleValidationScope {
+            keys,
+            selected_types: self.selected_types.clone(),
+            selected_status_groups: self.selected_status_groups.clone(),
+            author_filters: self.author_filters.clone(),
+        }
+    }
+
+    fn visible_asset_keys(&self) -> Vec<RowKey> {
         let mut keys = Vec::new();
         for &asset_type in &self.selected_types {
             if let Some(AssetListState::Loaded(list)) = self.assets_by_type.get(&asset_type) {
@@ -496,12 +493,7 @@ impl AppState {
                 );
             }
         }
-        VisibleValidationScope {
-            keys,
-            selected_types: self.selected_types.clone(),
-            selected_status_groups: self.selected_status_groups.clone(),
-            author_filters: self.author_filters.clone(),
-        }
+        keys
     }
 
     pub fn start_validation_for_visible_assets(&mut self) {
@@ -516,6 +508,8 @@ impl AppState {
             return;
         }
         self.visible_validation_scope = scope.clone();
+        self.rebuild_prod_folder_cache();
+        self.rebuild_local_folder_cache();
         self.start_validation_for_keys(scope.keys);
     }
 
@@ -1617,6 +1611,54 @@ mod tests {
                 slug: "visible_hdri".into()
             }]
         );
+    }
+
+    #[test]
+    fn folder_caches_rebuild_only_for_visible_assets() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = test_state();
+        state.config.prod_root = temp.path().join("prod");
+        state.config.local_root = temp.path().join("local");
+        std::fs::create_dir_all(state.config.prod_root.join("HDRIs").join("visible_hdri")).unwrap();
+        std::fs::create_dir_all(state.config.prod_root.join("HDRIs").join("hidden_hdri")).unwrap();
+        std::fs::create_dir_all(state.config.local_root.join("HDRIs").join("visible_hdri")).unwrap();
+        std::fs::create_dir_all(state.config.local_root.join("HDRIs").join("hidden_hdri")).unwrap();
+        state.assets_by_type.insert(
+            super::AssetType::Hdris,
+            super::AssetListState::Loaded(AssetList {
+                assets: vec![
+                    asset("visible_hdri", "Alice", StatusGroup::InProgress),
+                    asset("hidden_hdri", "Bob", StatusGroup::InProgress),
+                ],
+                statuses: Vec::new(),
+            }),
+        );
+        state.selected_types = vec![super::AssetType::Hdris];
+        state.selected_status_groups = vec![StatusGroup::InProgress];
+        state.author_filters = vec!["Alice".into()];
+
+        state.rebuild_prod_folder_cache();
+        for _ in 0..50 {
+            state.pump();
+            if state.prod_cache_rx.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        state.rebuild_local_folder_cache();
+
+        let visible = super::RowKey {
+            asset_type: super::AssetType::Hdris,
+            slug: "visible_hdri".into(),
+        };
+        let hidden = super::RowKey {
+            asset_type: super::AssetType::Hdris,
+            slug: "hidden_hdri".into(),
+        };
+        assert_eq!(state.prod_folder_cache.get(&visible), Some(&true));
+        assert!(!state.prod_folder_cache.contains_key(&hidden));
+        assert_eq!(state.local_folder_cache.get(&visible), Some(&true));
+        assert!(!state.local_folder_cache.contains_key(&hidden));
     }
 
     #[test]
