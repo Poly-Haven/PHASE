@@ -136,6 +136,10 @@ pub struct PlanJob {
     pub rx: Receiver<Result<Plan, String>>,
 }
 
+pub struct TransferEstimateJob {
+    pub rx: Receiver<Result<u64, String>>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VisibleValidationScope {
     pub keys: Vec<RowKey>,
@@ -201,6 +205,8 @@ pub struct AppState {
     pub pending_update: Option<crate::updater::UpdateInfo>,
     pub update_dialog_open: bool,
     pub update_install: Option<UpdateInstallJob>,
+    pub transfer_estimates: HashMap<(RowKey, Direction), u64>,
+    pub transfer_estimate_jobs: HashMap<(RowKey, Direction), TransferEstimateJob>,
 }
 
 fn initial_author_filters(config: &Config, selected_types: &[AssetType]) -> Vec<String> {
@@ -300,6 +306,8 @@ impl AppState {
             pending_update: None,
             update_dialog_open: false,
             update_install: None,
+            transfer_estimates: HashMap::new(),
+            transfer_estimate_jobs: HashMap::new(),
         };
         s.token_prompt_open = s.config.notion_token.is_empty();
         s.token_input = s.config.notion_token.clone();
@@ -382,6 +390,40 @@ impl AppState {
             let _ = tx.send(res);
         });
         self.update_install = Some(UpdateInstallJob { rx });
+    }
+
+    pub fn start_transfer_estimate(&mut self, key: &RowKey, direction: Direction) {
+        let estimate_key = (key.clone(), direction);
+        if self.transfer_estimates.contains_key(&estimate_key)
+            || self.transfer_estimate_jobs.contains_key(&estimate_key)
+            || self.plan_jobs.contains_key(key)
+            || self.jobs.contains_key(key)
+        {
+            return;
+        }
+        let src_root = match direction {
+            Direction::Pull => self.prod_root_for(key.asset_type).join(&key.slug),
+            Direction::Push => self.local_root_for(key.asset_type).join(&key.slug),
+        };
+        let dst_root = match direction {
+            Direction::Pull => self.local_root_for(key.asset_type).join(&key.slug),
+            Direction::Push => self.prod_root_for(key.asset_type).join(&key.slug),
+        };
+        let pull_filter = match direction {
+            Direction::Pull if self.config.skip_pull_raw_tif_if_many_work_tifs => {
+                PullFilterMode::SkipRawAndTifWhenWorkTifsExceed { threshold: 30 }
+            }
+            Direction::Pull | Direction::Push => PullFilterMode::None,
+        };
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            let result = build_plan_with_pull_filter(direction, &src_root, &dst_root, pull_filter)
+                .map(|plan| plan.total_bytes_to_copy)
+                .map_err(|err| err.to_string());
+            let _ = tx.send(result);
+        });
+        self.transfer_estimate_jobs
+            .insert(estimate_key, TransferEstimateJob { rx });
     }
 
     pub fn refresh(&mut self, t: AssetType) {
@@ -610,6 +652,20 @@ impl AppState {
             self.update_install = None;
             if let Err(msg) = res {
                 self.error_banner = Some(format!("Update failed: {msg}"));
+            }
+        }
+
+        let estimate_keys: Vec<_> = self.transfer_estimate_jobs.keys().cloned().collect();
+        for key in estimate_keys {
+            let result = self
+                .transfer_estimate_jobs
+                .get(&key)
+                .and_then(|job| job.rx.try_recv().ok());
+            if let Some(result) = result {
+                self.transfer_estimate_jobs.remove(&key);
+                if let Ok(bytes) = result {
+                    self.transfer_estimates.insert(key, bytes);
+                }
             }
         }
 
@@ -877,6 +933,8 @@ pub fn start_job(state: &mut AppState, key: &RowKey, direction: Direction) {
     // while the job runs. Fresh validation fires automatically after the job finishes.
     state.validation_results.remove(key);
     state.row_toasts.remove(key);
+    state.transfer_estimates.remove(&(key.clone(), Direction::Pull));
+    state.transfer_estimates.remove(&(key.clone(), Direction::Push));
     let src_root = match direction {
         Direction::Pull => state.prod_root_for(key.asset_type).join(&key.slug),
         Direction::Push => state.local_root_for(key.asset_type).join(&key.slug),
@@ -1430,6 +1488,8 @@ mod tests {
             pending_update: None,
             update_dialog_open: false,
             update_install: None,
+            transfer_estimates: HashMap::new(),
+            transfer_estimate_jobs: HashMap::new(),
         }
     }
 
@@ -1567,6 +1627,36 @@ mod tests {
         assert!(super::should_check_for_update(None, 42));
         assert!(super::should_check_for_update(Some(41), 42));
         assert!(!super::should_check_for_update(Some(42), 42));
+    }
+
+    #[test]
+    fn transfer_estimate_uses_copy_plan_total_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = test_state();
+        state.config.local_root = temp.path().join("local");
+        state.config.prod_root = temp.path().join("prod");
+        let key = super::RowKey {
+            asset_type: super::AssetType::Hdris,
+            slug: "asset".into(),
+        };
+        let local_asset = state.local_root_for(key.asset_type).join(&key.slug);
+        std::fs::create_dir_all(local_asset.join("staging")).unwrap();
+        std::fs::create_dir_all(state.prod_root_for(key.asset_type).join(&key.slug)).unwrap();
+        std::fs::write(local_asset.join("staging").join("file.bin"), [1u8, 2, 3, 4]).unwrap();
+
+        state.start_transfer_estimate(&key, Direction::Push);
+        for _ in 0..50 {
+            state.pump();
+            if state.transfer_estimate_jobs.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(
+            state.transfer_estimates.get(&(key, Direction::Push)),
+            Some(&4)
+        );
     }
 
     #[test]

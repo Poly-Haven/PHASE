@@ -299,6 +299,13 @@ fn row_action_availability(
     }
 }
 
+fn transfer_tooltip(base: &str, bytes: Option<u64>) -> String {
+    match bytes {
+        Some(bytes) => format!("{base} · {}", fmt_bytes(bytes)),
+        None => base.to_string(),
+    }
+}
+
 fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView, two_rows: bool) {
     let row_height = if two_rows { 56.0 } else { 28.0 };
     let avail = ui.available_rect_before_wrap();
@@ -641,11 +648,29 @@ fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
     let push = row_action_availability(RowAction::Push, row.exists_on_prod, local_exists);
     let pull = row_action_availability(RowAction::Pull, row.exists_on_prod, local_exists);
     let push_tex = super::push_icon_texture(ui.ctx());
-    if icon_button(ui, &push_tex, push.enabled, push.tooltip).clicked() {
+    let push_estimate = state
+        .transfer_estimates
+        .get(&(key.clone(), Direction::Push))
+        .copied();
+    let push_tooltip = transfer_tooltip(push.tooltip, push_estimate);
+    let push_response = icon_button(ui, &push_tex, push.enabled, &push_tooltip);
+    if push_response.hovered() && push.enabled {
+        state.start_transfer_estimate(key, Direction::Push);
+    }
+    if push_response.clicked() {
         super::start_job(state, key, Direction::Push);
     }
     let pull_tex = super::pull_icon_texture(ui.ctx());
-    if icon_button(ui, &pull_tex, pull.enabled, pull.tooltip).clicked() {
+    let pull_estimate = state
+        .transfer_estimates
+        .get(&(key.clone(), Direction::Pull))
+        .copied();
+    let pull_tooltip = transfer_tooltip(pull.tooltip, pull_estimate);
+    let pull_response = icon_button(ui, &pull_tex, pull.enabled, &pull_tooltip);
+    if pull_response.hovered() && pull.enabled {
+        state.start_transfer_estimate(key, Direction::Pull);
+    }
+    if pull_response.clicked() {
         super::start_job(state, key, Direction::Pull);
     }
 }
@@ -1172,6 +1197,15 @@ mod tests {
 
         assert!(!availability.enabled);
         assert_eq!(availability.tooltip, "Prod folder missing");
+    }
+
+    #[test]
+    fn transfer_tooltip_includes_size_when_known() {
+        assert_eq!(
+            transfer_tooltip("Pull from Prod", Some(1536)),
+            "Pull from Prod · 2 KB"
+        );
+        assert_eq!(transfer_tooltip("Push to Prod", None), "Push to Prod");
     }
 
     #[test]
