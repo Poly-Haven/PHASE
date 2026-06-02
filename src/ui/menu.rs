@@ -52,6 +52,8 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                 clicked,
                 response.additive,
             );
+            state.config.last_selected_status_groups = state.selected_status_groups.clone();
+            let _ = crate::config::save(&state.config);
         }
 
         ui.separator();
