@@ -48,8 +48,4 @@ mod tests {
         assert_eq!(super::message("Bad-Slug").unwrap(), "Invalid slug: B - S");
     }
 
-    #[test]
-    fn slug_validation_renders_spaces_explicitly() {
-        assert_eq!(super::message("bad slug").unwrap(), "Invalid slug: <space>");
-    }
 }

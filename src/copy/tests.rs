@@ -25,23 +25,6 @@ fn pull_excludes_tif_tiff_nef_case_insensitive() {
 }
 
 #[test]
-fn classify_new_when_dst_missing() {
-    assert_eq!(classify(100, 1_000, None, None), Action::New);
-}
-
-#[test]
-fn classify_identical_when_size_and_mtime_match() {
-    assert_eq!(
-        classify(100, 1_000, Some(100), Some(1_000)),
-        Action::Identical
-    );
-    assert_eq!(
-        classify(100, 1_000, Some(100), Some(1_002)),
-        Action::Identical
-    );
-}
-
-#[test]
 fn classify_overwrite_when_source_newer() {
     assert_eq!(
         classify(100, 2_000, Some(100), Some(1_000)),

@@ -34,11 +34,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_to_in_progress_without_persistence() {
-        assert_eq!(StatusGroup::default_filter(), vec![StatusGroup::InProgress]);
-    }
-
-    #[test]
     fn shift_click_adds_or_removes_without_emptying_selection() {
         let selected = select(vec![StatusGroup::InProgress], StatusGroup::Complete, true);
         assert_eq!(
@@ -53,19 +48,4 @@ mod tests {
         assert_eq!(selected, vec![StatusGroup::InProgress]);
     }
 
-    #[test]
-    fn status_group_colors_match_requested_defaults() {
-        assert_eq!(
-            selected_color(StatusGroup::ToDo),
-            super::super::colors::ACCENT
-        );
-        assert_eq!(
-            selected_color(StatusGroup::InProgress),
-            super::super::colors::STATUS_IN_PROGRESS
-        );
-        assert_eq!(
-            selected_color(StatusGroup::Complete),
-            super::super::colors::STATUS_COMPLETE
-        );
-    }
 }

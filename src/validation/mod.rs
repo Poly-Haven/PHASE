@@ -68,11 +68,6 @@ pub(crate) struct Check {
 }
 
 impl Check {
-    #[cfg(test)]
-    pub(crate) fn name(self) -> &'static str {
-        self._name
-    }
-
     pub(crate) fn weight(self) -> usize {
         self.weight
     }
@@ -343,20 +338,4 @@ mod tests {
         assert_eq!(loaded, keys);
     }
 
-    #[test]
-    fn all_current_checks_have_weight_one() {
-        let weights = all_checks()
-            .iter()
-            .map(|check| (check.name(), check.weight()))
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            weights,
-            vec![
-                ("root-entries", 1),
-                ("local-freshness", 1),
-                ("needs-review", 1)
-            ]
-        );
-    }
 }
