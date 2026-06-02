@@ -62,7 +62,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
         let display = author_filter_display(&state.author_filters);
         let filters_before = state.author_filters.clone();
         egui::ComboBox::from_id_source("author_filter")
-            .width(author_filter_combo_width(ui.spacing().combo_width))
+            .width(author_filter_combo_width(ui, &display, &authors))
             .selected_text(display)
             .show_ui(ui, |ui| {
                 let all_selected = state.author_filters.is_empty();
@@ -189,8 +189,21 @@ fn author_filter_row_width(available_width: f32) -> f32 {
     available_width
 }
 
-fn author_filter_combo_width(default_width: f32) -> f32 {
-    default_width + 12.0
+fn author_filter_combo_width(ui: &egui::Ui, display: &str, authors: &[String]) -> f32 {
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let max_text_w = ui.fonts(|f| {
+        std::iter::once(display)
+            .chain(std::iter::once("All authors"))
+            .chain(authors.iter().map(|s| s.as_str()))
+            .map(|t| {
+                f.layout_no_wrap(t.to_string(), font_id.clone(), egui::Color32::WHITE)
+                    .rect
+                    .width()
+            })
+            .fold(0.0_f32, f32::max)
+    });
+    // Add room for the dropdown arrow and button padding.
+    max_text_w + 36.0
 }
 
 fn current_authors(state: &AppState) -> Vec<String> {
