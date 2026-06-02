@@ -2330,7 +2330,7 @@ pub fn gear_texture(ctx: &egui::Context) -> egui::TextureHandle {
         .clone()
 }
 
-fn load_svg_texture(
+pub fn load_svg_texture(
     ctx: &egui::Context,
     bytes: &[u8],
     texture_name: &'static str,

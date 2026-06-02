@@ -1,5 +1,20 @@
 use super::{AppState, AssetListState, AssetType};
 use crate::notion::StatusGroup;
+use std::sync::OnceLock;
+
+fn refresh_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    static REFRESH_TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    REFRESH_TEX
+        .get_or_init(|| {
+            super::load_svg_texture(
+                ctx,
+                include_bytes!("../assets/arrow-clockwise.svg"),
+                "phase://arrow-clockwise",
+                "arrow-clockwise",
+            )
+        })
+        .clone()
+}
 
 pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
     ui.spacing_mut().interact_size.y = ui.spacing().interact_size.y.max(30.0);
@@ -128,8 +143,17 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
             if is_loading {
                 super::loading_indicator::draw_button(ui);
             } else {
-                if ui
-                    .button("↻ Refresh")
+                let refresh_tex = refresh_texture(ui.ctx());
+                let refresh_resp = ui.add(
+                    egui::Image::new(egui::load::SizedTexture::new(
+                        refresh_tex.id(),
+                        egui::vec2(16.0, 16.0),
+                    ))
+                    .tint(super::colors::TEXT_PRIMARY)
+                    .sense(egui::Sense::click()),
+                );
+                if refresh_resp
+                    .on_hover_text("Refresh")
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 {
