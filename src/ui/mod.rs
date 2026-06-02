@@ -123,6 +123,12 @@ pub struct StatusUpdateJob {
     pub requested: StatusOption,
 }
 
+pub struct TitleRenameJob {
+    pub rx: Receiver<Result<Option<AuthTokens>, String>>,
+    /// The new title the rename was requested to set.
+    pub new_title: String,
+}
+
 pub struct UpdateInstallJob {
     pub rx: Receiver<Result<(), String>>,
 }
@@ -175,6 +181,7 @@ pub struct AppState {
     pub plan_jobs: HashMap<RowKey, PlanJob>,
     pub verifications: HashMap<RowKey, VerificationJob>,
     pub status_updates: HashMap<RowKey, StatusUpdateJob>,
+    pub title_renames: HashMap<RowKey, TitleRenameJob>,
     pub notion_rx: HashMap<AssetType, Receiver<Result<(AssetList, Option<AuthTokens>), String>>>,
     pub pending_conflict: Option<PendingConflict>,
     pub pending_verification_failure: Option<PendingVerificationFailure>,
@@ -287,6 +294,7 @@ impl AppState {
             plan_jobs: HashMap::new(),
             verifications: HashMap::new(),
             status_updates: HashMap::new(),
+            title_renames: HashMap::new(),
             notion_rx: HashMap::new(),
             pending_conflict: None,
             pending_verification_failure: None,
@@ -862,6 +870,51 @@ impl AppState {
             }
         }
 
+        let title_rename_keys: Vec<RowKey> = self.title_renames.keys().cloned().collect();
+        for key in title_rename_keys {
+            let res_opt = self
+                .title_renames
+                .get(&key)
+                .and_then(|job| job.rx.try_recv().ok());
+            if let Some(res) = res_opt {
+                let Some(job) = self.title_renames.remove(&key) else {
+                    continue;
+                };
+                match res {
+                    Ok(tokens) => {
+                        if let Some(tokens) = tokens {
+                            crate::auth::apply_tokens(&mut self.config, &tokens);
+                            if let Err(err) = crate::config::save(&self.config) {
+                                self.error_banner =
+                                    Some(format!("Failed to save refreshed login: {err}"));
+                            }
+                        }
+                        // Update the slug in the asset list to match the renamed title.
+                        if let Some(AssetListState::Loaded(list)) =
+                            self.assets_by_type.get_mut(&key.asset_type)
+                        {
+                            if let Some(asset) =
+                                list.assets.iter_mut().find(|a| a.slug == key.slug)
+                            {
+                                asset.slug = job.new_title.clone();
+                            }
+                            let _ = crate::cache::save(key.asset_type.cache_name(), list);
+                        }
+                        // Re-validate with the new slug key.
+                        let new_key = RowKey { asset_type: key.asset_type, slug: job.new_title };
+                        self.start_validation_for_keys(vec![new_key]);
+                    }
+                    Err(msg) => {
+                        if crate::auth::is_auth_required_error(&msg) {
+                            self.token_prompt_open = true;
+                        }
+                        self.error_banner =
+                            Some(format!("Title rename failed for {}: {msg}", key.slug));
+                    }
+                }
+            }
+        }
+
         let mut validation_finished = false;
         while let Some(msg) = self
             .validation_job
@@ -1137,6 +1190,52 @@ pub fn start_status_update(
             rx,
             previous,
             requested,
+        },
+    );
+}
+
+pub fn start_title_rename(state: &mut AppState, key: &RowKey, page_id: &str, new_title: &str) {
+    if state.title_renames.contains_key(key) {
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut config = state.config.clone();
+    let page_id = page_id.to_string();
+    let new_title_str = new_title.to_string();
+    let new_title_for_job = new_title_str.clone();
+    thread::spawn(move || {
+        let res = (|| {
+            let before = (
+                config.auth_access_token.clone(),
+                config.auth_refresh_token.clone(),
+                config.auth_expires_at,
+            );
+            let token = crate::auth::ensure_access_token(&mut config)?;
+            crate::notion::rename_page_title(&token, &page_id, &new_title_str)?;
+            let tokens = if before
+                != (
+                    config.auth_access_token.clone(),
+                    config.auth_refresh_token.clone(),
+                    config.auth_expires_at,
+                ) {
+                Some(AuthTokens {
+                    access_token: config.auth_access_token.clone(),
+                    refresh_token: config.auth_refresh_token.clone(),
+                    expires_at: config.auth_expires_at,
+                })
+            } else {
+                None
+            };
+            Ok(tokens)
+        })()
+        .map_err(|e: anyhow::Error| e.to_string());
+        let _ = tx.send(res);
+    });
+    state.title_renames.insert(
+        key.clone(),
+        TitleRenameJob {
+            rx,
+            new_title: new_title_for_job,
         },
     );
 }
@@ -1642,6 +1741,7 @@ mod tests {
             plan_jobs: HashMap::new(),
             verifications: HashMap::new(),
             status_updates: HashMap::new(),
+            title_renames: HashMap::new(),
             notion_rx: HashMap::new(),
             pending_conflict: None,
             pending_verification_failure: None,

@@ -143,6 +143,31 @@ pub fn update_page_status(token: &str, page_id: &str, status: &StatusOption) -> 
     Ok(())
 }
 
+pub fn rename_page_title(token: &str, page_id: &str, new_title: &str) -> Result<()> {
+    let client = client()?;
+    let url = format!(
+        "{}api/phase/assets/{page_id}/title",
+        crate::auth::phase_api_base_url()
+    );
+    let body = serde_json::json!({ "title": new_title });
+
+    let resp = client
+        .patch(url)
+        .bearer_auth(token)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .context("HTTP request to rename PHASE asset title")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        return Err(anyhow!("PHASE asset title API error {status}: {text}"));
+    }
+
+    Ok(())
+}
+
 fn client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))

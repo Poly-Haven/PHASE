@@ -16,6 +16,8 @@ pub enum MsgKind {
 pub enum RowMsgAction {
     CreateProdFolder,
     DeleteLocalFiles,
+    /// Rename the Notion page title to this fixed slug.
+    RenameTitle(String),
 }
 
 /// A single message attached to an asset row.
@@ -189,11 +191,20 @@ impl RowView {
             slug: a.slug.clone(),
         };
         if let Some(text) = crate::slug::message(&a.slug) {
+            let fixed = crate::slug::fix(&a.slug);
+            let (action, display_text) = if !fixed.is_empty() && fixed != a.slug {
+                (
+                    Some(RowMsgAction::RenameTitle(fixed)),
+                    format!("{text} ·"),
+                )
+            } else {
+                (None, text)
+            };
             messages.push(RowMsg {
                 kind: MsgKind::Error,
-                text,
+                text: display_text,
                 link: None,
-                action: None,
+                action,
                 dismiss_key: None,
             });
         }
@@ -543,10 +554,11 @@ fn draw_row_messages(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row:
     }
 }
 
-fn action_label(action: &RowMsgAction) -> &'static str {
+fn action_label(action: &RowMsgAction) -> String {
     match action {
-        RowMsgAction::CreateProdFolder => "Create?",
-        RowMsgAction::DeleteLocalFiles => "Delete local files?",
+        RowMsgAction::CreateProdFolder => "Create?".to_string(),
+        RowMsgAction::DeleteLocalFiles => "Delete local files?".to_string(),
+        RowMsgAction::RenameTitle(slug) => format!("Rename to {slug}"),
     }
 }
 
@@ -557,6 +569,21 @@ fn handle_row_message_action(state: &mut AppState, key: &RowKey, action: &RowMsg
         }
         RowMsgAction::DeleteLocalFiles => {
             state.pending_local_folder_delete = Some(key.clone());
+        }
+        RowMsgAction::RenameTitle(new_title) => {
+            if let Some(page_id) = state
+                .assets_by_type
+                .get(&key.asset_type)
+                .and_then(|s| {
+                    if let AssetListState::Loaded(list) = s {
+                        list.assets.iter().find(|a| a.slug == key.slug).map(|a| a.page_id.clone())
+                    } else {
+                        None
+                    }
+                })
+            {
+                super::start_title_rename(state, key, &page_id, new_title);
+            }
         }
     }
 }
