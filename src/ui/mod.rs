@@ -235,6 +235,17 @@ fn normalize_author_filters(filters: &mut Vec<String>) {
     filters.dedup();
 }
 
+fn current_update_check_day() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() / 86_400)
+        .unwrap_or(0)
+}
+
+fn should_check_for_update(last_check_day: Option<u64>, current_day: u64) -> bool {
+    last_check_day != Some(current_day)
+}
+
 impl AppState {
     pub fn new(config: Config) -> Self {
         let selected_types = if config.last_asset_types.is_empty() {
@@ -343,6 +354,12 @@ impl AppState {
         if self.update_check_rx.is_some() {
             return;
         }
+        let today = current_update_check_day();
+        if !should_check_for_update(self.config.last_update_check_day, today) {
+            return;
+        }
+        self.config.last_update_check_day = Some(today);
+        let _ = crate::config::save(&self.config);
         let (tx, rx) = channel();
         thread::spawn(move || {
             let res = crate::updater::check_for_update().map_err(|err| err.to_string());
@@ -1543,6 +1560,13 @@ mod tests {
             state.config.last_author_filters_by_type.get("Textures"),
             Some(&vec!["Charlotte".to_string()])
         );
+    }
+
+    #[test]
+    fn update_check_runs_only_once_per_day() {
+        assert!(super::should_check_for_update(None, 42));
+        assert!(super::should_check_for_update(Some(41), 42));
+        assert!(!super::should_check_for_update(Some(42), 42));
     }
 
     #[test]
