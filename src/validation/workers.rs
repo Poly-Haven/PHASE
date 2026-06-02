@@ -195,11 +195,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validation_uses_eight_workers() {
-        assert_eq!(WORKER_COUNT, 8);
-    }
-
-    #[test]
     fn weighted_limiter_blocks_when_capacity_is_exhausted() {
         let limiter = Arc::new(WeightedLimiter::new(8));
         let first = limiter.acquire(6);

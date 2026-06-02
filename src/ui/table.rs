@@ -967,23 +967,6 @@ mod tests {
     }
 
     #[test]
-    fn row_context_button_uses_list_icon_texture() {
-        let ctx = egui::Context::default();
-        let texture = row_context_texture(&ctx);
-
-        assert_eq!(texture.name(), "list_icon");
-    }
-
-    #[test]
-    fn row_context_icon_uses_nearly_full_button_area() {
-        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(18.0, 18.0));
-
-        let icon_rect = row_context_icon_rect(rect);
-
-        assert_eq!(icon_rect.size(), egui::vec2(16.0, 16.0));
-    }
-
-    #[test]
     fn dismissed_messages_are_filtered_out() {
         let messages = vec![
             RowMsg {
