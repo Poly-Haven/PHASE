@@ -100,6 +100,8 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
             let _ = crate::config::save(&state.config);
         }
 
+        draw_search_box(ui, state);
+
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let gear_tex = super::gear_texture(ui.ctx());
             let gear_resp = ui.add(
@@ -134,6 +136,65 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                     for t in state.selected_types.clone() {
                         state.refresh(t);
                     }
+                }
+            }
+        });
+    });
+}
+
+fn draw_search_box(ui: &mut egui::Ui, state: &mut super::AppState) {
+    let desired_width = 170.0;
+    let height = ui.spacing().interact_size.y;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(desired_width, height), egui::Sense::hover());
+
+    let is_empty = state.search_query.is_empty();
+    let hint = if is_empty {
+        Some(egui::RichText::new("Search...").italics().color(super::colors::TEXT_DISABLED))
+    } else {
+        None
+    };
+
+    ui.allocate_ui_at_rect(rect, |ui| {
+        ui.horizontal(|ui| {
+            let text_width = if is_empty { desired_width } else { desired_width - 20.0 };
+            let mut edit = egui::TextEdit::singleline(&mut state.search_query)
+                .desired_width(text_width)
+                .frame(false)
+                .margin(egui::vec2(8.0, 0.0));
+            if let Some(h) = hint {
+                edit = edit.hint_text(h);
+            }
+
+            let inner_rect = rect.shrink(1.0);
+            let painter = ui.painter();
+            painter.rect_stroke(
+                inner_rect,
+                inner_rect.height() / 2.0,
+                egui::Stroke::new(1.0, super::colors::TEXT_DISABLED),
+            );
+
+            ui.add(edit);
+
+            if !is_empty {
+                let x_tex = super::load_svg_texture(
+                    ui.ctx(),
+                    include_bytes!("../assets/x.svg"),
+                    "phase://x-clear",
+                    "x-clear",
+                );
+                let x_resp = ui.add(
+                    egui::Image::new(egui::load::SizedTexture::new(
+                        x_tex.id(),
+                        egui::vec2(12.0, 12.0),
+                    ))
+                    .tint(egui::Color32::WHITE)
+                    .sense(egui::Sense::click()),
+                );
+                if x_resp
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    state.search_query.clear();
                 }
             }
         });

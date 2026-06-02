@@ -34,6 +34,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
     let filters = state.author_filters.clone();
     let status_groups = state.selected_status_groups.clone();
     let selected_types = state.selected_types.clone();
+    let search_query = state.search_query.clone();
     let mut rows = Vec::new();
     let mut status_options = Vec::new();
     let mut has_loaded_list = false;
@@ -54,7 +55,10 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                 rows.extend(
                     list.assets
                         .iter()
-                        .filter(|a| asset_matches_filters(a, &filters, &status_groups))
+                        .filter(|a| {
+                            asset_matches_filters(a, &filters, &status_groups)
+                                && super::slug_matches_search(&a.slug, &search_query)
+                        })
                         .map(|a| {
                             let key = super::RowKey {
                                 asset_type: t,

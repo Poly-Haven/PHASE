@@ -159,6 +159,7 @@ pub struct VisibleValidationScope {
     selected_types: Vec<AssetType>,
     selected_status_groups: Vec<crate::notion::StatusGroup>,
     author_filters: Vec<String>,
+    search_query: String,
 }
 
 #[derive(Copy, Clone)]
@@ -225,6 +226,7 @@ pub struct AppState {
     pub update_install: Option<UpdateInstallJob>,
     pub transfer_estimates: HashMap<(RowKey, Direction), u64>,
     pub transfer_estimate_jobs: HashMap<(RowKey, Direction), TransferEstimateJob>,
+    pub search_query: String,
 }
 
 fn initial_author_filters(config: &Config, selected_types: &[AssetType]) -> Vec<String> {
@@ -336,6 +338,7 @@ impl AppState {
             update_install: None,
             transfer_estimates: HashMap::new(),
             transfer_estimate_jobs: HashMap::new(),
+            search_query: String::new(),
         };
         s.token_prompt_open = !s.config.has_access_token() && !s.config.can_refresh_access_token();
         s.token_input.clear();
@@ -605,6 +608,7 @@ impl AppState {
             selected_types: self.selected_types.clone(),
             selected_status_groups: self.selected_status_groups.clone(),
             author_filters: self.author_filters.clone(),
+            search_query: self.search_query.clone(),
         }
     }
 
@@ -620,7 +624,7 @@ impl AppState {
                                 asset,
                                 &self.author_filters,
                                 &self.selected_status_groups,
-                            )
+                            ) && slug_matches_search(&asset.slug, &self.search_query)
                         })
                         .map(|asset| RowKey {
                             asset_type,
@@ -1433,6 +1437,16 @@ fn draw_status_bar(state: &mut AppState, ctx: &egui::Context) {
     });
 }
 
+pub(super) fn slug_matches_search(slug: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let slug_lower = slug.to_lowercase();
+    query
+        .split_whitespace()
+        .all(|word| slug_lower.contains(&word.to_lowercase()))
+}
+
 fn draw_status_bar_primary(state: &mut AppState, ui: &mut egui::Ui) {
     if let Some(err) = state.error_banner.clone() {
         ui.horizontal(|ui| {
@@ -1459,6 +1473,16 @@ fn draw_status_bar_primary(state: &mut AppState, ui: &mut egui::Ui) {
 
     if let Some(status) = active_file_action_status(state) {
         ui.label(egui::RichText::new(status).color(colors::TEXT_DISABLED));
+        return;
+    }
+
+    let refreshing = !state.refreshing.is_empty()
+        && state
+            .selected_types
+            .iter()
+            .any(|t| state.refreshing.contains(t));
+    if refreshing {
+        ui.label(egui::RichText::new("Updating Notion data...").color(colors::TEXT_DISABLED));
     }
 }
 
@@ -1788,6 +1812,7 @@ mod tests {
             update_install: None,
             transfer_estimates: HashMap::new(),
             transfer_estimate_jobs: HashMap::new(),
+            search_query: String::new(),
         }
     }
 
