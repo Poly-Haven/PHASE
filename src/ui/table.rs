@@ -330,14 +330,26 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
 
     let prod_folder = state.prod_root_for(key.asset_type).join(&key.slug);
     let local_folder = state.local_root_for(key.asset_type).join(&key.slug);
-    let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+
+    // Register the row-wide context menu BEFORE drawing children. egui's context_menu
+    // internally re-interacts with Sense::click, so it must be set up first so that
+    // child widgets (allocated later) take priority for primary-click events.
     let row_response = ui.interact(
         row_rect,
         ui.id().with(("row-context", key.asset_type, &key.slug)),
-        egui::Sense::click(),
+        egui::Sense::hover(),
     );
-    row_response.context_menu(|ui| draw_context_menu(ui, &local_folder, &prod_folder, &row.url));
+    row_response.context_menu(|ui| {
+        draw_context_menu(
+            ui,
+            &local_folder,
+            &prod_folder,
+            &row.url,
+            state.config.open_notion_links_in_desktop_app,
+        )
+    });
 
+    let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     ui.allocate_ui_at_rect(primary_rect, |ui| {
         ui.horizontal_centered(|ui| {
             ui.add_space(8.0);
@@ -400,11 +412,11 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                     .image(notion_tex.id(), notion_rect, uv_full, tint);
             }
             if notion_resp
-                    .on_hover_text("Open asset page")
+                    .on_hover_text("Open on Notion")
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {
-                let _ = open::that(&row.url);
+                open_notion_link(&row.url, state.config.open_notion_links_in_desktop_app);
             }
 
             ui.add_space(16.0);
@@ -730,6 +742,7 @@ fn draw_context_menu(
     local_folder: &std::path::Path,
     prod_folder: &std::path::Path,
     notion_url: &str,
+    open_notion_in_app: bool,
 ) {
     if ui.button("Open local folder").clicked() {
         let _ = open::that(local_folder);
@@ -739,8 +752,8 @@ fn draw_context_menu(
         let _ = open::that(prod_folder);
         ui.close_menu();
     }
-    if ui.button("Open asset page").clicked() {
-        let _ = open::that(notion_url);
+    if ui.button("Open on Notion").clicked() {
+        open_notion_link(notion_url, open_notion_in_app);
         ui.close_menu();
     }
 }
@@ -773,7 +786,13 @@ fn draw_row_context_button(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey
         ui.set_min_width(140.0);
         let local_folder = state.local_root_for(key.asset_type).join(&key.slug);
         let prod_folder = state.prod_root_for(key.asset_type).join(&key.slug);
-        draw_context_menu(ui, &local_folder, &prod_folder, &row.url);
+        draw_context_menu(
+            ui,
+            &local_folder,
+            &prod_folder,
+            &row.url,
+            state.config.open_notion_links_in_desktop_app,
+        );
     });
 }
 
@@ -783,6 +802,31 @@ fn row_context_texture(ctx: &egui::Context) -> egui::TextureHandle {
 
 fn row_context_icon_rect(rect: egui::Rect) -> egui::Rect {
     rect.shrink(1.0)
+}
+
+fn open_notion_link(url: &str, open_in_app: bool) {
+    if url.is_empty() {
+        return;
+    }
+    let target = if open_in_app {
+        notion_app_url(url)
+    } else {
+        url.to_string()
+    };
+    let _ = open::that(target);
+}
+
+fn notion_app_url(url: &str) -> String {
+    if url.starts_with("notion://") {
+        return url.to_string();
+    }
+    if let Some(rest) = url.strip_prefix("https://") {
+        return format!("notion://{rest}");
+    }
+    if let Some(rest) = url.strip_prefix("http://") {
+        return format!("notion://{rest}");
+    }
+    format!("notion://{url}")
 }
 
 fn draw_toast(ui: &mut egui::Ui, toast: &super::RowToast) {
