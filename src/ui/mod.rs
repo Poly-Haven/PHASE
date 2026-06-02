@@ -533,16 +533,26 @@ impl AppState {
     }
 
     fn validation_requests_for_keys(&self, keys: &[RowKey]) -> Vec<crate::validation::Request> {
+        let mut assets_by_key = HashMap::new();
+        let mut seen_types = HashSet::new();
+        for asset_type in keys.iter().map(|key| key.asset_type) {
+            if !seen_types.insert(asset_type) {
+                continue;
+            }
+            let Some(AssetListState::Loaded(list)) = self.assets_by_type.get(&asset_type) else {
+                continue;
+            };
+            for asset in &list.assets {
+                assets_by_key.insert((asset_type, asset.slug.as_str()), asset);
+            }
+        }
+
         let mut requests = Vec::new();
         for key in keys {
             if self.jobs.contains_key(key) || self.plan_jobs.contains_key(key) {
                 continue; // skip while a copy or plan is in progress
             }
-            let Some(AssetListState::Loaded(list)) = self.assets_by_type.get(&key.asset_type)
-            else {
-                continue;
-            };
-            let Some(asset) = list.assets.iter().find(|asset| asset.slug == key.slug) else {
+            let Some(asset) = assets_by_key.get(&(key.asset_type, key.slug.as_str())) else {
                 continue;
             };
             requests.push(crate::validation::Request {
