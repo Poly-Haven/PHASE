@@ -8,7 +8,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
-use crate::notion::AssetStatus;
+use crate::notion::{AssetStatus, StatusGroup, StatusOption};
 use crate::ui::{AssetType, RowKey};
 
 pub use dismissed::{dismissal_key, load_dismissed_warning_keys, save_dismissed_warning_keys};
@@ -32,6 +32,7 @@ pub struct Finding {
 pub struct Request {
     pub key: RowKey,
     pub status: Option<AssetStatus>,
+    pub status_options: Vec<StatusOption>,
     pub local_root: PathBuf,
     pub prod_root: PathBuf,
 }
@@ -45,6 +46,7 @@ pub enum Msg {
 pub(crate) struct ValidationContext {
     pub key: RowKey,
     pub status: Option<AssetStatus>,
+    pub status_options: Vec<StatusOption>,
     pub local_root: PathBuf,
     pub prod_root: PathBuf,
 }
@@ -54,6 +56,7 @@ impl From<&Request> for ValidationContext {
         Self {
             key: request.key.clone(),
             status: request.status.clone(),
+            status_options: request.status_options.clone(),
             local_root: request.local_root.clone(),
             prod_root: request.prod_root.clone(),
         }
@@ -103,6 +106,7 @@ pub(crate) fn validate_asset(
     asset_type: AssetType,
     slug: &str,
     status: Option<&AssetStatus>,
+    status_options: &[StatusOption],
     local_root: &Path,
     prod_root: &Path,
 ) -> Vec<Finding> {
@@ -112,6 +116,7 @@ pub(crate) fn validate_asset(
             slug: slug.to_string(),
         },
         status: status.cloned(),
+        status_options: status_options.to_vec(),
         local_root: local_root.to_path_buf(),
         prod_root: prod_root.to_path_buf(),
     };
@@ -131,6 +136,37 @@ pub(crate) fn is_needs_review(status: Option<&AssetStatus>) -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn is_complete_status(status: Option<&AssetStatus>) -> bool {
+    status
+        .map(|s| s.group == StatusGroup::Complete)
+        .unwrap_or(false)
+}
+
+pub(crate) fn status_has_passed_review(
+    status: Option<&AssetStatus>,
+    status_options: &[StatusOption],
+) -> bool {
+    let Some(status) = status else {
+        return false;
+    };
+    let Some(status_order) = status_options
+        .iter()
+        .find(|option| option.id == status.id)
+        .map(|option| option.sort_order)
+    else {
+        return false;
+    };
+    let Some(review_order) = status_options
+        .iter()
+        .filter(|option| option.name.to_lowercase().contains("review"))
+        .map(|option| option.sort_order)
+        .max()
+    else {
+        return false;
+    };
+    status_order > review_order
+}
+
 pub(crate) fn is_harmless_root_file(name: &OsStr) -> bool {
     matches!(
         name.to_string_lossy().to_ascii_lowercase().as_str(),
@@ -148,7 +184,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::notion::{AssetStatus, StatusGroup};
+    use crate::notion::{AssetStatus, StatusGroup, StatusOption};
 
     use super::*;
 
@@ -158,7 +194,27 @@ mod tests {
             name: "Needs review".into(),
             color: "yellow".into(),
             group: StatusGroup::InProgress,
-            sort_order: 0,
+            sort_order: 2,
+        }
+    }
+
+    fn post_review_status() -> AssetStatus {
+        AssetStatus {
+            id: "ready-to-publish".into(),
+            name: "Ready to publish".into(),
+            color: "green".into(),
+            group: StatusGroup::InProgress,
+            sort_order: 3,
+        }
+    }
+
+    fn complete_status() -> AssetStatus {
+        AssetStatus {
+            id: "published".into(),
+            name: "Published".into(),
+            color: "gray".into(),
+            group: StatusGroup::Complete,
+            sort_order: 4,
         }
     }
 
@@ -168,8 +224,41 @@ mod tests {
             name: "Shooting".into(),
             color: "blue".into(),
             group: StatusGroup::InProgress,
-            sort_order: 0,
+            sort_order: 1,
         }
+    }
+
+    fn review_status_options() -> Vec<StatusOption> {
+        vec![
+            StatusOption {
+                id: "in-progress".into(),
+                name: "Shooting".into(),
+                color: "blue".into(),
+                group: StatusGroup::InProgress,
+                sort_order: 1,
+            },
+            StatusOption {
+                id: "needs-review".into(),
+                name: "Needs review".into(),
+                color: "yellow".into(),
+                group: StatusGroup::InProgress,
+                sort_order: 2,
+            },
+            StatusOption {
+                id: "ready-to-publish".into(),
+                name: "Ready to publish".into(),
+                color: "green".into(),
+                group: StatusGroup::InProgress,
+                sort_order: 3,
+            },
+            StatusOption {
+                id: "published".into(),
+                name: "Published".into(),
+                color: "gray".into(),
+                group: StatusGroup::Complete,
+                sort_order: 4,
+            },
+        ]
     }
 
     #[test]
@@ -188,6 +277,7 @@ mod tests {
             AssetType::Hdris,
             "test_slug",
             Some(&in_progress_status()),
+            &[],
             &local_root,
             &prod_root,
         );
@@ -221,6 +311,7 @@ mod tests {
             AssetType::Hdris,
             "test_slug",
             Some(&needs_review_status()),
+            &[],
             &local_root,
             &prod_root,
         );
@@ -244,6 +335,7 @@ mod tests {
             AssetType::Hdris,
             "test_slug",
             Some(&in_progress_status()),
+            &[],
             &local_root,
             &prod_root,
         );
@@ -265,6 +357,7 @@ mod tests {
             AssetType::Hdris,
             "sunny_field",
             Some(&needs_review_status()),
+            &[],
             &local_root,
             &prod_root,
         );
@@ -290,6 +383,7 @@ mod tests {
             AssetType::Textures,
             "forest_floor",
             Some(&needs_review_status()),
+            &[],
             &local_root,
             &prod_root,
         );
@@ -315,6 +409,7 @@ mod tests {
             AssetType::Hdris,
             "sunny_field",
             Some(&needs_review_status()),
+            &[],
             &local_root,
             &prod_root,
         );
@@ -323,6 +418,70 @@ mod tests {
             finding.text == "Missing /staging/colorchart.zip in Prod"
                 && finding.dismiss_id == Some("missing-colorchart-zip")
         }));
+    }
+
+    #[test]
+    fn passed_review_hdris_also_require_staging_files() {
+        let temp = tempdir().unwrap();
+        let local_root = temp.path().join("local");
+        let prod_root = temp.path().join("prod");
+        fs::create_dir_all(prod_root.join("staging")).unwrap();
+
+        let findings = validate_asset(
+            AssetType::Hdris,
+            "sunny_field",
+            Some(&post_review_status()),
+            &review_status_options(),
+            &local_root,
+            &prod_root,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.severity == Severity::Error
+                && finding.text == "Missing /staging/sunny_field.exr in Prod"
+        }));
+    }
+
+    #[test]
+    fn pre_review_status_does_not_run_staging_checks() {
+        let temp = tempdir().unwrap();
+        let local_root = temp.path().join("local");
+        let prod_root = temp.path().join("prod");
+        fs::create_dir_all(prod_root.join("staging")).unwrap();
+
+        let findings = validate_asset(
+            AssetType::Hdris,
+            "sunny_field",
+            Some(&in_progress_status()),
+            &review_status_options(),
+            &local_root,
+            &prod_root,
+        );
+
+        assert!(!findings.iter().any(|finding| {
+            finding.text.contains("Missing /staging/")
+        }));
+    }
+
+    #[test]
+    fn complete_status_skips_all_validation() {
+        let temp = tempdir().unwrap();
+        let local_root = temp.path().join("local");
+        let prod_root = temp.path().join("prod");
+        fs::create_dir_all(local_root.join("renders")).unwrap();
+        fs::write(local_root.join("notes.txt"), b"unexpected").unwrap();
+        fs::create_dir_all(prod_root.join("staging")).unwrap();
+
+        let findings = validate_asset(
+            AssetType::Hdris,
+            "sunny_field",
+            Some(&complete_status()),
+            &review_status_options(),
+            &local_root,
+            &prod_root,
+        );
+
+        assert!(findings.is_empty());
     }
 
     #[test]

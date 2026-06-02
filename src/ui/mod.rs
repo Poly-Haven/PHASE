@@ -665,6 +665,7 @@ impl AppState {
 
     fn validation_requests_for_keys(&self, keys: &[RowKey]) -> Vec<crate::validation::Request> {
         let mut assets_by_key = HashMap::new();
+        let mut status_options_by_type = HashMap::new();
         let mut seen_types = HashSet::new();
         for asset_type in keys.iter().map(|key| key.asset_type) {
             if !seen_types.insert(asset_type) {
@@ -676,6 +677,7 @@ impl AppState {
             for asset in &list.assets {
                 assets_by_key.insert((asset_type, asset.slug.as_str()), asset);
             }
+            status_options_by_type.insert(asset_type, list.statuses.clone());
         }
 
         let mut requests = Vec::new();
@@ -686,9 +688,14 @@ impl AppState {
             let Some(asset) = assets_by_key.get(&(key.asset_type, key.slug.as_str())) else {
                 continue;
             };
+            let status_options = status_options_by_type
+                .get(&key.asset_type)
+                .cloned()
+                .unwrap_or_default();
             requests.push(crate::validation::Request {
                 key: key.clone(),
                 status: asset.status.clone(),
+                status_options,
                 local_root: self.local_root_for(key.asset_type).join(&key.slug),
                 prod_root: self.prod_root_for(key.asset_type).join(&key.slug),
             });

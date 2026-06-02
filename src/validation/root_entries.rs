@@ -1,8 +1,8 @@
 use crate::ui::AssetType;
-use crate::validation::{is_harmless_root_file, Finding, Severity, ValidationContext};
+use crate::validation::{is_complete_status, is_harmless_root_file, Finding, Severity, ValidationContext};
 
 pub(crate) fn run(ctx: &ValidationContext) -> Vec<Finding> {
-    if !ctx.local_root.is_dir() {
+    if is_complete_status(ctx.status.as_ref()) || !ctx.local_root.is_dir() {
         return Vec::new();
     }
 
