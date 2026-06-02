@@ -22,6 +22,24 @@ pub fn is_valid(slug: &str) -> bool {
     !slug.is_empty() && validate(slug).is_empty()
 }
 
+/// Convert an arbitrary string into a valid slug by lowercasing, replacing spaces and dashes
+/// with underscores, and dropping any remaining invalid characters.
+pub fn fix(slug: &str) -> String {
+    slug.chars()
+        .filter_map(|ch| {
+            if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' {
+                Some(ch)
+            } else if ch.is_ascii_uppercase() {
+                Some(ch.to_ascii_lowercase())
+            } else if ch == ' ' || ch == '-' {
+                Some('_')
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 pub fn message(slug: &str) -> Option<String> {
     let problems = validate(slug);
     if problems.is_empty() {
@@ -48,4 +66,12 @@ mod tests {
         assert_eq!(super::message("Bad-Slug").unwrap(), "Invalid slug: B - S");
     }
 
+    #[test]
+    fn fix_slug_lowercases_replaces_separators_and_removes_invalid_chars() {
+        assert_eq!(super::fix("Simon's town-harbor"), "simons_town_harbor");
+        assert_eq!(super::fix("Bad-Slug"), "bad_slug");
+        assert_eq!(super::fix("hello world"), "hello_world");
+        assert_eq!(super::fix("already_valid_123"), "already_valid_123");
+        assert_eq!(super::fix("Test!Slug@123"), "testslug123");
+    }
 }
