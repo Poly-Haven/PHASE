@@ -485,13 +485,28 @@ fn draw_row_messages(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row:
                 let resp = ui
                     .add(
                         egui::Label::new(
-                            egui::RichText::new(action_label(action))
-                                .underline()
-                                .color(colors::HOVER),
+                            egui::RichText::new(action_label(action)).color(colors::HOVER),
                         )
                         .sense(egui::Sense::click()),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
+                // Draw underline at 30% opacity instead of using .underline()
+                let c = colors::HOVER;
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(resp.rect.min.x, resp.rect.max.y - 1.0),
+                        egui::pos2(resp.rect.max.x, resp.rect.max.y - 1.0),
+                    ],
+                    egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgba_unmultiplied(
+                            c.r(),
+                            c.g(),
+                            c.b(),
+                            (c.a() as f32 * 0.3) as u8,
+                        ),
+                    ),
+                );
                 if resp.clicked() {
                     handle_row_message_action(state, key, action);
                 }
