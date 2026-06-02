@@ -83,13 +83,22 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
 
     egui::ScrollArea::vertical()
         .auto_shrink([false; 2])
-        .show_rows(ui, 28.0, rows.len(), |ui, row_range| {
-            for row in &rows[row_range] {
+        .show(ui, |ui| {
+            let avail_w = ui.available_width();
+            for row in &rows {
                 let key = RowKey {
                     asset_type: row.asset_type,
                     slug: row.slug.clone(),
                 };
-                draw_row(state, ui, &key, row);
+                let two_rows = needs_second_row(row, avail_w, ui);
+                let row_height = if two_rows { 56.0 } else { 28.0 };
+                let top = ui.cursor().min;
+                let row_rect = egui::Rect::from_min_size(top, egui::vec2(avail_w, row_height));
+                if ui.is_rect_visible(row_rect) {
+                    draw_row(state, ui, &key, row, two_rows);
+                } else {
+                    ui.advance_cursor_after_rect(row_rect);
+                }
             }
         });
 }
@@ -257,16 +266,18 @@ fn row_action_availability(
     }
 }
 
-fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
-    let row_height = 28.0;
+fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView, two_rows: bool) {
+    let row_height = if two_rows { 56.0 } else { 28.0 };
     let avail = ui.available_rect_before_wrap();
     let row_rect = egui::Rect::from_min_size(avail.min, egui::vec2(avail.width(), row_height));
+    // Primary row always occupies the first 28 px.
+    let primary_rect = egui::Rect::from_min_size(row_rect.min, egui::vec2(row_rect.width(), 28.0));
 
     ui.painter()
         .rect_filled(row_rect, 2.0, colors::ROW_BACKGROUND);
     if let Some(job) = state.jobs.get(key) {
         let f = job.progress.fraction().clamp(0.0, 1.0);
-        let mut fill = row_rect;
+        let mut fill = primary_rect;
         fill.set_width(avail.width() * f);
         ui.painter()
             .rect_filled(fill, 2.0, colors::colored_background(colors::PROGRESS_BAR));
@@ -282,7 +293,7 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     );
     row_response.context_menu(|ui| draw_context_menu(ui, &local_folder, &prod_folder, &row.url));
 
-    ui.allocate_ui_at_rect(row_rect, |ui| {
+    ui.allocate_ui_at_rect(primary_rect, |ui| {
         ui.horizontal_centered(|ui| {
             ui.add_space(8.0);
             let text_color = if row.exists_on_prod {
@@ -296,7 +307,10 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
             let galley =
                 ui.fonts(|f| f.layout_no_wrap(row.slug.clone(), font_id, egui::Color32::WHITE));
             let slug_size = galley.rect.size();
-            let slug_start = egui::pos2(ui.cursor().min.x, row_rect.center().y - slug_size.y / 2.0);
+            let slug_start = egui::pos2(
+                ui.cursor().min.x,
+                primary_rect.center().y - slug_size.y / 2.0,
+            );
             let slug_rect = egui::Rect::from_min_size(slug_start, slug_size);
             let is_slug_hovered = ui.rect_contains_pointer(slug_rect);
             let slug_color = if is_slug_hovered {
@@ -353,70 +367,9 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
             ui.add_space(8.0);
             draw_status_pill(state, ui, key, row);
 
-            // Row messages (icons + text, left-to-right after author).
-            if let Some(toast) = state.row_toasts.get(key) {
-                draw_toast(ui, toast);
-            }
-
-            for msg in &row.messages {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = (ui.spacing().item_spacing.x - 4.0).max(0.0);
-                    let (tex, color) = match msg.kind {
-                        MsgKind::Info => (super::info_icon_texture(ui.ctx()), colors::MSG_INFO),
-                        MsgKind::Warning => {
-                            (super::warn_icon_texture(ui.ctx()), colors::MSG_WARNING)
-                        }
-                        MsgKind::Error => (super::error_icon_texture(ui.ctx()), colors::MSG_ERROR),
-                        MsgKind::Question => {
-                            (super::question_icon_texture(ui.ctx()), colors::MSG_QUESTION)
-                        }
-                    };
-                    ui.add(
-                        egui::Image::new(egui::load::SizedTexture::new(
-                            tex.id(),
-                            egui::vec2(14.0, 14.0),
-                        ))
-                        .tint(color),
-                    );
-                    ui.colored_label(color, &msg.text);
-                    if let Some(link) = &msg.link {
-                        let tex = super::external_link_texture(ui.ctx());
-                        let resp = ui.add(
-                            egui::Image::new(egui::load::SizedTexture::new(
-                                tex.id(),
-                                egui::vec2(12.0, 12.0),
-                            ))
-                            .tint(color)
-                            .sense(egui::Sense::click()),
-                        );
-                        if resp
-                            .on_hover_text("Open on polyhaven.com")
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .clicked()
-                        {
-                            let _ = open::that(link);
-                        }
-                    }
-                    if let Some(dismiss_key) = &msg.dismiss_key {
-                        let tex = super::x_icon_texture(ui.ctx());
-                        let resp = ui.add(
-                            egui::Image::new(egui::load::SizedTexture::new(
-                                tex.id(),
-                                egui::vec2(12.0, 12.0),
-                            ))
-                            .tint(egui::Color32::WHITE)
-                            .sense(egui::Sense::click()),
-                        );
-                        if resp
-                            .on_hover_text("Dismiss")
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .clicked()
-                        {
-                            state.dismiss_warning(dismiss_key.clone());
-                        }
-                    }
-                });
+            // Messages stay in the primary row when everything fits.
+            if !two_rows {
+                draw_row_messages(state, ui, key, row);
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -425,17 +378,160 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
         });
     });
 
+    // Secondary row: messages that didn't fit in the primary row.
+    if two_rows {
+        let secondary_rect = egui::Rect::from_min_size(
+            row_rect.min + egui::vec2(0.0, 28.0),
+            egui::vec2(row_rect.width(), 28.0),
+        );
+        ui.allocate_ui_at_rect(secondary_rect, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.add_space(8.0);
+                draw_row_messages(state, ui, key, row);
+            });
+        });
+    }
+
     ui.advance_cursor_after_rect(row_rect);
+}
+
+/// Draws the toast (if any) and validation messages for a row.
+/// Called from both the single-row primary layout and the secondary overflow row.
+fn draw_row_messages(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
+    if let Some(toast) = state.row_toasts.get(key) {
+        draw_toast(ui, toast);
+    }
+    for msg in &row.messages {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = (ui.spacing().item_spacing.x - 4.0).max(0.0);
+            let (tex, color) = match msg.kind {
+                MsgKind::Info => (super::info_icon_texture(ui.ctx()), colors::MSG_INFO),
+                MsgKind::Warning => (super::warn_icon_texture(ui.ctx()), colors::MSG_WARNING),
+                MsgKind::Error => (super::error_icon_texture(ui.ctx()), colors::MSG_ERROR),
+                MsgKind::Question => (super::question_icon_texture(ui.ctx()), colors::MSG_QUESTION),
+            };
+            ui.add(
+                egui::Image::new(egui::load::SizedTexture::new(
+                    tex.id(),
+                    egui::vec2(14.0, 14.0),
+                ))
+                .tint(color),
+            );
+            ui.colored_label(color, &msg.text);
+            if let Some(link) = &msg.link {
+                let tex = super::external_link_texture(ui.ctx());
+                let resp = ui.add(
+                    egui::Image::new(egui::load::SizedTexture::new(
+                        tex.id(),
+                        egui::vec2(12.0, 12.0),
+                    ))
+                    .tint(color)
+                    .sense(egui::Sense::click()),
+                );
+                if resp
+                    .on_hover_text("Open on polyhaven.com")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    let _ = open::that(link);
+                }
+            }
+            if let Some(dismiss_key) = &msg.dismiss_key {
+                let tex = super::x_icon_texture(ui.ctx());
+                let resp = ui.add(
+                    egui::Image::new(egui::load::SizedTexture::new(
+                        tex.id(),
+                        egui::vec2(12.0, 12.0),
+                    ))
+                    .tint(egui::Color32::WHITE)
+                    .sense(egui::Sense::click()),
+                );
+                if resp
+                    .on_hover_text("Dismiss")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    state.dismiss_warning(dismiss_key.clone());
+                }
+            }
+        });
+    }
+}
+
+/// Estimated primary-row width if messages stay on the first row.
+///
+/// Text widths must use the same `TextStyle`s as the widgets below. Live layout traces showed
+/// that hard-coding a 14 px font overestimated typical rows by ~50 px because egui 0.27's default
+/// `Body` and `Button` styles are 12.5 px.
+///
+/// Cursor constants are derived by tracing the actual egui cursor positions in `draw_row`:
+///
+///   LHS cursor after status pill (before messages):
+///     add_space(8) + slug_w + isp(8) + notion(14) + isp(8) + add_space(16) + author_w
+///     + isp(8) + add_space(8) + status_w + isp(8) = 78 + slug_w + author_w + status_w
+///
+///   RHS: pull icon left edge is at right_edge − 84:
+///     add_space(8) + context(18) + isp(8) + add_space(6) + push(18) + isp(8) + pull(18) = 84
+///
+///   Per message in outer layout (add_space advances cursor directly; no isp before it):
+///     add_space(8) + inner_horizontal_min_rect(icon14 + isp4 + text_w) + isp(8)
+///     = 34 + text_w  (plus 16 per optional link/dismiss icon inside the inner horizontal)
+fn row_layout_width(row: &RowView, ui: &egui::Ui) -> f32 {
+    let body_font = egui::TextStyle::Body.resolve(ui.style());
+    let button_font = egui::TextStyle::Button.resolve(ui.style());
+    let mw = |text: String, font: &egui::FontId| -> f32 {
+        ui.fonts(|f| {
+            f.layout_no_wrap(text, font.clone(), egui::Color32::WHITE)
+                .rect
+                .width()
+        })
+    };
+
+    let slug_w = mw(row.slug.clone(), &body_font);
+    let author_w = mw(row.author.clone(), &body_font);
+    // Status pill: text_w + icon(10) + padding(8)*3 (from status_pill_button)
+    let status_w = match &row.status {
+        Some(s) => mw(s.name.clone(), &button_font) + 34.0,
+        None => mw("No status".to_owned(), &body_font),
+    };
+
+    // LHS: add_space(8) + slug + isp(8) + notion(14) + isp(8) + add_space(16) + author
+    // + isp(8) + add_space(8) + status + isp(8) = 78 fixed
+    let lhs_w = 78.0 + slug_w + author_w + status_w;
+
+    // RHS: add_space(8) + context(18) + isp(8) + add_space(6) + push(18) + isp(8) + pull(18)
+    // = 84; pull's left edge is at right_edge − 84
+    let rhs_w = 84.0;
+
+    // Per message: add_space(8) + inner_horizontal(icon14 + isp4 + text) + isp(8) = 34 + text
+    // The inner horizontal reports min_rect width = 14 + 4 + text = 18 + text.
+    // Optional link/dismiss each add isp(4) + icon(12) = 16 inside the inner horizontal.
+    let msg_w: f32 = row
+        .messages
+        .iter()
+        .map(|msg| {
+            let tw = mw(msg.text.clone(), &body_font);
+            34.0 + tw
+                + if msg.link.is_some() { 16.0 } else { 0.0 }
+                + if msg.dismiss_key.is_some() { 16.0 } else { 0.0 }
+        })
+        .sum();
+
+    lhs_w + msg_w + rhs_w
+}
+
+fn needs_second_row(row: &RowView, available_width: f32, ui: &egui::Ui) -> bool {
+    if row.messages.is_empty() {
+        return false;
+    }
+    row_layout_width(row, ui) > available_width
 }
 
 fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
     let icon_size = egui::vec2(18.0, 18.0);
     let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-    let local_exists = state
-        .local_folder_cache
-        .get(key)
-        .copied()
-        .unwrap_or(false);
+    let local_exists = state.local_folder_cache.get(key).copied().unwrap_or(false);
 
     // Allocate space first so we know the rect, then paint with same-frame hover tint.
     let icon_button = |ui: &mut egui::Ui,
