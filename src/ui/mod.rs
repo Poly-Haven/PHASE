@@ -727,6 +727,12 @@ impl AppState {
                     self.auth_rx = None;
                     self.auth_login = None;
                     self.token_prompt_open = false;
+                    // Drop any in-flight refreshes that used stale tokens. Their
+                    // pending results (which would re-open the login prompt) are
+                    // discarded by clearing the channels before notion_rx is drained
+                    // later in this same pump() call.
+                    self.notion_rx.clear();
+                    self.refreshing.clear();
                     self.refresh_all_asset_types();
                     break;
                 }
@@ -1514,7 +1520,9 @@ fn draw_version_status(state: &mut AppState, ui: &mut egui::Ui) {
 
 pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     let gained_focus = ctx.input(|i| state.focus_refresh.update(i.focused, Instant::now()));
-    if gained_focus {
+    // Skip the focus-triggered refresh if login is in progress — a fresh refresh
+    // will be started by AuthMsg::Success once authentication completes.
+    if gained_focus && !state.token_prompt_open && state.auth_rx.is_none() {
         state.refresh_all_asset_types();
         state.rebuild_prod_folder_cache();
         state.rebuild_local_folder_cache();
