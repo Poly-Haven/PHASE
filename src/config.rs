@@ -35,6 +35,9 @@ pub struct Config {
     pub window_size: Option<[f32; 2]>,
     #[serde(default)]
     pub window_pos: Option<[f32; 2]>,
+    /// UTC day number (`unix_seconds / 86400`) when update checks last ran.
+    #[serde(default)]
+    pub last_update_check_day: Option<u64>,
 }
 
 fn default_prod_root() -> PathBuf {
@@ -62,6 +65,7 @@ impl Default for Config {
             skip_pull_raw_tif_if_many_work_tifs: default_skip_pull_raw_tif_if_many_work_tifs(),
             window_size: None,
             window_pos: None,
+            last_update_check_day: None,
         }
     }
 }
