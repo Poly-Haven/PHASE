@@ -1370,7 +1370,7 @@ fn draw_version_status(state: &mut AppState, ui: &mut egui::Ui) {
 }
 
 pub fn draw(state: &mut AppState, ctx: &egui::Context) {
-    let gained_focus = ctx.input(|i| state.focus_refresh.update(i.focused));
+    let gained_focus = ctx.input(|i| state.focus_refresh.update(i.focused, Instant::now()));
     if gained_focus {
         state.refresh_all_asset_types();
         state.rebuild_prod_folder_cache();

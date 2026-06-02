@@ -127,7 +127,7 @@ pub(crate) fn send_finished(tx: &Sender<Msg>) {
 
 pub(crate) fn is_needs_review(status: Option<&AssetStatus>) -> bool {
     status
-        .map(|status| status.name.eq_ignore_ascii_case("Needs review"))
+        .map(|status| status.name.to_ascii_lowercase().contains("review"))
         .unwrap_or(false)
 }
 
