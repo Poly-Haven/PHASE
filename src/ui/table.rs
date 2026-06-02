@@ -795,11 +795,11 @@ fn draw_context_menu(
     notion_url: &str,
     open_notion_in_app: bool,
 ) {
-    if ui.button("Open local folder").clicked() {
+    if local_folder.exists() && ui.button("Open local folder").clicked() {
         let _ = open::that(local_folder);
         ui.close_menu();
     }
-    if ui.button("Open prod folder").clicked() {
+    if prod_folder.exists() && ui.button("Open prod folder").clicked() {
         let _ = open::that(prod_folder);
         ui.close_menu();
     }
