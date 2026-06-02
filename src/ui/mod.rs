@@ -179,6 +179,7 @@ pub struct AppState {
     pub pending_conflict: Option<PendingConflict>,
     pub pending_verification_failure: Option<PendingVerificationFailure>,
     pub pending_prod_folder_create: Option<RowKey>,
+    pub pending_local_folder_delete: Option<RowKey>,
     pub row_toasts: HashMap<RowKey, RowToast>,
     pub published_assets: crate::polyhaven::PublishedAssets,
     pub published_rx: Option<Receiver<Result<crate::polyhaven::PublishedAssets, String>>>,
@@ -290,6 +291,7 @@ impl AppState {
             pending_conflict: None,
             pending_verification_failure: None,
             pending_prod_folder_create: None,
+            pending_local_folder_delete: None,
             row_toasts: HashMap::new(),
             published_assets: crate::cache::load(crate::polyhaven::cache_name())
                 .unwrap_or_default(),
@@ -1395,6 +1397,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     dialogs::draw(state, ctx);
     draw_update_prompt(state, ctx);
     draw_create_prod_folder_prompt(state, ctx);
+    draw_delete_local_folder_prompt(state, ctx);
     draw_verification_failure_prompt(state, ctx);
     draw_status_bar(state, ctx);
     let table_resp = egui::CentralPanel::default().show(ctx, |ui| table::draw(state, ui));
@@ -1555,6 +1558,53 @@ fn draw_create_prod_folder_prompt(state: &mut AppState, ctx: &egui::Context) {
         });
 }
 
+fn delete_local_folder(state: &mut AppState, key: &RowKey) {
+    let local_folder = state.local_root_for(key.asset_type).join(&key.slug);
+    match std::fs::remove_dir_all(&local_folder) {
+        Ok(()) => {
+            state.row_toasts.insert(
+                key.clone(),
+                RowToast {
+                    text: "Deleted local files".into(),
+                    created_at: Instant::now(),
+                },
+            );
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            state.error_banner = Some(format!(
+                "Could not delete local files for {}: {err}",
+                key.slug
+            ));
+            return;
+        }
+    }
+    state.rebuild_local_folder_cache();
+    state.start_validation_for_visible_assets();
+}
+
+fn draw_delete_local_folder_prompt(state: &mut AppState, ctx: &egui::Context) {
+    let Some(key) = state.pending_local_folder_delete.clone() else {
+        return;
+    };
+    egui::Window::new("Delete local files?")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label(format!("Delete the local folder for {}?", key.slug));
+            ui.horizontal(|ui| {
+                if ui.button("Delete").clicked() {
+                    delete_local_folder(state, &key);
+                    state.pending_local_folder_delete = None;
+                }
+                if ui.button("Cancel").clicked() {
+                    state.pending_local_folder_delete = None;
+                }
+            });
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
@@ -1596,6 +1646,7 @@ mod tests {
             pending_conflict: None,
             pending_verification_failure: None,
             pending_prod_folder_create: None,
+            pending_local_folder_delete: None,
             row_toasts: HashMap::new(),
             published_assets: crate::polyhaven::PublishedAssets::default(),
             published_rx: None,

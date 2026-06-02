@@ -12,12 +12,19 @@ pub enum MsgKind {
     Question,
 }
 
+#[derive(Clone)]
+pub enum RowMsgAction {
+    CreateProdFolder,
+    DeleteLocalFiles,
+}
+
 /// A single message attached to an asset row.
 #[derive(Clone)]
 pub struct RowMsg {
     pub kind: MsgKind,
     pub text: String,
     pub link: Option<String>,
+    pub action: Option<RowMsgAction>,
     pub dismiss_key: Option<String>,
 }
 
@@ -186,14 +193,16 @@ impl RowView {
                 kind: MsgKind::Error,
                 text,
                 link: None,
+                action: None,
                 dismiss_key: None,
             });
         }
         if !exists_on_prod {
             messages.push(RowMsg {
                 kind: MsgKind::Warning,
-                text: "Prod folder missing".into(),
+                text: "No prod folder.".into(),
                 link: None,
+                action: Some(RowMsgAction::CreateProdFolder),
                 dismiss_key: None,
             });
         }
@@ -202,14 +211,16 @@ impl RowView {
                 kind: MsgKind::Warning,
                 text: "Published asset with this slug found".into(),
                 link: Some(format!("https://polyhaven.com/a/{}", a.slug)),
+                action: None,
                 dismiss_key: None,
             });
         }
         if exists_local && status_has_passed_review(&a.status, status_options) {
             messages.push(RowMsg {
                 kind: MsgKind::Info,
-                text: "Passed review; local files can be deleted".into(),
+                text: "Passed review;".into(),
                 link: None,
+                action: Some(RowMsgAction::DeleteLocalFiles),
                 dismiss_key: None,
             });
         }
@@ -218,6 +229,7 @@ impl RowView {
                 kind: Self::msg_kind_from_validation_severity(finding.severity),
                 text: finding.text.clone(),
                 link: None,
+                action: None,
                 dismiss_key: finding
                     .dismiss_id
                     .map(|dismiss_id| crate::validation::dismissal_key(&key, dismiss_id)),
@@ -295,7 +307,7 @@ fn row_action_availability(
         },
         RowAction::Pull if !has_prod_folder => ActionAvailability {
             enabled: false,
-            tooltip: "Prod folder missing",
+            tooltip: "No prod folder",
         },
         RowAction::Pull => ActionAvailability {
             enabled: true,
@@ -476,6 +488,21 @@ fn draw_row_messages(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row:
                 .tint(color),
             );
             ui.colored_label(color, &msg.text);
+            if let Some(action) = &msg.action {
+                let resp = ui
+                    .add(
+                        egui::Label::new(
+                            egui::RichText::new(action_label(action))
+                                .underline()
+                                .color(colors::HOVER),
+                        )
+                        .sense(egui::Sense::click()),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if resp.clicked() {
+                    handle_row_message_action(state, key, action);
+                }
+            }
             if let Some(link) = &msg.link {
                 let tex = super::external_link_texture(ui.ctx());
                 let resp = ui.add(
@@ -513,6 +540,24 @@ fn draw_row_messages(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row:
                 }
             }
         });
+    }
+}
+
+fn action_label(action: &RowMsgAction) -> &'static str {
+    match action {
+        RowMsgAction::CreateProdFolder => "Create?",
+        RowMsgAction::DeleteLocalFiles => "Delete local files?",
+    }
+}
+
+fn handle_row_message_action(state: &mut AppState, key: &RowKey, action: &RowMsgAction) {
+    match action {
+        RowMsgAction::CreateProdFolder => {
+            state.pending_prod_folder_create = Some(key.clone());
+        }
+        RowMsgAction::DeleteLocalFiles => {
+            state.pending_local_folder_delete = Some(key.clone());
+        }
     }
 }
 
@@ -569,7 +614,13 @@ fn row_layout_width(row: &RowView, ui: &egui::Ui) -> f32 {
         .iter()
         .map(|msg| {
             let tw = mw(msg.text.clone(), &body_font);
+            let action_w = msg
+                .action
+                .as_ref()
+                .map(|action| mw(action_label(action).to_string(), &body_font) + 4.0)
+                .unwrap_or(0.0);
             34.0 + tw
+                + action_w
                 + if msg.link.is_some() { 16.0 } else { 0.0 }
                 + if msg.dismiss_key.is_some() { 16.0 } else { 0.0 }
         })
@@ -1196,7 +1247,7 @@ mod tests {
         assert!(row
             .messages
             .iter()
-            .any(|msg| msg.text == "Passed review; local files can be deleted"));
+            .any(|msg| msg.text == "Passed review;"));
     }
 
     #[test]
@@ -1256,7 +1307,7 @@ mod tests {
         let availability = row_action_availability(RowAction::Pull, false, false);
 
         assert!(!availability.enabled);
-        assert_eq!(availability.tooltip, "Prod folder missing");
+        assert_eq!(availability.tooltip, "No prod folder");
     }
 
     #[test]
@@ -1275,12 +1326,14 @@ mod tests {
                 kind: MsgKind::Warning,
                 text: "Missing /staging/colorchart.zip in Prod".into(),
                 link: None,
+                action: None,
                 dismiss_key: Some("HDRIs/sunny_field:missing-colorchart-zip".into()),
             },
             RowMsg {
                 kind: MsgKind::Info,
                 text: "Local files newer than Prod. Push?".into(),
                 link: None,
+                action: None,
                 dismiss_key: None,
             },
         ];
@@ -1301,18 +1354,21 @@ mod tests {
                 kind: MsgKind::Warning,
                 text: "Published asset with this slug found".into(),
                 link: None,
+                action: None,
                 dismiss_key: None,
             },
             RowMsg {
                 kind: MsgKind::Error,
                 text: "Unexpected root entries: renders".into(),
                 link: None,
+                action: None,
                 dismiss_key: None,
             },
             RowMsg {
                 kind: MsgKind::Warning,
                 text: "Missing /staging/colorchart.zip in Prod".into(),
                 link: None,
+                action: None,
                 dismiss_key: Some("HDRIs/sunny_field:missing-colorchart-zip".into()),
             },
         ];
