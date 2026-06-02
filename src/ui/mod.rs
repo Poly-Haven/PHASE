@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::copy::job::{JobMsg, JobProgress, VerifyMsg};
-use crate::copy::plan::{build_plan_with_pull_filter, Action, Direction, PullFilterMode};
+use crate::copy::plan::{build_plan_with_pull_filter, Action, Direction, Plan, PullFilterMode};
 use crate::notion::{AssetList, AssetStatus, StatusOption, HDRIS_DB_ID, TEXTURES_DB_ID};
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
@@ -131,6 +131,12 @@ pub struct ValidationJob {
     pub rx: Receiver<crate::validation::Msg>,
 }
 
+/// A background thread is building the copy plan for this asset.
+pub struct PlanJob {
+    pub direction: Direction,
+    pub rx: Receiver<Result<Plan, String>>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VisibleValidationScope {
     pub keys: Vec<RowKey>,
@@ -156,6 +162,7 @@ pub struct AppState {
     pub assets_by_type: HashMap<AssetType, AssetListState>,
     pub error_banner: Option<String>,
     pub jobs: HashMap<RowKey, RowJob>,
+    pub plan_jobs: HashMap<RowKey, PlanJob>,
     pub verifications: HashMap<RowKey, VerificationJob>,
     pub status_updates: HashMap<RowKey, StatusUpdateJob>,
     pub notion_rx: HashMap<AssetType, Receiver<Result<AssetList, String>>>,
@@ -182,6 +189,11 @@ pub struct AppState {
     /// Rebuilt when Notion data loads, window gains focus, a job finishes,
     /// or a prod folder is created — never on every frame.
     pub prod_folder_cache: HashMap<RowKey, bool>,
+    /// Receiver for an in-flight background rebuild of `prod_folder_cache`.
+    pub prod_cache_rx: Option<Receiver<HashMap<RowKey, bool>>>,
+    /// Cached result of `is_dir()` for each asset's local working folder.
+    /// Rebuilt synchronously (local disk) on focus gain and after pulls.
+    pub local_folder_cache: HashMap<RowKey, bool>,
     pub dismissed_warning_keys: HashSet<String>,
     pub validation_results: HashMap<RowKey, Vec<crate::validation::Finding>>,
     pub validation_job: Option<ValidationJob>,
@@ -229,6 +241,7 @@ impl AppState {
             assets_by_type: HashMap::new(),
             error_banner: None,
             jobs: HashMap::new(),
+            plan_jobs: HashMap::new(),
             verifications: HashMap::new(),
             status_updates: HashMap::new(),
             notion_rx: HashMap::new(),
@@ -250,6 +263,8 @@ impl AppState {
             cursor_moved_in_table_at: None,
             focus_refresh: focus_refresh::State::default(),
             prod_folder_cache: HashMap::new(),
+            prod_cache_rx: None,
+            local_folder_cache: HashMap::new(),
             dismissed_warning_keys: crate::validation::load_dismissed_warning_keys()
                 .unwrap_or_default(),
             validation_results: HashMap::new(),
@@ -341,10 +356,10 @@ impl AppState {
         }
     }
 
-    /// Rebuild the full prod-folder existence cache from disk.
-    /// Call when Notion data loads, window gains focus, or the asset list changes.
+    /// Kick off a background rebuild of the prod-folder existence cache.
+    /// When the thread finishes, `pump()` will receive the result and swap it in.
     pub fn rebuild_prod_folder_cache(&mut self) {
-        self.prod_folder_cache.clear();
+        let mut to_check: Vec<(RowKey, std::path::PathBuf)> = Vec::new();
         for &t in AssetType::all() {
             let prod_root = self.prod_root_for(t);
             if let Some(AssetListState::Loaded(list)) = self.assets_by_type.get(&t) {
@@ -353,11 +368,44 @@ impl AppState {
                         asset_type: t,
                         slug: asset.slug.clone(),
                     };
-                    self.prod_folder_cache
-                        .insert(key, prod_root.join(&asset.slug).is_dir());
+                    to_check.push((key, prod_root.join(&asset.slug)));
                 }
             }
         }
+        if to_check.is_empty() {
+            return;
+        }
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            let cache: HashMap<RowKey, bool> =
+                to_check.into_iter().map(|(k, p)| (k, p.is_dir())).collect();
+            let _ = tx.send(cache);
+        });
+        self.prod_cache_rx = Some(rx);
+    }
+
+    /// Synchronously rebuild the local-folder existence cache (local disk — fast).
+    pub fn rebuild_local_folder_cache(&mut self) {
+        self.local_folder_cache.clear();
+        for &t in AssetType::all() {
+            let local_root = self.local_root_for(t);
+            if let Some(AssetListState::Loaded(list)) = self.assets_by_type.get(&t) {
+                for asset in &list.assets {
+                    let key = RowKey {
+                        asset_type: t,
+                        slug: asset.slug.clone(),
+                    };
+                    self.local_folder_cache
+                        .insert(key, local_root.join(&asset.slug).is_dir());
+                }
+            }
+        }
+    }
+
+    /// Update the local cache for a single asset after a pull finishes.
+    pub fn update_local_folder_cache_for(&mut self, key: &RowKey) {
+        let exists = self.local_root_for(key.asset_type).join(&key.slug).is_dir();
+        self.local_folder_cache.insert(key.clone(), exists);
     }
 
     /// Update the cache for a single asset (after a job finishes or a folder is created).
@@ -445,8 +493,8 @@ impl AppState {
     fn validation_requests_for_keys(&self, keys: &[RowKey]) -> Vec<crate::validation::Request> {
         let mut requests = Vec::new();
         for key in keys {
-            if self.jobs.contains_key(key) {
-                continue; // skip while a copy is in progress
+            if self.jobs.contains_key(key) || self.plan_jobs.contains_key(key) {
+                continue; // skip while a copy or plan is in progress
             }
             let Some(AssetListState::Loaded(list)) = self.assets_by_type.get(&key.asset_type)
             else {
@@ -516,6 +564,7 @@ impl AppState {
                             let _ = crate::cache::save(t.cache_name(), &list);
                             self.assets_by_type.insert(t, AssetListState::Loaded(list));
                             self.rebuild_prod_folder_cache();
+                            self.rebuild_local_folder_cache();
                             self.start_validation_for_visible_assets();
                         }
                     }
@@ -534,6 +583,7 @@ impl AppState {
                 self.assets_by_type.insert(t, AssetListState::Loaded(list));
             }
             self.rebuild_prod_folder_cache();
+            self.rebuild_local_folder_cache();
             self.start_validation_for_visible_assets();
 
             if let Some(res) = self.published_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
@@ -598,6 +648,44 @@ impl AppState {
             self.validation_job = None;
         }
 
+        // Receive background prod-folder cache rebuild result.
+        if let Some(cache) = self
+            .prod_cache_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.prod_folder_cache = cache;
+            self.prod_cache_rx = None;
+        }
+
+        // Drain completed plan jobs and either open the conflict dialog or start copying.
+        let plan_keys: Vec<RowKey> = self.plan_jobs.keys().cloned().collect();
+        for k in plan_keys {
+            let result_opt = self
+                .plan_jobs
+                .get(&k)
+                .and_then(|job| job.rx.try_recv().ok());
+            if let Some(result) = result_opt {
+                let direction = self.plan_jobs.remove(&k).unwrap().direction;
+                match result {
+                    Err(e) => {
+                        self.error_banner = Some(format!("Plan failed for {}: {e}", k.slug));
+                    }
+                    Ok(plan) => {
+                        if !plan.conflicts().is_empty() {
+                            self.pending_conflict = Some(PendingConflict {
+                                key: k,
+                                direction,
+                                plan,
+                            });
+                        } else {
+                            spawn_copy_job(self, k, direction, plan);
+                        }
+                    }
+                }
+            }
+        }
+
         let keys: Vec<RowKey> = self.jobs.keys().cloned().collect();
         for k in keys {
             let mut done = false;
@@ -629,6 +717,9 @@ impl AppState {
                 if let Some(job) = self.jobs.remove(&k) {
                     if finished_successfully {
                         self.update_prod_folder_cache_for(&k);
+                        if job.direction == Direction::Pull {
+                            self.update_local_folder_cache_for(&k);
+                        }
                         if job.direction == Direction::Push {
                             self.start_push_verification(k.clone(), job.plan.clone());
                         }
@@ -709,17 +800,18 @@ impl AppState {
 }
 
 pub fn start_job(state: &mut AppState, key: &RowKey, direction: Direction) {
-    let (src_root, dst_root) = match direction {
-        Direction::Pull => (
-            state.prod_root_for(key.asset_type).join(&key.slug),
-            state.local_root_for(key.asset_type).join(&key.slug),
-        ),
-        Direction::Push => (
-            state.local_root_for(key.asset_type).join(&key.slug),
-            state.prod_root_for(key.asset_type).join(&key.slug),
-        ),
+    // Ignore if already planning or copying.
+    if state.plan_jobs.contains_key(key) || state.jobs.contains_key(key) {
+        return;
+    }
+    let src_root = match direction {
+        Direction::Pull => state.prod_root_for(key.asset_type).join(&key.slug),
+        Direction::Push => state.local_root_for(key.asset_type).join(&key.slug),
     };
-
+    let dst_root = match direction {
+        Direction::Pull => state.local_root_for(key.asset_type).join(&key.slug),
+        Direction::Push => state.prod_root_for(key.asset_type).join(&key.slug),
+    };
     let pull_filter = match direction {
         Direction::Pull if state.config.skip_pull_raw_tif_if_many_work_tifs => {
             PullFilterMode::SkipRawAndTifWhenWorkTifsExceed { threshold: 30 }
@@ -727,28 +819,23 @@ pub fn start_job(state: &mut AppState, key: &RowKey, direction: Direction) {
         Direction::Pull => PullFilterMode::None,
         Direction::Push => PullFilterMode::None,
     };
-    let plan = match build_plan_with_pull_filter(direction, &src_root, &dst_root, pull_filter) {
-        Ok(p) => p,
-        Err(e) => {
-            state.error_banner = Some(format!("Plan failed: {e}"));
-            return;
-        }
-    };
 
-    if !plan.conflicts().is_empty() {
-        state.pending_conflict = Some(PendingConflict {
-            key: key.clone(),
-            direction,
-            plan,
-        });
-        return;
-    }
+    let (tx, rx) = channel::<Result<Plan, String>>();
+    thread::spawn(move || {
+        let result =
+            build_plan_with_pull_filter(direction, &src_root, &dst_root, pull_filter)
+                .map_err(|e| e.to_string());
+        let _ = tx.send(result);
+    });
+    state.plan_jobs.insert(key.clone(), PlanJob { direction, rx });
+}
 
-    let (tx, rx) = std::sync::mpsc::channel();
+fn spawn_copy_job(state: &mut AppState, key: RowKey, direction: Direction, plan: Plan) {
+    let (tx, rx) = channel();
     let progress = Arc::new(JobProgress::default());
     crate::copy::job::spawn(plan.clone(), progress.clone(), tx);
     state.jobs.insert(
-        key.clone(),
+        key,
         RowJob {
             direction,
             plan,
@@ -835,20 +922,7 @@ pub fn execute_after_conflict(state: &mut AppState, choice: ConflictChoice) {
                 .retain(|f| !matches!(f.action, Action::Conflict { .. }));
         }
     }
-    let (tx, rx) = std::sync::mpsc::channel();
-    let progress = Arc::new(JobProgress::default());
-    crate::copy::job::spawn(plan.clone(), progress.clone(), tx);
-    state.jobs.insert(
-        pc.key,
-        RowJob {
-            direction: pc.direction,
-            plan,
-            progress,
-            rx,
-            message: Arc::new(Mutex::new(String::new())),
-            started_at: Instant::now(),
-        },
-    );
+    spawn_copy_job(state, pc.key, pc.direction, plan);
 }
 
 pub fn create_prod_folder(state: &mut AppState, key: &RowKey) {
@@ -1036,6 +1110,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     if gained_focus {
         state.refresh_all_asset_types();
         state.rebuild_prod_folder_cache();
+        state.rebuild_local_folder_cache();
         state.start_validation_for_visible_assets();
     }
 
@@ -1068,6 +1143,8 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     if !state.pending_notion.is_empty()
         || !state.row_toasts.is_empty()
         || !state.jobs.is_empty()
+        || !state.plan_jobs.is_empty()
+        || state.prod_cache_rx.is_some()
         || !state.verifications.is_empty()
         || state.validation_job.is_some()
         || state.update_check_rx.is_some()
@@ -1242,6 +1319,7 @@ mod tests {
             assets_by_type,
             error_banner: None,
             jobs: HashMap::new(),
+            plan_jobs: HashMap::new(),
             verifications: HashMap::new(),
             status_updates: HashMap::new(),
             notion_rx: HashMap::new(),
@@ -1262,6 +1340,8 @@ mod tests {
             cursor_moved_in_table_at: None,
             focus_refresh: super::focus_refresh::State::default(),
             prod_folder_cache: HashMap::new(),
+            prod_cache_rx: None,
+            local_folder_cache: HashMap::new(),
             dismissed_warning_keys: HashSet::new(),
             validation_results: HashMap::new(),
             validation_job: None,

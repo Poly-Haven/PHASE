@@ -432,9 +432,10 @@ fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
     let icon_size = egui::vec2(18.0, 18.0);
     let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     let local_exists = state
-        .local_root_for(key.asset_type)
-        .join(&key.slug)
-        .is_dir();
+        .local_folder_cache
+        .get(key)
+        .copied()
+        .unwrap_or(false);
 
     // Allocate space first so we know the rect, then paint with same-frame hover tint.
     let icon_button = |ui: &mut egui::Ui,
@@ -468,6 +469,11 @@ fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
         };
         resp.on_hover_text(tooltip).on_hover_cursor(cursor)
     };
+
+    if state.plan_jobs.contains_key(key) {
+        ui.colored_label(colors::TEXT_DISABLED, "Planning…");
+        return;
+    }
 
     if state.jobs.contains_key(key) {
         let x_tex = super::x_icon_texture(ui.ctx());
