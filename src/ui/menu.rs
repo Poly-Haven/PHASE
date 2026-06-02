@@ -17,6 +17,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
         let response =
             super::group_selector::draw(ui, "asset_type_selector", &options, &state.selected_types);
         if let Some(clicked) = response.clicked {
+            state.persist_author_filters_for_selected_types();
             state.selected_types = super::asset_types::select(
                 state.selected_types.clone(),
                 clicked,
@@ -25,6 +26,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
             state.current_type = state.selected_types.first().copied().unwrap_or(clicked);
             state.config.last_tab = state.current_type.label().to_string();
             state.config.last_asset_types = super::asset_types::labels(&state.selected_types);
+            state.apply_author_filters_for_selected_types();
             let _ = crate::config::save(&state.config);
         }
 
@@ -90,9 +92,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                 }
             });
         if state.author_filters != filters_before {
-            state.author_filter = state.author_filters.first().cloned().unwrap_or_default();
-            state.config.last_author_filter = state.author_filter.clone();
-            state.config.last_author_filters = state.author_filters.clone();
+            state.persist_author_filters_for_selected_types();
             let _ = crate::config::save(&state.config);
         }
 
