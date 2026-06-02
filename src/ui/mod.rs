@@ -277,6 +277,11 @@ impl AppState {
         } else {
             asset_types::from_labels(&config.last_asset_types)
         };
+        let selected_status_groups = if config.last_selected_status_groups.is_empty() {
+            crate::notion::StatusGroup::default_filter()
+        } else {
+            config.last_selected_status_groups.clone()
+        };
         let current_type = selected_types.first().copied().unwrap_or(AssetType::Hdris);
         let author_filters = initial_author_filters(&config, &selected_types);
         let author_filter = author_filters.first().cloned().unwrap_or_default();
@@ -284,7 +289,7 @@ impl AppState {
         let mut s = Self {
             current_type,
             selected_types,
-            selected_status_groups: crate::notion::StatusGroup::default_filter(),
+            selected_status_groups,
             author_filter,
             author_filters,
             config,

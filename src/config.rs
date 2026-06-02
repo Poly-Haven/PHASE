@@ -41,6 +41,9 @@ pub struct Config {
     pub window_size: Option<[f32; 2]>,
     #[serde(default)]
     pub window_pos: Option<[f32; 2]>,
+    /// Last selected status group filters (e.g. ["InProgress", "ToDo"]).
+    #[serde(default)]
+    pub last_selected_status_groups: Vec<crate::notion::StatusGroup>,
     /// UTC day number (`unix_seconds / 86400`) when update checks last ran.
     #[serde(default)]
     pub last_update_check_day: Option<u64>,
@@ -75,6 +78,7 @@ impl Default for Config {
             last_author_filters_by_type: std::collections::HashMap::new(),
             last_filters: std::collections::HashMap::new(),
             skip_pull_raw_tif_if_many_work_tifs: default_skip_pull_raw_tif_if_many_work_tifs(),
+            last_selected_status_groups: Vec::new(),
             window_size: None,
             window_pos: None,
             last_update_check_day: None,
