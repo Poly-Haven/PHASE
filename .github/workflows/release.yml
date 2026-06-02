@@ -28,7 +28,7 @@ jobs:
       - name: Build release binary
         run: cargo build --release --quiet
 
-      - name: Package binary
+      - name: Package release assets
         shell: pwsh
         run: |
           $tag = "${env:GITHUB_REF_NAME}"
@@ -36,7 +36,7 @@ jobs:
           $zip = "phase-$tag-$target.zip"
           Copy-Item target\release\phase.exe phase.exe
           Compress-Archive -Path phase.exe -DestinationPath $zip -Force
-          "ASSET=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ZIP_ASSET=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Generate release notes
         shell: pwsh
@@ -59,7 +59,7 @@ jobs:
         run: |
           $tag = "${env:GITHUB_REF_NAME}"
           if (gh release view $tag *> $null) {
-            gh release upload $tag $env:ASSET --clobber
+            gh release upload $tag phase.exe $env:ZIP_ASSET --clobber
           } else {
-            gh release create $tag $env:ASSET --title "PHASE $tag" --notes-file release-notes.md
+            gh release create $tag phase.exe $env:ZIP_ASSET --title "PHASE $tag" --notes-file release-notes.md
           }
