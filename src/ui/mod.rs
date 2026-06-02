@@ -190,6 +190,7 @@ pub struct AppState {
     pub settings_open: bool,
     pub settings_local_root_input: String,
     pub settings_skip_pull_raw_tif_if_many_work_tifs: bool,
+    pub settings_open_notion_links_in_desktop_app: bool,
     /// Asset types whose background fetch is currently in flight.
     pub refreshing: HashSet<AssetType>,
     /// Asset API results buffered while the cursor is active in the table.
@@ -301,6 +302,7 @@ impl AppState {
             settings_open: false,
             settings_local_root_input: String::new(),
             settings_skip_pull_raw_tif_if_many_work_tifs: false,
+            settings_open_notion_links_in_desktop_app: false,
             refreshing: HashSet::new(),
             pending_notion: HashMap::new(),
             cursor_moved_in_table_at: None,
@@ -325,6 +327,8 @@ impl AppState {
         s.settings_local_root_input = s.config.local_root.display().to_string();
         s.settings_skip_pull_raw_tif_if_many_work_tifs =
             s.config.skip_pull_raw_tif_if_many_work_tifs;
+        s.settings_open_notion_links_in_desktop_app =
+            s.config.open_notion_links_in_desktop_app;
         // Warm the UI from cache immediately, then refresh in the background.
         for t in [AssetType::Hdris, AssetType::Textures] {
             if let Some(cached) = crate::cache::load(t.cache_name()) {
@@ -1014,6 +1018,8 @@ impl AppState {
         self.settings_local_root_input = self.config.local_root.display().to_string();
         self.settings_skip_pull_raw_tif_if_many_work_tifs =
             self.config.skip_pull_raw_tif_if_many_work_tifs;
+        self.settings_open_notion_links_in_desktop_app =
+            self.config.open_notion_links_in_desktop_app;
         self.settings_open = true;
     }
 
@@ -1601,6 +1607,7 @@ mod tests {
             settings_open: false,
             settings_local_root_input: String::new(),
             settings_skip_pull_raw_tif_if_many_work_tifs: true,
+            settings_open_notion_links_in_desktop_app: false,
             refreshing: HashSet::new(),
             pending_notion: HashMap::new(),
             cursor_moved_in_table_at: None,

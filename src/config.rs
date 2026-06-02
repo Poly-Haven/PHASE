@@ -11,6 +11,8 @@ pub struct Config {
     pub auth_refresh_token: String,
     #[serde(default)]
     pub auth_expires_at: Option<u64>,
+    #[serde(default = "default_open_notion_links_in_desktop_app")]
+    pub open_notion_links_in_desktop_app: bool,
     #[serde(default = "default_prod_root")]
     pub prod_root: PathBuf,
     #[serde(default = "default_local_root")]
@@ -53,6 +55,9 @@ fn default_local_root() -> PathBuf {
 fn default_skip_pull_raw_tif_if_many_work_tifs() -> bool {
     true
 }
+fn default_open_notion_links_in_desktop_app() -> bool {
+    false
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -60,6 +65,7 @@ impl Default for Config {
             auth_access_token: String::new(),
             auth_refresh_token: String::new(),
             auth_expires_at: None,
+            open_notion_links_in_desktop_app: default_open_notion_links_in_desktop_app(),
             prod_root: default_prod_root(),
             local_root: default_local_root(),
             last_tab: String::new(),
@@ -130,6 +136,7 @@ local_root = "C:\\PHASE"
         assert_eq!(cfg.auth_access_token, "access");
         assert_eq!(cfg.auth_refresh_token, "refresh");
         assert_eq!(cfg.auth_expires_at, Some(12345));
+        assert!(!cfg.open_notion_links_in_desktop_app);
         assert_eq!(toml::to_string(&cfg).unwrap().contains("notion_token"), false);
 
         let default_cfg = super::Config::default();
