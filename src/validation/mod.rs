@@ -158,6 +158,7 @@ mod tests {
             name: "Needs review".into(),
             color: "yellow".into(),
             group: StatusGroup::InProgress,
+            sort_order: 0,
         }
     }
 
@@ -167,6 +168,7 @@ mod tests {
             name: "Shooting".into(),
             color: "blue".into(),
             group: StatusGroup::InProgress,
+            sort_order: 0,
         }
     }
 

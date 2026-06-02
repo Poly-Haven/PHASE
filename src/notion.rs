@@ -1,11 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::collections::HashMap;
 use std::time::Duration;
-
-pub const HDRIS_DB_ID: &str = "21f373ac-61c1-80d0-8e55-cd46d121d1d5";
-pub const TEXTURES_DB_ID: &str = "215373ac-61c1-80dd-8a97-edb25bb6a5f8";
-const NOTION_VERSION: &str = "2022-06-28";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetList {
@@ -28,6 +25,8 @@ pub struct AssetStatus {
     pub name: String,
     pub color: String,
     pub group: StatusGroup,
+    #[serde(default)]
+    pub sort_order: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +35,8 @@ pub struct StatusOption {
     pub name: String,
     pub color: String,
     pub group: StatusGroup,
+    #[serde(default)]
+    pub sort_order: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -70,6 +71,7 @@ impl StatusGroup {
         }
     }
 
+    #[cfg(test)]
     fn from_notion_group(name: &str) -> Option<Self> {
         match name.trim().to_lowercase().as_str() {
             "to-do" | "to do" | "todo" | "not started" => Some(Self::ToDo),
@@ -81,108 +83,63 @@ impl StatusGroup {
 }
 
 #[derive(Deserialize)]
-struct DatabaseResponse {
-    properties: serde_json::Value,
+struct StatusUpdateResponse {
+    #[allow(dead_code)]
+    status: AssetStatus,
 }
 
-#[derive(Deserialize)]
-struct QueryResponse {
-    results: Vec<Page>,
-    next_cursor: Option<String>,
-    has_more: bool,
-}
-
-#[derive(Deserialize)]
-struct Page {
-    id: String,
-    url: String,
-    properties: serde_json::Value,
-}
-
-/// Fetch every page in a database, paginating until exhausted. Sorted by slug.
-pub fn fetch_database(token: &str, database_id: &str) -> Result<AssetList> {
+/// Fetch assets from the PHASE backend. Sorted by slug for stable UI display.
+pub fn fetch_assets(token: &str, asset_type: &str) -> Result<AssetList> {
     let client = client()?;
-    let statuses = fetch_status_options_with_client(&client, token, database_id)?;
-    let status_by_id: HashMap<String, StatusOption> = statuses
-        .iter()
-        .map(|status| (status.id.clone(), status.clone()))
-        .collect();
-    let url = format!("https://api.notion.com/v1/databases/{database_id}/query");
-    let mut cursor: Option<String> = None;
-    let mut assets = Vec::new();
+    let url = format!(
+        "{}api/phase/assets?type={asset_type}",
+        crate::auth::phase_api_base_url()
+    );
+    let resp = client
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .context("HTTP request to PHASE asset API")?;
 
-    loop {
-        let mut body = serde_json::Map::new();
-        body.insert("page_size".into(), serde_json::Value::from(100));
-        if let Some(c) = &cursor {
-            body.insert("start_cursor".into(), serde_json::Value::String(c.clone()));
-        }
-
-        let resp = client
-            .post(&url)
-            .bearer_auth(token)
-            .header("Notion-Version", NOTION_VERSION)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .context("HTTP request to Notion")?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().unwrap_or_default();
-            return Err(anyhow!("Notion API error {status}: {text}"));
-        }
-
-        let page: QueryResponse = resp.json().context("parsing Notion response")?;
-        for p in page.results {
-            assets.push(Asset {
-                page_id: p.id,
-                slug: extract_title(&p.properties),
-                author: extract_author(&p.properties),
-                url: p.url,
-                status: extract_status(&p.properties, &status_by_id),
-            });
-        }
-
-        if page.has_more {
-            cursor = page.next_cursor;
-        } else {
-            break;
-        }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        return Err(anyhow!("PHASE asset API error {status}: {text}"));
     }
 
-    assets.sort_by(|a, b| a.slug.to_lowercase().cmp(&b.slug.to_lowercase()));
-    Ok(AssetList { assets, statuses })
+    let mut list: AssetList = resp.json().context("parsing PHASE asset response")?;
+    list.assets
+        .sort_by(|a, b| a.slug.to_lowercase().cmp(&b.slug.to_lowercase()));
+    list.statuses.sort_by_key(|status| status.sort_order);
+    Ok(list)
 }
 
 pub fn update_page_status(token: &str, page_id: &str, status: &StatusOption) -> Result<()> {
     let client = client()?;
-    let url = format!("https://api.notion.com/v1/pages/{page_id}");
+    let url = format!(
+        "{}api/phase/assets/{page_id}/status",
+        crate::auth::phase_api_base_url()
+    );
     let body = serde_json::json!({
-        "properties": {
-            "Status": {
-                "status": {
-                    "name": status.name
-                }
-            }
-        }
+        "status_id": status.id,
+        "status_name": status.name,
     });
 
     let resp = client
         .patch(url)
         .bearer_auth(token)
-        .header("Notion-Version", NOTION_VERSION)
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
-        .context("HTTP request to update Notion status")?;
+        .context("HTTP request to update PHASE asset status")?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().unwrap_or_default();
-        return Err(anyhow!("Notion API error {status}: {text}"));
+        return Err(anyhow!("PHASE asset API error {status}: {text}"));
     }
 
+    let _: StatusUpdateResponse = resp.json().context("parsing PHASE status response")?;
     Ok(())
 }
 
@@ -193,29 +150,7 @@ fn client() -> Result<reqwest::blocking::Client> {
         .context("building HTTP client")
 }
 
-fn fetch_status_options_with_client(
-    client: &reqwest::blocking::Client,
-    token: &str,
-    database_id: &str,
-) -> Result<Vec<StatusOption>> {
-    let url = format!("https://api.notion.com/v1/databases/{database_id}");
-    let resp = client
-        .get(url)
-        .bearer_auth(token)
-        .header("Notion-Version", NOTION_VERSION)
-        .send()
-        .context("HTTP request to Notion database metadata")?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().unwrap_or_default();
-        return Err(anyhow!("Notion API error {status}: {text}"));
-    }
-
-    let db: DatabaseResponse = resp.json().context("parsing Notion database metadata")?;
-    Ok(extract_status_options(&db.properties))
-}
-
+#[cfg(test)]
 fn extract_status_options(props: &serde_json::Value) -> Vec<StatusOption> {
     let Some(status_prop) = props.get("Status") else {
         return Vec::new();
@@ -253,7 +188,8 @@ fn extract_status_options(props: &serde_json::Value) -> Vec<StatusOption> {
         .and_then(|o| o.as_array())
         .into_iter()
         .flatten()
-        .filter_map(|option| {
+        .enumerate()
+        .filter_map(|(sort_order, option)| {
             let id = option.get("id")?.as_str()?.to_string();
             let name = option.get("name")?.as_str()?.to_string();
             let color = option
@@ -272,11 +208,13 @@ fn extract_status_options(props: &serde_json::Value) -> Vec<StatusOption> {
                 name,
                 color,
                 group,
+                sort_order,
             })
         })
         .collect()
 }
 
+#[cfg(test)]
 fn extract_status(
     props: &serde_json::Value,
     status_by_id: &HashMap<String, StatusOption>,
@@ -299,6 +237,7 @@ fn extract_status(
             name: option.name.clone(),
             color: option.color.clone(),
             group: option.group,
+            sort_order: option.sort_order,
         });
     }
     Some(AssetStatus {
@@ -306,79 +245,55 @@ fn extract_status(
         name: fallback_name,
         color: fallback_color,
         group: StatusGroup::InProgress,
+        sort_order: usize::MAX,
     })
-}
-
-fn extract_title(props: &serde_json::Value) -> String {
-    let Some(obj) = props.as_object() else {
-        return String::new();
-    };
-    for (_name, val) in obj {
-        if val.get("type").and_then(|t| t.as_str()) == Some("title") {
-            if let Some(arr) = val.get("title").and_then(|t| t.as_array()) {
-                return concat_plain_text(arr);
-            }
-        }
-    }
-    String::new()
-}
-
-/// `Author` may be `people`, `rich_text`, `title`, `select`, or `multi_select`.
-fn extract_author(props: &serde_json::Value) -> String {
-    let Some(author) = props.get("Author") else {
-        return String::new();
-    };
-    let ty = author.get("type").and_then(|t| t.as_str()).unwrap_or("");
-    match ty {
-        "rich_text" => author
-            .get("rich_text")
-            .and_then(|a| a.as_array())
-            .map(|a| concat_plain_text(a))
-            .unwrap_or_default(),
-        "title" => author
-            .get("title")
-            .and_then(|a| a.as_array())
-            .map(|a| concat_plain_text(a))
-            .unwrap_or_default(),
-        "people" => author
-            .get("people")
-            .and_then(|a| a.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|p| p.get("name").and_then(|n| n.as_str()))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_default(),
-        "select" => author
-            .get("select")
-            .and_then(|s| s.get("name"))
-            .and_then(|n| n.as_str())
-            .map(String::from)
-            .unwrap_or_default(),
-        "multi_select" => author
-            .get("multi_select")
-            .and_then(|a| a.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|s| s.get("name").and_then(|n| n.as_str()))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_default(),
-        _ => String::new(),
-    }
-}
-
-fn concat_plain_text(arr: &[serde_json::Value]) -> String {
-    arr.iter()
-        .filter_map(|t| t.get("plain_text").and_then(|p| p.as_str()))
-        .collect::<String>()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_phase_api_asset_list_with_status_color_and_sort_order() {
+        let list: AssetList = serde_json::from_value(serde_json::json!({
+            "assets": [
+                {
+                    "page_id": "page-1",
+                    "slug": "asset_slug",
+                    "author": "Author",
+                    "url": "https://admin.polyhaven.com/assets/page-1",
+                    "status": {
+                        "id": "review",
+                        "name": "Creative review",
+                        "color": "blue",
+                        "group": "InProgress",
+                        "sort_order": 20
+                    }
+                }
+            ],
+            "statuses": [
+                {
+                    "id": "todo",
+                    "name": "To-do",
+                    "color": "gray",
+                    "group": "ToDo",
+                    "sort_order": 10
+                },
+                {
+                    "id": "review",
+                    "name": "Creative review",
+                    "color": "blue",
+                    "group": "InProgress",
+                    "sort_order": 20
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(list.assets[0].status.as_ref().unwrap().sort_order, 20);
+        assert_eq!(list.statuses[0].sort_order, 10);
+        assert_eq!(list.statuses[1].color, "blue");
+    }
 
     #[test]
     fn extracts_status_options_with_group_and_color() {
@@ -409,12 +324,14 @@ mod tests {
                     name: "Awaiting payment".into(),
                     color: "yellow".into(),
                     group: StatusGroup::InProgress,
+                    sort_order: 0,
                 },
                 StatusOption {
                     id: "b".into(),
                     name: "Done".into(),
                     color: "green".into(),
                     group: StatusGroup::Complete,
+                    sort_order: 1,
                 },
             ]
         );
@@ -498,6 +415,7 @@ mod tests {
                 name: "Awaiting payment".into(),
                 color: "yellow".into(),
                 group: StatusGroup::InProgress,
+                sort_order: 0,
             },
         )]);
 
@@ -508,6 +426,7 @@ mod tests {
                 name: "Awaiting payment".into(),
                 color: "yellow".into(),
                 group: StatusGroup::InProgress,
+                sort_order: 0,
             })
         );
     }

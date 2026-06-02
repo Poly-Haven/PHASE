@@ -256,6 +256,7 @@ mod tests {
                 name: String::new(),
                 color: String::new(),
                 group,
+                sort_order: 0,
             }),
         }
     }

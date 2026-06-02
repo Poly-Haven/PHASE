@@ -6,7 +6,11 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
-    pub notion_token: String,
+    pub auth_access_token: String,
+    #[serde(default)]
+    pub auth_refresh_token: String,
+    #[serde(default)]
+    pub auth_expires_at: Option<u64>,
     #[serde(default = "default_prod_root")]
     pub prod_root: PathBuf,
     #[serde(default = "default_local_root")]
@@ -53,7 +57,9 @@ fn default_skip_pull_raw_tif_if_many_work_tifs() -> bool {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            notion_token: String::new(),
+            auth_access_token: String::new(),
+            auth_refresh_token: String::new(),
+            auth_expires_at: None,
             prod_root: default_prod_root(),
             local_root: default_local_root(),
             last_tab: String::new(),
@@ -68,6 +74,24 @@ impl Default for Config {
             last_update_check_day: None,
         }
     }
+}
+
+impl Config {
+    pub fn access_token_expired_at(&self, now_unix_seconds: u64) -> bool {
+        match self.auth_expires_at {
+            Some(expires_at) => expires_at <= now_unix_seconds + 60,
+            None => true,
+        }
+    }
+
+    pub fn can_refresh_access_token(&self) -> bool {
+        !self.auth_refresh_token.trim().is_empty()
+    }
+
+    pub fn has_access_token(&self) -> bool {
+        !self.auth_access_token.trim().is_empty()
+    }
+
 }
 
 #[cfg(test)]
@@ -88,6 +112,43 @@ local_root = "C:\\PHASE"
         .unwrap();
 
         assert!(cfg.skip_pull_raw_tif_if_many_work_tifs);
+    }
+
+    #[test]
+    fn auth_tokens_default_to_empty_and_legacy_notion_token_is_ignored() {
+        let cfg: super::Config = toml::from_str(
+            r#"
+notion_token = "legacy-secret-that-must-not-be-used"
+auth_access_token = "access"
+auth_refresh_token = "refresh"
+auth_expires_at = 12345
+local_root = "C:\\PHASE"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(cfg.auth_access_token, "access");
+        assert_eq!(cfg.auth_refresh_token, "refresh");
+        assert_eq!(cfg.auth_expires_at, Some(12345));
+        assert_eq!(toml::to_string(&cfg).unwrap().contains("notion_token"), false);
+
+        let default_cfg = super::Config::default();
+        assert!(default_cfg.auth_access_token.is_empty());
+        assert!(default_cfg.auth_refresh_token.is_empty());
+        assert_eq!(default_cfg.auth_expires_at, None);
+    }
+
+    #[test]
+    fn expired_access_token_requires_refresh_before_api_calls() {
+        let mut cfg = super::Config::default();
+        cfg.auth_access_token = "access".into();
+        cfg.auth_refresh_token = "refresh".into();
+        cfg.auth_expires_at = Some(1_000);
+
+        assert!(cfg.access_token_expired_at(940));
+        assert!(cfg.access_token_expired_at(1_000));
+        assert!(!cfg.access_token_expired_at(939));
+        assert!(cfg.can_refresh_access_token());
     }
 }
 

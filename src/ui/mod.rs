@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 use crate::config::Config;
 use crate::copy::job::{JobMsg, JobProgress, VerifyMsg};
 use crate::copy::plan::{build_plan_with_pull_filter, Action, Direction, Plan, PullFilterMode};
-use crate::notion::{AssetList, AssetStatus, StatusOption, HDRIS_DB_ID, TEXTURES_DB_ID};
+use crate::auth::{AuthTokens, BrowserLogin};
+use crate::notion::{AssetList, AssetStatus, StatusOption};
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum AssetType {
@@ -49,10 +50,10 @@ impl AssetType {
             Self::Textures => "Textures",
         }
     }
-    pub fn db_id(self) -> &'static str {
+    pub fn api_type(self) -> &'static str {
         match self {
-            Self::Hdris => HDRIS_DB_ID,
-            Self::Textures => TEXTURES_DB_ID,
+            Self::Hdris => "hdris",
+            Self::Textures => "textures",
         }
     }
     pub fn cache_name(self) -> &'static str {
@@ -116,7 +117,7 @@ pub struct PendingConflict {
 }
 
 pub struct StatusUpdateJob {
-    pub rx: Receiver<Result<(), String>>,
+    pub rx: Receiver<Result<Option<AuthTokens>, String>>,
     pub previous: Option<AssetStatus>,
     #[allow(dead_code)]
     pub requested: StatusOption,
@@ -138,6 +139,12 @@ pub struct PlanJob {
 
 pub struct TransferEstimateJob {
     pub rx: Receiver<Result<u64, String>>,
+}
+
+pub enum AuthMsg {
+    Started(BrowserLogin),
+    Success(AuthTokens),
+    Error(String),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -168,7 +175,7 @@ pub struct AppState {
     pub plan_jobs: HashMap<RowKey, PlanJob>,
     pub verifications: HashMap<RowKey, VerificationJob>,
     pub status_updates: HashMap<RowKey, StatusUpdateJob>,
-    pub notion_rx: HashMap<AssetType, Receiver<Result<AssetList, String>>>,
+    pub notion_rx: HashMap<AssetType, Receiver<Result<(AssetList, Option<AuthTokens>), String>>>,
     pub pending_conflict: Option<PendingConflict>,
     pub pending_verification_failure: Option<PendingVerificationFailure>,
     pub pending_prod_folder_create: Option<RowKey>,
@@ -178,18 +185,20 @@ pub struct AppState {
     pub refreshing_published: bool,
     pub token_prompt_open: bool,
     pub token_input: String,
+    pub auth_login: Option<BrowserLogin>,
+    pub auth_rx: Option<Receiver<AuthMsg>>,
     pub settings_open: bool,
     pub settings_local_root_input: String,
     pub settings_skip_pull_raw_tif_if_many_work_tifs: bool,
     /// Asset types whose background fetch is currently in flight.
     pub refreshing: HashSet<AssetType>,
-    /// Notion results buffered while the cursor is active in the table.
+    /// Asset API results buffered while the cursor is active in the table.
     pub pending_notion: HashMap<AssetType, AssetList>,
     /// Last time the pointer moved while inside the table area.
     pub cursor_moved_in_table_at: Option<Instant>,
     pub focus_refresh: focus_refresh::State,
     /// Cached result of `is_dir()` for each asset's prod folder.
-    /// Rebuilt when Notion data loads, window gains focus, a job finishes,
+    /// Rebuilt when asset API data loads, window gains focus, a job finishes,
     /// or a prod folder is created — never on every frame.
     pub prod_folder_cache: HashMap<RowKey, bool>,
     /// Receiver for an in-flight background rebuild of `prod_folder_cache`.
@@ -287,6 +296,8 @@ impl AppState {
             refreshing_published: false,
             token_prompt_open: false,
             token_input: String::new(),
+            auth_login: None,
+            auth_rx: None,
             settings_open: false,
             settings_local_root_input: String::new(),
             settings_skip_pull_raw_tif_if_many_work_tifs: false,
@@ -309,8 +320,8 @@ impl AppState {
             transfer_estimates: HashMap::new(),
             transfer_estimate_jobs: HashMap::new(),
         };
-        s.token_prompt_open = s.config.notion_token.is_empty();
-        s.token_input = s.config.notion_token.clone();
+        s.token_prompt_open = !s.config.has_access_token() && !s.config.can_refresh_access_token();
+        s.token_input.clear();
         s.settings_local_root_input = s.config.local_root.display().to_string();
         s.settings_skip_pull_raw_tif_if_many_work_tifs =
             s.config.skip_pull_raw_tif_if_many_work_tifs;
@@ -430,11 +441,12 @@ impl AppState {
         if self.refreshing.contains(&t) {
             return;
         }
-        if self.config.notion_token.is_empty() {
+        if !self.config.has_access_token() && !self.config.can_refresh_access_token() {
             self.assets_by_type.insert(
                 t,
-                AssetListState::Error("No Notion token configured".into()),
+                AssetListState::Error("Authentication required: please log in".into()),
             );
+            self.token_prompt_open = true;
             return;
         }
         // If we already have data, keep showing it while the background fetch runs.
@@ -444,10 +456,34 @@ impl AppState {
         }
         self.refreshing.insert(t);
         let (tx, rx) = channel();
-        let token = self.config.notion_token.clone();
-        let db = t.db_id().to_string();
+        let mut config = self.config.clone();
+        let asset_type = t.api_type().to_string();
         thread::spawn(move || {
-            let res = crate::notion::fetch_database(&token, &db).map_err(|e| e.to_string());
+            let res = (|| {
+                let before = (
+                    config.auth_access_token.clone(),
+                    config.auth_refresh_token.clone(),
+                    config.auth_expires_at,
+                );
+                let token = crate::auth::ensure_access_token(&mut config)?;
+                let tokens = if before
+                    != (
+                        config.auth_access_token.clone(),
+                        config.auth_refresh_token.clone(),
+                        config.auth_expires_at,
+                    ) {
+                    Some(AuthTokens {
+                        access_token: config.auth_access_token.clone(),
+                        refresh_token: config.auth_refresh_token.clone(),
+                        expires_at: config.auth_expires_at,
+                    })
+                } else {
+                    None
+                };
+                let list = crate::notion::fetch_assets(&token, &asset_type)?;
+                Ok((list, tokens))
+            })()
+            .map_err(|e: anyhow::Error| e.to_string());
             let _ = tx.send(res);
         });
         self.notion_rx.insert(t, rx);
@@ -455,9 +491,6 @@ impl AppState {
 
     pub fn refresh_all_asset_types(&mut self) {
         self.refresh_published_assets();
-        if self.config.notion_token.is_empty() {
-            return;
-        }
         for t in AssetType::all() {
             self.refresh(*t);
         }
@@ -519,6 +552,31 @@ impl AppState {
             let _ = tx.send(res);
         });
         self.published_rx = Some(rx);
+    }
+
+    pub fn start_auth_login(&mut self) {
+        if self.auth_rx.is_some() {
+            return;
+        }
+        self.auth_login = None;
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            let res = crate::auth::login_with_pkce(|login| {
+                let _ = tx.send(AuthMsg::Started(login.clone()));
+                if let Err(err) = open::that(&login.auth_url) {
+                    log::warn!("Opening browser for Auth0 login failed: {err}");
+                }
+            });
+            match res {
+                Ok(tokens) => {
+                    let _ = tx.send(AuthMsg::Success(tokens));
+                }
+                Err(err) => {
+                    let _ = tx.send(AuthMsg::Error(format!("Login failed: {err}")));
+                }
+            }
+        });
+        self.auth_rx = Some(rx);
     }
 
     pub fn visible_validation_scope_snapshot(&self) -> VisibleValidationScope {
@@ -624,8 +682,32 @@ impl AppState {
         requests
     }
 
-    /// Drain Notion + job channels each frame.
+    /// Drain asset API + job channels each frame.
     pub fn pump(&mut self) {
+        while let Some(msg) = self.auth_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            match msg {
+                AuthMsg::Started(login) => {
+                    self.auth_login = Some(login);
+                }
+                AuthMsg::Success(tokens) => {
+                    crate::auth::apply_tokens(&mut self.config, &tokens);
+                    if let Err(err) = crate::config::save(&self.config) {
+                        self.error_banner = Some(format!("Failed to save login: {err}"));
+                    }
+                    self.auth_rx = None;
+                    self.auth_login = None;
+                    self.token_prompt_open = false;
+                    self.refresh_all_asset_types();
+                    break;
+                }
+                AuthMsg::Error(message) => {
+                    self.auth_rx = None;
+                    self.error_banner = Some(message);
+                    break;
+                }
+            }
+        }
+
         if let Some(res) = self
             .update_check_rx
             .as_ref()
@@ -681,7 +763,14 @@ impl AppState {
                 self.notion_rx.remove(&t);
                 self.refreshing.remove(&t);
                 match res {
-                    Ok(list) => {
+                    Ok((list, tokens)) => {
+                        if let Some(tokens) = tokens {
+                            crate::auth::apply_tokens(&mut self.config, &tokens);
+                            if let Err(err) = crate::config::save(&self.config) {
+                                self.error_banner =
+                                    Some(format!("Failed to save refreshed login: {err}"));
+                            }
+                        }
                         if cursor_guard {
                             // Buffer — apply once the cursor has been idle for 2s.
                             self.pending_notion.insert(t, list);
@@ -694,6 +783,9 @@ impl AppState {
                         }
                     }
                     Err(msg) => {
+                        if crate::auth::is_auth_required_error(&msg) {
+                            self.token_prompt_open = true;
+                        }
                         self.assets_by_type.insert(t, AssetListState::Error(msg));
                     }
                 }
@@ -737,7 +829,14 @@ impl AppState {
                     continue;
                 };
                 match res {
-                    Ok(()) => {
+                    Ok(tokens) => {
+                        if let Some(tokens) = tokens {
+                            crate::auth::apply_tokens(&mut self.config, &tokens);
+                            if let Err(err) = crate::config::save(&self.config) {
+                                self.error_banner =
+                                    Some(format!("Failed to save refreshed login: {err}"));
+                            }
+                        }
                         if let Some(AssetListState::Loaded(list)) =
                             self.assets_by_type.get(&key.asset_type)
                         {
@@ -745,6 +844,9 @@ impl AppState {
                         }
                     }
                     Err(msg) => {
+                        if crate::auth::is_auth_required_error(&msg) {
+                            self.token_prompt_open = true;
+                        }
                         set_asset_status(self, &key, job.previous);
                         self.start_validation_for_keys(vec![key.clone()]);
                         self.error_banner =
@@ -990,12 +1092,35 @@ pub fn start_status_update(
     let previous = set_asset_status(state, key, Some(status_from_option(&requested)));
     state.start_validation_for_keys(vec![key.clone()]);
     let (tx, rx) = std::sync::mpsc::channel();
-    let token = state.config.notion_token.clone();
+    let mut config = state.config.clone();
     let page_id = page_id.to_string();
     let requested_for_thread = requested.clone();
     thread::spawn(move || {
-        let res = crate::notion::update_page_status(&token, &page_id, &requested_for_thread)
-            .map_err(|e| e.to_string());
+        let res = (|| {
+            let before = (
+                config.auth_access_token.clone(),
+                config.auth_refresh_token.clone(),
+                config.auth_expires_at,
+            );
+            let token = crate::auth::ensure_access_token(&mut config)?;
+            crate::notion::update_page_status(&token, &page_id, &requested_for_thread)?;
+            let tokens = if before
+                != (
+                    config.auth_access_token.clone(),
+                    config.auth_refresh_token.clone(),
+                    config.auth_expires_at,
+                ) {
+                Some(AuthTokens {
+                    access_token: config.auth_access_token.clone(),
+                    refresh_token: config.auth_refresh_token.clone(),
+                    expires_at: config.auth_expires_at,
+                })
+            } else {
+                None
+            };
+            Ok(tokens)
+        })()
+        .map_err(|e: anyhow::Error| e.to_string());
         let _ = tx.send(res);
     });
     state.status_updates.insert(
@@ -1014,6 +1139,7 @@ fn status_from_option(option: &StatusOption) -> AssetStatus {
         name: option.name.clone(),
         color: option.color.clone(),
         group: option.group,
+        sort_order: option.sort_order,
     }
 }
 
@@ -1470,6 +1596,8 @@ mod tests {
             refreshing_published: false,
             token_prompt_open: false,
             token_input: String::new(),
+            auth_login: None,
+            auth_rx: None,
             settings_open: false,
             settings_local_root_input: String::new(),
             settings_skip_pull_raw_tif_if_many_work_tifs: true,
@@ -1539,6 +1667,7 @@ mod tests {
                 name: group.label().into(),
                 color: "default".into(),
                 group,
+                sort_order: 0,
             }),
         }
     }

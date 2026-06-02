@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cache;
+mod auth;
 mod config;
 mod copy;
 mod notion;
@@ -103,6 +104,7 @@ impl eframe::App for App {
             || !self.state.pending_notion.is_empty()
             || self.state.published_rx.is_some()
             || !self.state.status_updates.is_empty()
+            || self.state.auth_rx.is_some()
             || !self.state.row_toasts.is_empty()
             || self.state.validation_job.is_some()
         {
