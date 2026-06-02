@@ -1026,9 +1026,7 @@ fn format_active_file_action(
         Direction::Push => "Uploading",
     };
     let target = match current_file {
-        Some(file) if !file.is_empty() => {
-            format!("{}/{}/{}", key.asset_type.folder(), key.slug, file)
-        }
+        Some(file) if !file.is_empty() => abbreviate_status_path(file),
         _ => format!("{}/{}", key.asset_type.folder(), key.slug),
     };
     let suffix = match direction {
@@ -1036,6 +1034,17 @@ fn format_active_file_action(
         Direction::Push => "to Prod",
     };
     format!("{verb} {target} {suffix}")
+}
+
+fn abbreviate_status_path(path: &str) -> String {
+    let parts = path
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() <= 3 {
+        return parts.join("\\");
+    }
+    format!("...{}", parts[parts.len() - 3..].join("\\"))
 }
 
 fn active_file_action_status(state: &AppState) -> Option<String> {
@@ -1078,9 +1087,7 @@ fn active_file_action_status(state: &AppState) -> Option<String> {
                 .ok()
                 .and_then(|file| file.clone());
             let target = match current_file.as_deref() {
-                Some(file) if !file.is_empty() => {
-                    format!("{}/{}/{}", key.asset_type.folder(), key.slug, file)
-                }
+                Some(file) if !file.is_empty() => abbreviate_status_path(file),
                 _ => format!("{}/{}", key.asset_type.folder(), key.slug),
             };
             format!("Verifying {target}")
@@ -1543,11 +1550,36 @@ mod tests {
 
         assert_eq!(
             super::format_active_file_action(&key, Direction::Pull, Some("bar.xyz")),
-            "Downloading HDRIs/foo/bar.xyz from Prod"
+            "Downloading bar.xyz from Prod"
         );
         assert_eq!(
             super::format_active_file_action(&key, Direction::Push, Some("bar.xyz")),
-            "Uploading HDRIs/foo/bar.xyz to Prod"
+            "Uploading bar.xyz to Prod"
+        );
+    }
+
+    #[test]
+    fn active_file_action_abbreviates_paths_to_two_parents_with_windows_separators() {
+        let key = super::RowKey {
+            asset_type: super::AssetType::Textures,
+            slug: "foo".into(),
+        };
+
+        assert_eq!(
+            super::format_active_file_action(
+                &key,
+                Direction::Pull,
+                Some("staging/textures/foobar.exr")
+            ),
+            "Downloading staging\\textures\\foobar.exr from Prod"
+        );
+        assert_eq!(
+            super::format_active_file_action(
+                &key,
+                Direction::Pull,
+                Some("staging/textures/foo/bar.exr")
+            ),
+            "Downloading ...textures\\foo\\bar.exr from Prod"
         );
     }
 
