@@ -126,7 +126,9 @@ fn status_order(status: &Option<AssetStatus>, status_options: &[StatusOption]) -
     };
     status_options
         .iter()
-        .position(|option| option.id == status.id)
+        .find(|option| option.id == status.id)
+        .map(|option| option.sort_order)
+        .or(Some(status.sort_order))
         .unwrap_or(usize::MAX)
 }
 
@@ -134,19 +136,22 @@ fn status_has_passed_review(status: &Option<AssetStatus>, status_options: &[Stat
     let Some(status) = status else {
         return false;
     };
-    let Some(status_index) = status_options
+    let Some(status_order) = status_options
         .iter()
-        .position(|option| option.id == status.id)
+        .find(|option| option.id == status.id)
+        .map(|option| option.sort_order)
     else {
         return false;
     };
-    let Some(review_index) = status_options
+    let Some(review_order) = status_options
         .iter()
-        .rposition(|option| option.name.to_lowercase().contains("review"))
+        .filter(|option| option.name.to_lowercase().contains("review"))
+        .map(|option| option.sort_order)
+        .max()
     else {
         return false;
     };
-    status_index > review_index
+    status_order > review_order
 }
 
 struct RowView {
@@ -379,7 +384,7 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                 }
             }
 
-            // Notion button — sits immediately to the right of the slug.
+            // Asset page button — sits immediately to the right of the slug.
             let notion_size = egui::vec2(14.0, 14.0);
             let notion_tex = super::notion_logo_texture(ui.ctx());
             let (notion_rect, notion_resp) =
@@ -395,7 +400,7 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                     .image(notion_tex.id(), notion_rect, uv_full, tint);
             }
             if notion_resp
-                .on_hover_text("Open in Notion")
+                    .on_hover_text("Open asset page")
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {
@@ -734,7 +739,7 @@ fn draw_context_menu(
         let _ = open::that(prod_folder);
         ui.close_menu();
     }
-    if ui.button("Open in Notion").clicked() {
+    if ui.button("Open asset page").clicked() {
         let _ = open::that(notion_url);
         ui.close_menu();
     }
@@ -991,6 +996,7 @@ mod tests {
             name: name.into(),
             color: "default".into(),
             group: StatusGroup::InProgress,
+            sort_order: 10,
         }
     }
 
@@ -1017,6 +1023,7 @@ mod tests {
             name: "Creative review".into(),
             color: "blue".into(),
             group: StatusGroup::InProgress,
+            sort_order: 20,
         });
 
         assert!(super::status_matches_filter(
@@ -1043,12 +1050,14 @@ mod tests {
             name: "Creative review".into(),
             color: "blue".into(),
             group: StatusGroup::InProgress,
+            sort_order: 10,
         });
         let complete = Some(AssetStatus {
             id: "b".into(),
             name: "Done".into(),
             color: "green".into(),
             group: StatusGroup::Complete,
+            sort_order: 20,
         });
 
         assert!(super::should_warn_published_slug(
@@ -1076,18 +1085,21 @@ mod tests {
                 name: "To-do".into(),
                 color: "default".into(),
                 group: StatusGroup::ToDo,
+                sort_order: 30,
             },
             StatusOption {
                 id: "review".into(),
                 name: "Creative review".into(),
                 color: "blue".into(),
                 group: StatusGroup::InProgress,
+                sort_order: 20,
             },
             StatusOption {
                 id: "approved".into(),
                 name: "Approved".into(),
                 color: "green".into(),
                 group: StatusGroup::InProgress,
+                sort_order: 30,
             },
         ];
 
@@ -1109,12 +1121,14 @@ mod tests {
                 name: "Creative review".into(),
                 color: "blue".into(),
                 group: StatusGroup::InProgress,
+                sort_order: 20,
             },
             StatusOption {
                 id: "approved".into(),
                 name: "Approved".into(),
                 color: "green".into(),
                 group: StatusGroup::Complete,
+                sort_order: 30,
             },
         ];
         let asset = Asset {
@@ -1142,19 +1156,21 @@ mod tests {
     }
 
     #[test]
-    fn rows_sort_by_notion_status_order_then_slug_case_insensitive() {
+    fn rows_sort_by_status_sort_order_then_slug_case_insensitive() {
         let status_options = vec![
             StatusOption {
                 id: "creative-review".into(),
                 name: "Creative review".into(),
                 color: "blue".into(),
                 group: StatusGroup::InProgress,
+                sort_order: 20,
             },
             StatusOption {
                 id: "awaiting-payment".into(),
                 name: "Awaiting payment".into(),
                 color: "yellow".into(),
                 group: StatusGroup::InProgress,
+                sort_order: 10,
             },
         ];
         let mut rows = vec![
@@ -1171,7 +1187,7 @@ mod tests {
 
         assert_eq!(
             rows.iter().map(|row| row.slug.as_str()).collect::<Vec<_>>(),
-            vec!["alpha", "Beta", "zebra", "missing"]
+            vec!["zebra", "alpha", "Beta", "missing"]
         );
     }
 

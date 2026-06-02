@@ -1,6 +1,6 @@
 [package]
 name = "phase"
-version = "0.2.0"
+version = "1.0.0"
 edition = "2021"
 description = "PHASE — internal asset pipeline tool"
 
@@ -28,6 +28,10 @@ log         = "0.4"
 simplelog   = "0.12"
 tiny-skia   = "0.11"
 usvg        = "0.45"
+base64      = "0.22"
+rand        = "0.8"
+sha2        = "0.10"
+urlencoding = "2"
 
 [build-dependencies]
 winres = "0.1"

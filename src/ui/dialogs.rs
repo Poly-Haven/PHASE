@@ -74,43 +74,57 @@ pub fn token_prompt(state: &mut AppState, ctx: &egui::Context) {
     if !state.token_prompt_open {
         return;
     }
-    let mut save = false;
+    if state.auth_rx.is_none() && state.auth_login.is_none() {
+        state.start_auth_login();
+    }
+    let mut retry = false;
     let mut close = false;
-    egui::Window::new("Notion token required")
+    egui::Window::new("PHASE login required")
         .collapsible(false)
-        .resizable(false)
+        .resizable(true)
+        .default_width(460.0)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.label("Paste your Notion integration token. It will be saved to");
+            ui.label("Log in with Poly Haven to load and update PHASE asset statuses.");
+            ui.add_space(8.0);
+            ui.label("Tokens will be saved to:");
             ui.monospace(
                 crate::config::config_path()
                     .map(|p| p.display().to_string())
                     .unwrap_or_default(),
             );
             ui.add_space(8.0);
-            ui.add(
-                egui::TextEdit::singleline(&mut state.token_input)
-                    .password(true)
-                    .desired_width(400.0),
-            );
+            if let Some(login) = &state.auth_login {
+                ui.label("A browser window should open. If it does not, visit:");
+                ui.hyperlink(&login.auth_url);
+                ui.label("After login, Auth0 will redirect back to:");
+                ui.monospace(&login.redirect_uri);
+                ui.label("PHASE will continue automatically when the browser login finishes.");
+            } else if state.auth_rx.is_some() {
+                ui.label("Starting browser login...");
+            } else {
+                ui.label("Login is not currently running.");
+            }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
-                    save = true;
+                if ui.button("Restart login").clicked() {
+                    retry = true;
                 }
                 if ui.button("Cancel").clicked() {
                     close = true;
                 }
             });
         });
-    if save {
-        state.config.notion_token = state.token_input.trim().to_string();
-        if let Err(e) = crate::config::save(&state.config) {
-            state.error_banner = Some(format!("Failed to save config: {e}"));
+    if retry {
+        if let Some(login) = &state.auth_login {
+            if let Err(err) = open::that(&login.auth_url) {
+                state.error_banner = Some(format!("Failed to open login page: {err}"));
+            }
+        } else {
+            state.auth_rx = None;
+            state.auth_login = None;
+            state.start_auth_login();
         }
-        state.token_prompt_open = false;
-        state.refresh(super::AssetType::Hdris);
-        state.refresh(super::AssetType::Textures);
     } else if close {
         state.token_prompt_open = false;
     }
