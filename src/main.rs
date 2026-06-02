@@ -45,11 +45,17 @@ fn main() -> eframe::Result<()> {
     log::info!("PHASE {} starting", env!("CARGO_PKG_VERSION"));
     let cfg = config::load().unwrap_or_default();
 
+    let size = cfg.window_size.unwrap_or_else(default_window_size);
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size(size)
+        .with_min_inner_size([600.0, 400.0])
+        .with_icon(load_app_icon());
+    if let Some([x, y]) = cfg.window_pos {
+        viewport = viewport.with_position([x, y]);
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size(default_window_size())
-            .with_min_inner_size([600.0, 400.0])
-            .with_icon(load_app_icon()),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
@@ -59,6 +65,8 @@ fn main() -> eframe::Result<()> {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
             Box::new(App {
                 state: AppState::new(cfg),
+                last_window_pos: None,
+                last_window_size: None,
             })
         }),
     )
@@ -66,6 +74,8 @@ fn main() -> eframe::Result<()> {
 
 struct App {
     state: AppState,
+    last_window_pos: Option<egui::Pos2>,
+    last_window_size: Option<egui::Vec2>,
 }
 
 #[cfg(test)]
@@ -78,6 +88,14 @@ mod tests {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.input(|i| {
+            let vp = i.viewport();
+            self.last_window_pos = vp.outer_rect.map(|r| r.min);
+            if let Some(inner) = vp.inner_rect {
+                self.last_window_size = Some(inner.size());
+            }
+        });
+
         self.state.pump();
         ui::draw(&mut self.state, ctx);
         if !self.state.jobs.is_empty()
@@ -90,5 +108,14 @@ impl eframe::App for App {
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let mut cfg = self.state.config.clone();
+        if let Some(size) = self.last_window_size {
+            cfg.window_size = Some([size.x, size.y]);
+        }
+        cfg.window_pos = self.last_window_pos.map(|p| [p.x, p.y]);
+        let _ = config::save(&cfg);
     }
 }

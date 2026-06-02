@@ -28,6 +28,10 @@ pub struct Config {
     pub last_filters: std::collections::HashMap<String, String>,
     #[serde(default = "default_skip_pull_raw_tif_if_many_work_tifs")]
     pub skip_pull_raw_tif_if_many_work_tifs: bool,
+    #[serde(default)]
+    pub window_size: Option<[f32; 2]>,
+    #[serde(default)]
+    pub window_pos: Option<[f32; 2]>,
 }
 
 fn default_prod_root() -> PathBuf {
@@ -52,6 +56,8 @@ impl Default for Config {
             last_author_filters: Vec::new(),
             last_filters: std::collections::HashMap::new(),
             skip_pull_raw_tif_if_many_work_tifs: default_skip_pull_raw_tif_if_many_work_tifs(),
+            window_size: None,
+            window_pos: None,
         }
     }
 }
