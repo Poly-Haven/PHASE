@@ -804,6 +804,10 @@ pub fn start_job(state: &mut AppState, key: &RowKey, direction: Direction) {
     if state.plan_jobs.contains_key(key) || state.jobs.contains_key(key) {
         return;
     }
+    // Clear stale validation messages and any previous toast so the row is clean
+    // while the job runs. Fresh validation fires automatically after the job finishes.
+    state.validation_results.remove(key);
+    state.row_toasts.remove(key);
     let src_root = match direction {
         Direction::Pull => state.prod_root_for(key.asset_type).join(&key.slug),
         Direction::Push => state.local_root_for(key.asset_type).join(&key.slug),
