@@ -109,7 +109,6 @@ pub struct RowToast {
     pub text: String,
     pub created_at: Instant,
 }
-
 pub struct PendingConflict {
     pub key: RowKey,
     pub direction: Direction,
