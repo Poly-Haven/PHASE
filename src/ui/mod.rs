@@ -203,6 +203,38 @@ pub struct AppState {
     pub update_install: Option<UpdateInstallJob>,
 }
 
+fn initial_author_filters(config: &Config, selected_types: &[AssetType]) -> Vec<String> {
+    if !config.last_author_filters_by_type.is_empty() {
+        return author_filters_for_types(config, selected_types);
+    }
+    let mut filters = if !config.last_author_filters.is_empty() {
+        config.last_author_filters.clone()
+    } else if !config.last_author_filter.is_empty() {
+        vec![config.last_author_filter.clone()]
+    } else {
+        Vec::new()
+    };
+    normalize_author_filters(&mut filters);
+    filters
+}
+
+fn author_filters_for_types(config: &Config, selected_types: &[AssetType]) -> Vec<String> {
+    let mut filters = Vec::new();
+    for asset_type in selected_types {
+        if let Some(saved) = config.last_author_filters_by_type.get(asset_type.label()) {
+            filters.extend(saved.iter().cloned());
+        }
+    }
+    normalize_author_filters(&mut filters);
+    filters
+}
+
+fn normalize_author_filters(filters: &mut Vec<String>) {
+    filters.retain(|filter| !filter.is_empty());
+    filters.sort();
+    filters.dedup();
+}
+
 impl AppState {
     pub fn new(config: Config) -> Self {
         let selected_types = if config.last_asset_types.is_empty() {
@@ -211,16 +243,8 @@ impl AppState {
             asset_types::from_labels(&config.last_asset_types)
         };
         let current_type = selected_types.first().copied().unwrap_or(AssetType::Hdris);
-        let author_filter = config.last_author_filter.clone();
-        let author_filters = if config.last_author_filters.is_empty() {
-            if author_filter.is_empty() {
-                Vec::new()
-            } else {
-                vec![author_filter.clone()]
-            }
-        } else {
-            config.last_author_filters.clone()
-        };
+        let author_filters = initial_author_filters(&config, &selected_types);
+        let author_filter = author_filters.first().cloned().unwrap_or_default();
 
         let mut s = Self {
             current_type,
@@ -280,6 +304,39 @@ impl AppState {
         s.rebuild_prod_folder_cache();
         s.start_update_check();
         s
+    }
+
+    pub fn apply_author_filters_for_selected_types(&mut self) {
+        self.author_filters = author_filters_for_types(&self.config, &self.selected_types);
+        self.author_filter = self.author_filters.first().cloned().unwrap_or_default();
+    }
+
+    pub fn persist_author_filters_for_selected_types(&mut self) {
+        self.author_filter = self.author_filters.first().cloned().unwrap_or_default();
+        self.config.last_author_filter = self.author_filter.clone();
+        self.config.last_author_filters = self.author_filters.clone();
+        for asset_type in &self.selected_types {
+            let filters = self.author_filters_for_type(*asset_type);
+            self.config
+                .last_author_filters_by_type
+                .insert(asset_type.label().to_string(), filters);
+        }
+    }
+
+    fn author_filters_for_type(&self, asset_type: AssetType) -> Vec<String> {
+        if self.author_filters.is_empty() {
+            return Vec::new();
+        }
+        let Some(AssetListState::Loaded(list)) = self.assets_by_type.get(&asset_type) else {
+            return self.author_filters.clone();
+        };
+        let available =
+            authors::filter_options(list.assets.iter().map(|asset| asset.author.as_str()));
+        self.author_filters
+            .iter()
+            .filter(|filter| available.iter().any(|author| author == *filter))
+            .cloned()
+            .collect()
     }
 
     fn start_update_check(&mut self) {
@@ -1423,6 +1480,58 @@ mod tests {
 
         assert!(state.author_filter.is_empty());
         assert!(state.author_filters.is_empty());
+    }
+
+    #[test]
+    fn selected_asset_types_combine_saved_author_filters_per_type() {
+        let mut config = Config::default();
+        config.last_asset_types = vec!["HDRIs".into(), "Textures".into()];
+        config
+            .last_author_filters_by_type
+            .insert("HDRIs".into(), vec!["Dario".into()]);
+        config
+            .last_author_filters_by_type
+            .insert("Textures".into(), vec!["Charlotte".into()]);
+
+        let state = super::AppState::new(config);
+
+        assert_eq!(
+            state.author_filters,
+            vec!["Charlotte".to_string(), "Dario".to_string()]
+        );
+        assert_eq!(state.author_filter, "Charlotte");
+    }
+
+    #[test]
+    fn persisting_author_filters_partitions_selection_by_asset_type() {
+        let mut state = test_state();
+        state.selected_types = vec![super::AssetType::Hdris, super::AssetType::Textures];
+        state.author_filters = vec!["Charlotte".into(), "Dario".into()];
+        state.assets_by_type.insert(
+            super::AssetType::Hdris,
+            super::AssetListState::Loaded(AssetList {
+                assets: vec![asset("hdri", "Dario", StatusGroup::InProgress)],
+                statuses: Vec::new(),
+            }),
+        );
+        state.assets_by_type.insert(
+            super::AssetType::Textures,
+            super::AssetListState::Loaded(AssetList {
+                assets: vec![asset("texture", "Charlotte", StatusGroup::InProgress)],
+                statuses: Vec::new(),
+            }),
+        );
+
+        state.persist_author_filters_for_selected_types();
+
+        assert_eq!(
+            state.config.last_author_filters_by_type.get("HDRIs"),
+            Some(&vec!["Dario".to_string()])
+        );
+        assert_eq!(
+            state.config.last_author_filters_by_type.get("Textures"),
+            Some(&vec!["Charlotte".to_string()])
+        );
     }
 
     #[test]

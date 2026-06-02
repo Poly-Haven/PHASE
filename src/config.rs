@@ -23,6 +23,9 @@ pub struct Config {
     /// Last selected author filters, shared across asset-type selections.
     #[serde(default)]
     pub last_author_filters: Vec<String>,
+    /// Last selected author filters per asset-type label.
+    #[serde(default)]
+    pub last_author_filters_by_type: std::collections::HashMap<String, Vec<String>>,
     /// Last author filter per asset-type label.
     #[serde(default)]
     pub last_filters: std::collections::HashMap<String, String>,
@@ -54,6 +57,7 @@ impl Default for Config {
             last_asset_types: Vec::new(),
             last_author_filter: String::new(),
             last_author_filters: Vec::new(),
+            last_author_filters_by_type: std::collections::HashMap::new(),
             last_filters: std::collections::HashMap::new(),
             skip_pull_raw_tif_if_many_work_tifs: default_skip_pull_raw_tif_if_many_work_tifs(),
             window_size: None,
