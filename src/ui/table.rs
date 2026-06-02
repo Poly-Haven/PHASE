@@ -52,6 +52,8 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                                 slug: a.slug.clone(),
                             };
                             let exists = *state.prod_folder_cache.get(&key).unwrap_or(&false);
+                            let local_exists =
+                                *state.local_folder_cache.get(&key).unwrap_or(&false);
                             let validation_findings = state
                                 .validation_results
                                 .get(&key)
@@ -61,6 +63,8 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                                 t,
                                 a,
                                 exists,
+                                local_exists,
+                                &list.statuses,
                                 &state.published_assets,
                                 &validation_findings,
                                 &state.dismissed_warning_keys,
@@ -126,6 +130,25 @@ fn status_order(status: &Option<AssetStatus>, status_options: &[StatusOption]) -
         .unwrap_or(usize::MAX)
 }
 
+fn status_has_passed_review(status: &Option<AssetStatus>, status_options: &[StatusOption]) -> bool {
+    let Some(status) = status else {
+        return false;
+    };
+    let Some(status_index) = status_options
+        .iter()
+        .position(|option| option.id == status.id)
+    else {
+        return false;
+    };
+    let Some(review_index) = status_options
+        .iter()
+        .rposition(|option| option.name.to_lowercase().contains("review"))
+    else {
+        return false;
+    };
+    status_index > review_index
+}
+
 struct RowView {
     asset_type: super::AssetType,
     slug: String,
@@ -142,6 +165,8 @@ impl RowView {
         asset_type: super::AssetType,
         a: &Asset,
         exists_on_prod: bool,
+        exists_local: bool,
+        status_options: &[StatusOption],
         published_assets: &crate::polyhaven::PublishedAssets,
         validation_findings: &[crate::validation::Finding],
         dismissed_warning_keys: &std::collections::HashSet<String>,
@@ -172,6 +197,14 @@ impl RowView {
                 kind: MsgKind::Warning,
                 text: "Published asset with this slug found".into(),
                 link: Some(format!("https://polyhaven.com/a/{}", a.slug)),
+                dismiss_key: None,
+            });
+        }
+        if exists_local && status_has_passed_review(&a.status, status_options) {
+            messages.push(RowMsg {
+                kind: MsgKind::Info,
+                text: "Passed review; local files can be deleted".into(),
+                link: None,
                 dismiss_key: None,
             });
         }
@@ -1008,6 +1041,79 @@ mod tests {
             "other_slug",
             &in_progress
         ));
+    }
+
+    #[test]
+    fn status_after_last_review_status_has_passed_review() {
+        let statuses = vec![
+            StatusOption {
+                id: "todo".into(),
+                name: "To-do".into(),
+                color: "default".into(),
+                group: StatusGroup::ToDo,
+            },
+            StatusOption {
+                id: "review".into(),
+                name: "Creative review".into(),
+                color: "blue".into(),
+                group: StatusGroup::InProgress,
+            },
+            StatusOption {
+                id: "approved".into(),
+                name: "Approved".into(),
+                color: "green".into(),
+                group: StatusGroup::InProgress,
+            },
+        ];
+
+        assert!(!super::status_has_passed_review(
+            &Some(status("review", "Creative review")),
+            &statuses
+        ));
+        assert!(super::status_has_passed_review(
+            &Some(status("approved", "Approved")),
+            &statuses
+        ));
+    }
+
+    #[test]
+    fn passed_review_asset_with_local_folder_suggests_deleting_local_files() {
+        let statuses = vec![
+            StatusOption {
+                id: "review".into(),
+                name: "Creative review".into(),
+                color: "blue".into(),
+                group: StatusGroup::InProgress,
+            },
+            StatusOption {
+                id: "approved".into(),
+                name: "Approved".into(),
+                color: "green".into(),
+                group: StatusGroup::Complete,
+            },
+        ];
+        let asset = Asset {
+            page_id: "page".into(),
+            slug: "asset".into(),
+            author: "Author".into(),
+            url: String::new(),
+            status: Some(status("approved", "Approved")),
+        };
+        let row = RowView::from_asset(
+            crate::ui::AssetType::Hdris,
+            &asset,
+            true,
+            true,
+            &statuses,
+            &crate::polyhaven::PublishedAssets::default(),
+            &[],
+            &HashSet::new(),
+        );
+
+        assert!(row
+            .messages
+            .iter()
+            .any(|msg| msg.text == "Passed review; local files can be deleted"));
     }
 
     #[test]
