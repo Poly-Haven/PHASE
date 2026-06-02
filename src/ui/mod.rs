@@ -445,6 +445,9 @@ impl AppState {
     fn validation_requests_for_keys(&self, keys: &[RowKey]) -> Vec<crate::validation::Request> {
         let mut requests = Vec::new();
         for key in keys {
+            if self.jobs.contains_key(key) {
+                continue; // skip while a copy is in progress
+            }
             let Some(AssetListState::Loaded(list)) = self.assets_by_type.get(&key.asset_type)
             else {
                 continue;
@@ -622,6 +625,7 @@ impl AppState {
                 self.error_banner = Some(m);
             }
             if done {
+                let finished_key = k.clone();
                 if let Some(job) = self.jobs.remove(&k) {
                     if finished_successfully {
                         self.update_prod_folder_cache_for(&k);
@@ -644,6 +648,8 @@ impl AppState {
                         );
                     }
                 }
+                // Re-run validation now that the copy is no longer in progress.
+                self.start_validation_for_keys(vec![finished_key]);
             }
         }
         let verification_keys: Vec<RowKey> = self.verifications.keys().cloned().collect();
