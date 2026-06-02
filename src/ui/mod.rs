@@ -211,15 +211,7 @@ impl AppState {
             asset_types::from_labels(&config.last_asset_types)
         };
         let current_type = selected_types.first().copied().unwrap_or(AssetType::Hdris);
-        let author_filter = if config.last_author_filter.is_empty() {
-            config
-                .last_filters
-                .get(current_type.label())
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            config.last_author_filter.clone()
-        };
+        let author_filter = config.last_author_filter.clone();
         let author_filters = if config.last_author_filters.is_empty() {
             if author_filter.is_empty() {
                 Vec::new()
@@ -1415,6 +1407,22 @@ mod tests {
         assert!(temp.path().join("raw").is_dir());
         assert!(temp.path().join("staging").is_dir());
         assert!(temp.path().join("work").is_dir());
+    }
+
+    #[test]
+    fn all_authors_persistence_does_not_fall_back_to_legacy_per_type_filter() {
+        let mut config = Config::default();
+        config.last_asset_types = vec!["HDRIs".into()];
+        config.last_author_filter = String::new();
+        config.last_author_filters = Vec::new();
+        config
+            .last_filters
+            .insert("HDRIs".into(), "Stale Author".into());
+
+        let state = super::AppState::new(config);
+
+        assert!(state.author_filter.is_empty());
+        assert!(state.author_filters.is_empty());
     }
 
     #[test]
