@@ -24,6 +24,10 @@ pub const PROGRESS_BAR: Color32 = Color32::from_rgb(50, 110, 200);
 /// Error banner text.
 pub const ERROR_BANNER: Color32 = Color32::from_rgb(220, 80, 80);
 
+// ── Action button colors ──────────────────────────────────────────────────────
+pub const PUSH: Color32 = Color32::from_rgb(180, 100, 255);
+pub const PULL: Color32 = Color32::from_rgb(70, 130, 220);
+
 // ── Row message icons ─────────────────────────────────────────────────────────
 pub const MSG_INFO: Color32 = Color32::from_rgb(70, 130, 220);
 pub const MSG_ERROR: Color32 = Color32::from_rgb(210, 60, 60);

@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn newer_local_files_are_info_when_not_needs_review() {
+    fn newer_local_files_are_not_reported_when_not_needs_review() {
         let temp = tempdir().unwrap();
         let local_root = temp.path().join("local");
         let prod_root = temp.path().join("prod");
@@ -340,10 +340,9 @@ mod tests {
             &prod_root,
         );
 
-        assert!(findings.iter().any(|finding| {
-            finding.severity == Severity::Info
-                && finding.text == "Local files newer than Prod. Push?"
-        }));
+        assert!(!findings
+            .iter()
+            .any(|finding| finding.text == "Local files newer than Prod. Push?"));
     }
 
     #[test]

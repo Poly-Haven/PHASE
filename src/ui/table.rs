@@ -1,7 +1,8 @@
 use super::colors;
-use super::{AppState, AssetListState, RowKey};
+use super::{ActionPreview, AppState, AssetListState, RowKey};
 use crate::copy::plan::Direction;
 use crate::notion::{Asset, AssetStatus, StatusGroup, StatusOption};
+use crate::ui::AssetType;
 
 /// Severity of a row-level message.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -107,12 +108,11 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                     asset_type: row.asset_type,
                     slug: row.slug.clone(),
                 };
-                let two_rows = needs_second_row(row, avail_w, ui);
-                let row_height = if two_rows { 56.0 } else { 28.0 };
+                let row_height = 54.0;
                 let top = ui.cursor().min;
                 let row_rect = egui::Rect::from_min_size(top, egui::vec2(avail_w, row_height));
                 if ui.is_rect_visible(row_rect) {
-                    draw_row(state, ui, &key, row, two_rows);
+                    draw_row(state, ui, &key, row);
                 } else {
                     ui.advance_cursor_after_rect(row_rect);
                 }
@@ -288,124 +288,306 @@ fn row_action_availability(
     action: RowAction,
     has_prod_folder: bool,
     has_local_folder: bool,
+    preview: Option<ActionPreview>,
 ) -> ActionAvailability {
     match action {
         RowAction::Push if !has_local_folder => ActionAvailability {
             enabled: false,
             tooltip: "Local folder missing",
         },
-        RowAction::Push => ActionAvailability {
-            enabled: true,
-            tooltip: "Push to Prod",
+        RowAction::Push => match preview {
+            Some(p) if p.file_count == 0 => ActionAvailability {
+                enabled: false,
+                tooltip: "Nothing new to push",
+            },
+            _ => ActionAvailability {
+                enabled: true,
+                tooltip: "Push to Prod",
+            },
         },
         RowAction::Pull if !has_prod_folder => ActionAvailability {
             enabled: false,
             tooltip: "No prod folder",
         },
-        RowAction::Pull => ActionAvailability {
-            enabled: true,
-            tooltip: "Pull from Prod",
+        RowAction::Pull => match preview {
+            Some(p) if p.file_count == 0 => ActionAvailability {
+                enabled: false,
+                tooltip: "Nothing new to pull",
+            },
+            _ => ActionAvailability {
+                enabled: true,
+                tooltip: "Pull from Prod",
+            },
         },
     }
 }
 
-fn transfer_tooltip(base: &str, bytes: Option<u64>) -> String {
-    match bytes {
-        Some(bytes) => format!("{base} · {}", fmt_bytes(bytes)),
-        None => base.to_string(),
+/// Formats an action preview as "Push/Pull N file(s) · X.X GB".
+fn fmt_action_preview(direction: Direction, preview: ActionPreview) -> String {
+    let prefix = match direction {
+        Direction::Push => "Push",
+        Direction::Pull => "Pull",
+    };
+    let files = if preview.file_count == 1 {
+        "1 file".to_string()
+    } else {
+        format!("{} files", preview.file_count)
+    };
+    format!("{prefix} {files} · {}", fmt_bytes(preview.bytes))
+}
+
+fn icon_button(
+    ui: &mut egui::Ui,
+    tex: &egui::TextureHandle,
+    enabled: bool,
+    tint_color: egui::Color32,
+    tooltip: &str,
+) -> egui::Response {
+    let icon_size = egui::vec2(18.0, 18.0);
+    let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(icon_size, sense);
+    if ui.is_rect_visible(rect) {
+        let tint = if !enabled {
+            colors::TEXT_DISABLED
+        } else if resp.hovered() {
+            colors::HOVER
+        } else {
+            tint_color
+        };
+        ui.painter().image(tex.id(), rect, uv_full, tint);
+    }
+    let cursor = if enabled {
+        egui::CursorIcon::PointingHand
+    } else {
+        egui::CursorIcon::NotAllowed
+    };
+    resp.on_hover_text(tooltip).on_hover_cursor(cursor)
+}
+
+fn open_asset_file(asset_type: AssetType, local_folder: &std::path::Path, slug: &str) {
+    let staging = local_folder.join("staging");
+    let file = match asset_type {
+        AssetType::Hdris => staging.join(format!("{slug}.exr")),
+        AssetType::Textures => staging.join(format!("{slug}.blend")),
+    };
+    if file.exists() {
+        let _ = open::that(file);
+    } else if staging.exists() {
+        let _ = open::that(staging);
+    } else {
+        let _ = open::that(local_folder);
     }
 }
 
-fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView, two_rows: bool) {
-    let row_height = if two_rows { 56.0 } else { 28.0 };
+fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
+    let row_height = 54.0;
     let avail = ui.available_rect_before_wrap();
-    let row_rect = egui::Rect::from_min_size(avail.min, egui::vec2(avail.width(), row_height));
-    // Primary row always occupies the first 28 px.
-    let primary_rect = egui::Rect::from_min_size(row_rect.min, egui::vec2(row_rect.width(), 28.0));
+    let avail_w = avail.width();
+    let row_rect = egui::Rect::from_min_size(avail.min, egui::vec2(avail_w, row_height));
+    let row1_rect = egui::Rect::from_min_size(avail.min, egui::vec2(avail_w, 26.0));
+    let row2_rect = egui::Rect::from_min_size(
+        avail.min + egui::vec2(0.0, 26.0),
+        egui::vec2(avail_w, 28.0),
+    );
 
     ui.painter()
         .rect_filled(row_rect, 2.0, colors::ROW_BACKGROUND);
     if let Some(job) = state.jobs.get(key) {
         let f = job.progress.fraction().clamp(0.0, 1.0);
-        let mut fill = primary_rect;
-        fill.set_width(avail.width() * f);
+        let mut fill = row_rect;
+        fill.set_width(avail_w * f);
         ui.painter()
             .rect_filled(fill, 2.0, colors::colored_background(colors::PROGRESS_BAR));
     }
 
     let prod_folder = state.prod_root_for(key.asset_type).join(&key.slug);
     let local_folder = state.local_root_for(key.asset_type).join(&key.slug);
+    let local_exists = state.local_folder_cache.get(key).copied().unwrap_or(false);
 
-    // Register the row-wide context menu BEFORE drawing children. egui's context_menu
-    // internally re-interacts with Sense::click, so it must be set up first so that
-    // child widgets (allocated later) take priority for primary-click events.
+    let open_notion_in_app = state.config.open_notion_links_in_desktop_app;
     let row_response = ui.interact(
         row_rect,
         ui.id().with(("row-context", key.asset_type, &key.slug)),
         egui::Sense::hover(),
     );
     row_response.context_menu(|ui| {
-        draw_context_menu(
-            ui,
-            &local_folder,
-            &prod_folder,
-            &row.url,
-            state.config.open_notion_links_in_desktop_app,
-        )
+        draw_context_menu(ui, &row.url, open_notion_in_app);
     });
 
     let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-    ui.allocate_ui_at_rect(primary_rect, |ui| {
+
+    // Row 1 LTR: status pill + bold slug
+    ui.allocate_ui_at_rect(row1_rect, |ui| {
         ui.horizontal_centered(|ui| {
             ui.add_space(8.0);
-            let text_color = if row.exists_on_prod {
-                colors::TEXT_PRIMARY
-            } else {
-                colors::TEXT_DISABLED
-            };
-
-            // Slug — pre-layout to get same-frame hover detection.
-            let font_id = egui::TextStyle::Body.resolve(ui.style());
-            let galley =
-                ui.fonts(|f| f.layout_no_wrap(row.slug.clone(), font_id, egui::Color32::WHITE));
-            let slug_size = galley.rect.size();
-            let slug_start = egui::pos2(
-                ui.cursor().min.x,
-                primary_rect.center().y - slug_size.y / 2.0,
-            );
-            let slug_rect = egui::Rect::from_min_size(slug_start, slug_size);
-            let is_slug_hovered = ui.rect_contains_pointer(slug_rect);
-            let slug_color = if is_slug_hovered {
-                colors::HOVER
-            } else {
-                text_color
-            };
-            let slug_label = egui::Label::new(egui::RichText::new(&row.slug).color(slug_color))
-                .sense(egui::Sense::click());
-            let slug_resp = ui.add(slug_label);
-            let slug_resp = slug_resp
-                .on_hover_text(if row.exists_on_prod {
-                    "Open in Explorer"
+            draw_status_pill(state, ui, key, row);
+            ui.add_space(8.0);
+            if row.exists_on_prod {
+                let font_id = egui::TextStyle::Body.resolve(ui.style());
+                let galley = ui.fonts(|f| {
+                    f.layout_no_wrap(row.slug.clone(), font_id, egui::Color32::WHITE)
+                });
+                let slug_size = galley.rect.size();
+                let slug_start = egui::pos2(
+                    ui.cursor().min.x,
+                    row1_rect.center().y - slug_size.y / 2.0,
+                );
+                let slug_rect = egui::Rect::from_min_size(slug_start, slug_size);
+                let is_hovered = ui.rect_contains_pointer(slug_rect);
+                let slug_color = if is_hovered {
+                    colors::HOVER
                 } else {
-                    "Create Prod folder"
-                })
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
-            if slug_resp.clicked() {
-                if row.exists_on_prod {
-                    let _ = open::that(&prod_folder);
-                } else if crate::slug::is_valid(&row.slug) {
-                    state.pending_prod_folder_create = Some(key.clone());
-                } else {
-                    state.error_banner =
-                        Some("Cannot create Prod folder: slug has invalid characters".into());
+                    colors::TEXT_PRIMARY
+                };
+                let slug_resp = ui
+                    .add(
+                        egui::Label::new(
+                            egui::RichText::new(&row.slug).strong().color(slug_color),
+                        )
+                        .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text("Open asset file")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if slug_resp.clicked() {
+                    open_asset_file(row.asset_type, &prod_folder, &row.slug);
                 }
+            } else {
+                ui.add(egui::Label::new(
+                    egui::RichText::new(&row.slug)
+                        .strong()
+                        .color(colors::TEXT_DISABLED),
+                ));
             }
+        });
+    });
 
-            // Asset page button — sits immediately to the right of the slug.
-            let notion_size = egui::vec2(14.0, 14.0);
-            let notion_tex = super::notion_logo_texture(ui.ctx());
+    // Row 1 RTL: push section (or planning/job progress)
+    if state.plan_jobs.contains_key(key) {
+        ui.allocate_ui_at_rect(row1_rect, |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(8.0);
+                ui.colored_label(colors::TEXT_DISABLED, "Planning…");
+            });
+        });
+    } else if state.jobs.contains_key(key) {
+        let label = state
+            .jobs
+            .get(key)
+            .map(|j| match j.direction {
+                Direction::Pull => "Pulling",
+                Direction::Push => "Pushing",
+            })
+            .unwrap_or("");
+        let done = state
+            .jobs
+            .get(key)
+            .map(|j| j.progress.bytes_done.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        let tot = state
+            .jobs
+            .get(key)
+            .map(|j| j.progress.bytes_total.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        let x_tex = super::x_icon_texture(ui.ctx());
+        ui.allocate_ui_at_rect(row1_rect, |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(8.0);
+                if icon_button(ui, &x_tex, true, colors::TEXT_PRIMARY, "Cancel").clicked() {
+                    if let Some(job) = state.jobs.get(key) {
+                        job.progress
+                            .cancel
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                ui.label(format!("{label}  {} / {}", fmt_bytes(done), fmt_bytes(tot)));
+            });
+        });
+    } else {
+        let push_preview = state
+            .transfer_estimates
+            .get(&(key.clone(), Direction::Push))
+            .copied();
+        let push = row_action_availability(
+            RowAction::Push,
+            row.exists_on_prod,
+            local_exists,
+            push_preview,
+        );
+        let push_tex = super::push_icon_texture(ui.ctx());
+        ui.allocate_ui_at_rect(row1_rect, |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(8.0);
+                if icon_button(ui, &push_tex, push.enabled, colors::PUSH, push.tooltip).clicked() {
+                    super::start_job(state, key, Direction::Push);
+                }
+                if let Some(p) = push_preview {
+                    if p.file_count > 0 {
+                        let preview_color =
+                            if push.enabled { colors::PUSH } else { colors::TEXT_DISABLED };
+                        let sense =
+                            if push.enabled { egui::Sense::click() } else { egui::Sense::hover() };
+                        let cursor = if push.enabled {
+                            egui::CursorIcon::PointingHand
+                        } else {
+                            egui::CursorIcon::Default
+                        };
+                        let resp = ui
+                            .add(
+                                egui::Label::new(
+                                    egui::RichText::new(fmt_action_preview(Direction::Push, p))
+                                        .color(preview_color),
+                                )
+                                .sense(sense),
+                            )
+                            .on_hover_cursor(cursor);
+                        if resp.clicked() {
+                            super::start_job(state, key, Direction::Push);
+                        }
+                    }
+                }
+            });
+        });
+    }
+
+    // Row 2 LTR: context btn + open-local btn + open-prod btn + notion btn + author + messages
+    let folder_tex = super::folder_fill_texture(ui.ctx());
+    let hdd_tex = super::hdd_network_texture(ui.ctx());
+    let notion_tex = super::notion_logo_texture(ui.ctx());
+    let text_color = if row.exists_on_prod {
+        colors::TEXT_PRIMARY
+    } else {
+        colors::TEXT_DISABLED
+    };
+    ui.allocate_ui_at_rect(row2_rect, |ui| {
+        ui.horizontal_centered(|ui| {
+            ui.add_space(8.0);
+            draw_row_context_button(state, ui, key, row);
+            ui.add_space(2.0);
+            if icon_button(ui, &folder_tex, local_exists, colors::TEXT_PRIMARY, "Open local folder")
+                .clicked()
+            {
+                let _ = open::that(&local_folder);
+            }
+            ui.add_space(2.0);
+            if icon_button(
+                ui,
+                &hdd_tex,
+                row.exists_on_prod,
+                colors::TEXT_PRIMARY,
+                "Open prod folder",
+            )
+            .clicked()
+            {
+                let _ = open::that(&prod_folder);
+            }
+            ui.add_space(2.0);
             let (notion_rect, notion_resp) =
-                ui.allocate_exact_size(notion_size, egui::Sense::click());
+                ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
             if ui.is_rect_visible(notion_rect) {
                 let base_tint = text_color.linear_multiply(0.6);
                 let tint = if notion_resp.hovered() {
@@ -417,39 +599,62 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                     .image(notion_tex.id(), notion_rect, uv_full, tint);
             }
             if notion_resp
-                    .on_hover_text("Open on Notion")
+                .on_hover_text("Open on Notion")
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {
-                open_notion_link(&row.url, state.config.open_notion_links_in_desktop_app);
+                open_notion_link(&row.url, open_notion_in_app);
             }
-
-            ui.add_space(16.0);
-            ui.colored_label(text_color.linear_multiply(0.8), &row.author);
             ui.add_space(8.0);
-            draw_status_pill(state, ui, key, row);
-
-            // Messages stay in the primary row when everything fits.
-            if !two_rows {
-                draw_row_messages(state, ui, key, row);
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                draw_row_actions(state, ui, key, row);
-            });
+            ui.colored_label(colors::TEXT_PRIMARY.linear_multiply(0.25), &row.author);
+            draw_row_messages(state, ui, key, row);
         });
     });
 
-    // Secondary row: messages that didn't fit in the primary row.
-    if two_rows {
-        let secondary_rect = egui::Rect::from_min_size(
-            row_rect.min + egui::vec2(0.0, 28.0),
-            egui::vec2(row_rect.width(), 28.0),
+    // Row 2 RTL: pull section (hidden during active plan/job)
+    if !state.plan_jobs.contains_key(key) && !state.jobs.contains_key(key) {
+        let pull_preview = state
+            .transfer_estimates
+            .get(&(key.clone(), Direction::Pull))
+            .copied();
+        let pull = row_action_availability(
+            RowAction::Pull,
+            row.exists_on_prod,
+            local_exists,
+            pull_preview,
         );
-        ui.allocate_ui_at_rect(secondary_rect, |ui| {
-            ui.horizontal_centered(|ui| {
+        let pull_tex = super::pull_icon_texture(ui.ctx());
+        ui.allocate_ui_at_rect(row2_rect, |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
-                draw_row_messages(state, ui, key, row);
+                if icon_button(ui, &pull_tex, pull.enabled, colors::PULL, pull.tooltip).clicked() {
+                    super::start_job(state, key, Direction::Pull);
+                }
+                if let Some(p) = pull_preview {
+                    if p.file_count > 0 {
+                        let preview_color =
+                            if pull.enabled { colors::PULL } else { colors::TEXT_DISABLED };
+                        let sense =
+                            if pull.enabled { egui::Sense::click() } else { egui::Sense::hover() };
+                        let cursor = if pull.enabled {
+                            egui::CursorIcon::PointingHand
+                        } else {
+                            egui::CursorIcon::Default
+                        };
+                        let resp = ui
+                            .add(
+                                egui::Label::new(
+                                    egui::RichText::new(fmt_action_preview(Direction::Pull, p))
+                                        .color(preview_color),
+                                )
+                                .sense(sense),
+                            )
+                            .on_hover_cursor(cursor);
+                        if resp.clicked() {
+                            super::start_job(state, key, Direction::Pull);
+                        }
+                    }
+                }
             });
         });
     }
@@ -585,188 +790,6 @@ fn handle_row_message_action(state: &mut AppState, key: &RowKey, action: &RowMsg
     }
 }
 
-/// Estimated primary-row width if messages stay on the first row.
-///
-/// Text widths must use the same `TextStyle`s as the widgets below. Live layout traces showed
-/// that hard-coding a 14 px font overestimated typical rows by ~50 px because egui 0.27's default
-/// `Body` and `Button` styles are 12.5 px.
-///
-/// Cursor constants are derived by tracing the actual egui cursor positions in `draw_row`:
-///
-///   LHS cursor after status pill (before messages):
-///     add_space(8) + slug_w + isp(8) + notion(14) + isp(8) + add_space(16) + author_w
-///     + isp(8) + add_space(8) + status_w + isp(8) = 78 + slug_w + author_w + status_w
-///
-///   RHS: pull icon left edge is at right_edge − 84:
-///     add_space(8) + context(18) + isp(8) + add_space(6) + push(18) + isp(8) + pull(18) = 84
-///
-///   Per message in outer layout (add_space advances cursor directly; no isp before it):
-///     add_space(8) + inner_horizontal_min_rect(icon14 + isp4 + text_w) + isp(8)
-///     = 34 + text_w  (plus 16 per optional link/dismiss icon inside the inner horizontal)
-fn row_layout_width(row: &RowView, ui: &egui::Ui) -> f32 {
-    let body_font = egui::TextStyle::Body.resolve(ui.style());
-    let button_font = egui::TextStyle::Button.resolve(ui.style());
-    let mw = |text: String, font: &egui::FontId| -> f32 {
-        ui.fonts(|f| {
-            f.layout_no_wrap(text, font.clone(), egui::Color32::WHITE)
-                .rect
-                .width()
-        })
-    };
-
-    let slug_w = mw(row.slug.clone(), &body_font);
-    let author_w = mw(row.author.clone(), &body_font);
-    // Status pill: text_w + icon(10) + padding(8)*3 (from status_pill_button)
-    let status_w = match &row.status {
-        Some(s) => mw(s.name.clone(), &button_font) + 34.0,
-        None => mw("No status".to_owned(), &body_font),
-    };
-
-    // LHS: add_space(8) + slug + isp(8) + notion(14) + isp(8) + add_space(16) + author
-    // + isp(8) + add_space(8) + status + isp(8) = 78 fixed
-    let lhs_w = 78.0 + slug_w + author_w + status_w;
-
-    // RHS: add_space(8) + context(18) + isp(8) + add_space(6) + push(18) + isp(8) + pull(18)
-    // = 84; pull's left edge is at right_edge − 84
-    let rhs_w = 84.0;
-
-    // Per message: add_space(8) + inner_horizontal(icon14 + isp4 + text) + isp(8) = 34 + text
-    // The inner horizontal reports min_rect width = 14 + 4 + text = 18 + text.
-    // Optional link/dismiss each add isp(4) + icon(12) = 16 inside the inner horizontal.
-    let msg_w: f32 = row
-        .messages
-        .iter()
-        .map(|msg| {
-            let tw = mw(msg.text.clone(), &body_font);
-            let action_w = msg
-                .action
-                .as_ref()
-                .map(|action| mw(action_label(action).to_string(), &body_font) + 4.0)
-                .unwrap_or(0.0);
-            34.0 + tw
-                + action_w
-                + if msg.link.is_some() { 16.0 } else { 0.0 }
-                + if msg.dismiss_key.is_some() { 16.0 } else { 0.0 }
-        })
-        .sum();
-
-    lhs_w + msg_w + rhs_w
-}
-
-fn needs_second_row(row: &RowView, available_width: f32, ui: &egui::Ui) -> bool {
-    if row.messages.is_empty() {
-        return false;
-    }
-    row_layout_width(row, ui) > available_width
-}
-
-fn draw_row_actions(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
-    let icon_size = egui::vec2(18.0, 18.0);
-    let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-    let local_exists = state.local_folder_cache.get(key).copied().unwrap_or(false);
-
-    // Allocate space first so we know the rect, then paint with same-frame hover tint.
-    let icon_button = |ui: &mut egui::Ui,
-                       tex: &egui::TextureHandle,
-                       enabled: bool,
-                       tooltip: &str|
-     -> egui::Response {
-        let sense = if enabled {
-            egui::Sense::click()
-        } else {
-            egui::Sense::hover()
-        };
-        let (rect, resp) = ui.allocate_exact_size(icon_size, sense);
-        if ui.is_rect_visible(rect) {
-            let base_tint = if enabled {
-                colors::TEXT_PRIMARY
-            } else {
-                colors::TEXT_DISABLED
-            };
-            let tint = if resp.hovered() && enabled {
-                colors::HOVER
-            } else {
-                base_tint
-            };
-            ui.painter().image(tex.id(), rect, uv_full, tint);
-        }
-        let cursor = if enabled {
-            egui::CursorIcon::PointingHand
-        } else {
-            egui::CursorIcon::NotAllowed
-        };
-        resp.on_hover_text(tooltip).on_hover_cursor(cursor)
-    };
-
-    if state.plan_jobs.contains_key(key) {
-        ui.colored_label(colors::TEXT_DISABLED, "Planning…");
-        return;
-    }
-
-    if state.jobs.contains_key(key) {
-        let x_tex = super::x_icon_texture(ui.ctx());
-        if icon_button(ui, &x_tex, true, "Cancel").clicked() {
-            if let Some(job) = state.jobs.get(key) {
-                job.progress
-                    .cancel
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-        let job = state.jobs.get(key).unwrap();
-        let done = job
-            .progress
-            .bytes_done
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let tot = job
-            .progress
-            .bytes_total
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let label = match job.direction {
-            Direction::Pull => "Pulling from Prod",
-            Direction::Push => "Pushing from Local",
-        };
-        ui.label(format!(
-            "{label}  ·  {} / {}",
-            fmt_bytes(done),
-            fmt_bytes(tot)
-        ));
-        return;
-    }
-
-    // Padding on the far right of the action strip (RTL: first space = rightmost).
-    ui.add_space(8.0);
-    draw_row_context_button(state, ui, key, row);
-    ui.add_space(6.0);
-    let push = row_action_availability(RowAction::Push, row.exists_on_prod, local_exists);
-    let pull = row_action_availability(RowAction::Pull, row.exists_on_prod, local_exists);
-    let push_tex = super::push_icon_texture(ui.ctx());
-    let push_estimate = state
-        .transfer_estimates
-        .get(&(key.clone(), Direction::Push))
-        .copied();
-    let push_tooltip = transfer_tooltip(push.tooltip, push_estimate);
-    let push_response = icon_button(ui, &push_tex, push.enabled, &push_tooltip);
-    if push_response.hovered() && push.enabled {
-        state.start_transfer_estimate(key, Direction::Push);
-    }
-    if push_response.clicked() {
-        super::start_job(state, key, Direction::Push);
-    }
-    let pull_tex = super::pull_icon_texture(ui.ctx());
-    let pull_estimate = state
-        .transfer_estimates
-        .get(&(key.clone(), Direction::Pull))
-        .copied();
-    let pull_tooltip = transfer_tooltip(pull.tooltip, pull_estimate);
-    let pull_response = icon_button(ui, &pull_tex, pull.enabled, &pull_tooltip);
-    if pull_response.hovered() && pull.enabled {
-        state.start_transfer_estimate(key, Direction::Pull);
-    }
-    if pull_response.clicked() {
-        super::start_job(state, key, Direction::Pull);
-    }
-}
-
 fn draw_status_pill(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
     let Some(status) = &row.status else {
         ui.colored_label(colors::TEXT_DISABLED, "No status");
@@ -812,21 +835,7 @@ fn draw_status_pill(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
     });
 }
 
-fn draw_context_menu(
-    ui: &mut egui::Ui,
-    local_folder: &std::path::Path,
-    prod_folder: &std::path::Path,
-    notion_url: &str,
-    open_notion_in_app: bool,
-) {
-    if local_folder.exists() && ui.button("Open local folder").clicked() {
-        let _ = open::that(local_folder);
-        ui.close_menu();
-    }
-    if prod_folder.exists() && ui.button("Open prod folder").clicked() {
-        let _ = open::that(prod_folder);
-        ui.close_menu();
-    }
+fn draw_context_menu(ui: &mut egui::Ui, notion_url: &str, open_notion_in_app: bool) {
     if ui.button("Open on Notion").clicked() {
         open_notion_link(notion_url, open_notion_in_app);
         ui.close_menu();
@@ -859,15 +868,7 @@ fn draw_row_context_button(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey
     }
     egui::popup::popup_below_widget(ui, popup_id, &response, |ui| {
         ui.set_min_width(140.0);
-        let local_folder = state.local_root_for(key.asset_type).join(&key.slug);
-        let prod_folder = state.prod_root_for(key.asset_type).join(&key.slug);
-        draw_context_menu(
-            ui,
-            &local_folder,
-            &prod_folder,
-            &row.url,
-            state.config.open_notion_links_in_desktop_app,
-        );
+        draw_context_menu(ui, &row.url, state.config.open_notion_links_in_desktop_app);
     });
 }
 
@@ -1312,7 +1313,7 @@ mod tests {
 
     #[test]
     fn push_action_is_disabled_when_local_folder_is_missing() {
-        let availability = row_action_availability(RowAction::Push, true, false);
+        let availability = row_action_availability(RowAction::Push, true, false, None);
 
         assert!(!availability.enabled);
         assert_eq!(availability.tooltip, "Local folder missing");
@@ -1320,7 +1321,7 @@ mod tests {
 
     #[test]
     fn push_action_is_enabled_when_local_folder_exists() {
-        let availability = row_action_availability(RowAction::Push, true, true);
+        let availability = row_action_availability(RowAction::Push, true, true, None);
 
         assert!(availability.enabled);
         assert_eq!(availability.tooltip, "Push to Prod");
@@ -1328,19 +1329,45 @@ mod tests {
 
     #[test]
     fn pull_action_still_depends_on_prod_folder() {
-        let availability = row_action_availability(RowAction::Pull, false, false);
+        let availability = row_action_availability(RowAction::Pull, false, false, None);
 
         assert!(!availability.enabled);
         assert_eq!(availability.tooltip, "No prod folder");
     }
 
     #[test]
-    fn transfer_tooltip_includes_size_when_known() {
-        assert_eq!(
-            transfer_tooltip("Pull from Prod", Some(1536)),
-            "Pull from Prod · 2 KB"
-        );
-        assert_eq!(transfer_tooltip("Push to Prod", None), "Push to Prod");
+    fn push_is_disabled_when_preview_has_no_files() {
+        let preview = Some(ActionPreview {
+            file_count: 0,
+            bytes: 0,
+        });
+        let availability = row_action_availability(RowAction::Push, true, true, preview);
+
+        assert!(!availability.enabled);
+        assert_eq!(availability.tooltip, "Nothing new to push");
+    }
+
+    #[test]
+    fn pull_is_disabled_when_preview_has_no_files() {
+        let preview = Some(ActionPreview {
+            file_count: 0,
+            bytes: 0,
+        });
+        let availability = row_action_availability(RowAction::Pull, true, true, preview);
+
+        assert!(!availability.enabled);
+        assert_eq!(availability.tooltip, "Nothing new to pull");
+    }
+
+    #[test]
+    fn push_is_enabled_when_preview_has_files() {
+        let preview = Some(ActionPreview {
+            file_count: 3,
+            bytes: 1024,
+        });
+        let availability = row_action_availability(RowAction::Push, true, true, preview);
+
+        assert!(availability.enabled);
     }
 
     #[test]
@@ -1372,7 +1399,7 @@ mod tests {
     }
 
     #[test]
-    fn first_error_hides_all_other_messages() {
+    fn all_errors_remain_visible_while_non_errors_are_hidden() {
         let messages = vec![
             RowMsg {
                 kind: MsgKind::Warning,
@@ -1389,6 +1416,13 @@ mod tests {
                 dismiss_key: None,
             },
             RowMsg {
+                kind: MsgKind::Error,
+                text: "Missing /staging/sunny_field.exr in Prod".into(),
+                link: None,
+                action: None,
+                dismiss_key: None,
+            },
+            RowMsg {
                 kind: MsgKind::Warning,
                 text: "Missing /staging/colorchart.zip in Prod".into(),
                 link: None,
@@ -1399,8 +1433,9 @@ mod tests {
 
         let visible = RowView::visible_row_messages(&messages, &std::collections::HashSet::new());
 
-        assert_eq!(visible.len(), 1);
+        assert_eq!(visible.len(), 2);
+        assert!(visible.iter().all(|msg| matches!(msg.kind, MsgKind::Error)));
         assert_eq!(visible[0].text, "Unexpected root entries: renders");
-        assert!(matches!(visible[0].kind, MsgKind::Error));
+        assert_eq!(visible[1].text, "Missing /staging/sunny_field.exr in Prod");
     }
 }

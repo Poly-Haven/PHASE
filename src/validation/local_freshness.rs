@@ -12,16 +12,12 @@ pub(crate) fn run(ctx: &ValidationContext) -> Vec<Finding> {
         return Vec::new();
     }
 
-    if !local_is_newer_or_extra(ctx) {
+    if !local_is_newer_or_extra(ctx) || !is_needs_review(ctx.status.as_ref()) {
         return Vec::new();
     }
 
     vec![Finding {
-        severity: if is_needs_review(ctx.status.as_ref()) {
-            Severity::Warning
-        } else {
-            Severity::Info
-        },
+        severity: Severity::Warning,
         text: "Local files newer than Prod. Push?".into(),
         dismiss_id: None,
     }]

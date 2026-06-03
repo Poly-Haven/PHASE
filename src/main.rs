@@ -108,6 +108,7 @@ impl eframe::App for App {
             || self.state.auth_rx.is_some()
             || !self.state.row_toasts.is_empty()
             || self.state.validation_job.is_some()
+            || !self.state.transfer_estimate_jobs.is_empty()
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }

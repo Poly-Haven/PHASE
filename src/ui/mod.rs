@@ -143,8 +143,15 @@ pub struct PlanJob {
     pub rx: Receiver<Result<Plan, String>>,
 }
 
+/// Summary of an action plan: how many files will be copied and their total size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActionPreview {
+    pub file_count: usize,
+    pub bytes: u64,
+}
+
 pub struct TransferEstimateJob {
-    pub rx: Receiver<Result<u64, String>>,
+    pub rx: Receiver<Result<ActionPreview, String>>,
 }
 
 pub enum AuthMsg {
@@ -224,7 +231,7 @@ pub struct AppState {
     pub pending_update: Option<crate::updater::UpdateInfo>,
     pub update_dialog_open: bool,
     pub update_install: Option<UpdateInstallJob>,
-    pub transfer_estimates: HashMap<(RowKey, Direction), u64>,
+    pub transfer_estimates: HashMap<(RowKey, Direction), ActionPreview>,
     pub transfer_estimate_jobs: HashMap<(RowKey, Direction), TransferEstimateJob>,
     pub search_query: String,
 }
@@ -425,9 +432,9 @@ impl AppState {
         self.update_install = Some(UpdateInstallJob { rx });
     }
 
-    pub fn start_transfer_estimate(&mut self, key: &RowKey, direction: Direction) {
+    pub fn start_transfer_estimate(&mut self, key: &RowKey, direction: Direction, force: bool) {
         let estimate_key = (key.clone(), direction);
-        if self.transfer_estimates.contains_key(&estimate_key)
+        if (!force && self.transfer_estimates.contains_key(&estimate_key))
             || self.transfer_estimate_jobs.contains_key(&estimate_key)
             || self.plan_jobs.contains_key(key)
             || self.jobs.contains_key(key)
@@ -451,12 +458,38 @@ impl AppState {
         let (tx, rx) = channel();
         thread::spawn(move || {
             let result = build_plan_with_pull_filter(direction, &src_root, &dst_root, pull_filter)
-                .map(|plan| plan.total_bytes_to_copy)
+                .map(|plan| {
+                    let file_count = plan
+                        .files
+                        .iter()
+                        .filter(|f| {
+                            matches!(
+                                f.action,
+                                crate::copy::plan::Action::New
+                                    | crate::copy::plan::Action::Overwrite
+                            )
+                        })
+                        .count();
+                    ActionPreview {
+                        file_count,
+                        bytes: plan.total_bytes_to_copy,
+                    }
+                })
                 .map_err(|err| err.to_string());
             let _ = tx.send(result);
         });
         self.transfer_estimate_jobs
             .insert(estimate_key, TransferEstimateJob { rx });
+    }
+
+    /// Starts transfer estimates for all currently visible assets (both directions).
+    /// Called on focus gain and when the visible scope changes.
+    pub fn start_transfer_estimates_for_visible(&mut self, force: bool) {
+        let keys = self.visible_asset_keys();
+        for key in keys {
+            self.start_transfer_estimate(&key, Direction::Push, force);
+            self.start_transfer_estimate(&key, Direction::Pull, force);
+        }
     }
 
     pub fn refresh(&mut self, t: AssetType) {
@@ -650,7 +683,11 @@ impl AppState {
         self.visible_validation_scope = scope.clone();
         self.rebuild_prod_folder_cache();
         self.rebuild_local_folder_cache();
-        self.start_validation_for_keys(scope.keys);
+        self.start_validation_for_keys(scope.keys.clone());
+        for key in &scope.keys {
+            self.start_transfer_estimate(key, Direction::Push, false);
+            self.start_transfer_estimate(key, Direction::Pull, false);
+        }
     }
 
     pub fn start_validation_for_keys(&mut self, keys: Vec<RowKey>) {
@@ -781,8 +818,8 @@ impl AppState {
                 .and_then(|job| job.rx.try_recv().ok());
             if let Some(result) = result {
                 self.transfer_estimate_jobs.remove(&key);
-                if let Ok(bytes) = result {
-                    self.transfer_estimates.insert(key, bytes);
+                if let Ok(preview) = result {
+                    self.transfer_estimates.insert(key, preview);
                 }
             }
         }
@@ -1048,7 +1085,14 @@ impl AppState {
                     }
                 }
                 // Re-run validation now that the copy is no longer in progress.
-                self.start_validation_for_keys(vec![finished_key]);
+                self.start_validation_for_keys(vec![finished_key.clone()]);
+                // Clear and restart estimates for this key (file state has changed).
+                self.transfer_estimates
+                    .remove(&(finished_key.clone(), Direction::Push));
+                self.transfer_estimates
+                    .remove(&(finished_key.clone(), Direction::Pull));
+                self.start_transfer_estimate(&finished_key, Direction::Push, true);
+                self.start_transfer_estimate(&finished_key, Direction::Pull, true);
             }
         }
         let verification_keys: Vec<RowKey> = self.verifications.keys().cloned().collect();
@@ -1527,6 +1571,10 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         state.rebuild_prod_folder_cache();
         state.rebuild_local_folder_cache();
         state.start_validation_for_visible_assets();
+        // Restart estimates with force=true so new jobs run, but old values remain
+        // visible until results arrive (avoids flickering preview text on focus gain).
+        state.transfer_estimate_jobs.clear();
+        state.start_transfer_estimates_for_visible(true);
     }
 
     egui::TopBottomPanel::top("menu").show(ctx, |ui| {
@@ -1565,6 +1613,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         || state.validation_job.is_some()
         || state.update_check_rx.is_some()
         || state.update_install.is_some()
+        || !state.transfer_estimate_jobs.is_empty()
     {
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }
@@ -1875,6 +1924,33 @@ mod tests {
         }
     }
 
+    fn needs_review_asset(slug: &str, author: &str) -> Asset {
+        Asset {
+            page_id: slug.into(),
+            slug: slug.into(),
+            author: author.into(),
+            url: String::new(),
+            status: Some(AssetStatus {
+                id: format!("{slug}-needs-review"),
+                name: "Needs review".into(),
+                color: "yellow".into(),
+                group: StatusGroup::InProgress,
+                sort_order: 1,
+            }),
+        }
+    }
+
+    fn pump_validation(state: &mut super::AppState) {
+        for _ in 0..50 {
+            state.pump();
+            if state.validation_job.is_none() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("validation job did not finish");
+    }
+
     #[test]
     fn prod_folder_structure_creates_expected_subfolders() {
         let temp = tempfile::tempdir().unwrap();
@@ -1976,7 +2052,7 @@ mod tests {
         std::fs::create_dir_all(state.prod_root_for(key.asset_type).join(&key.slug)).unwrap();
         std::fs::write(local_asset.join("staging").join("file.bin"), [1u8, 2, 3, 4]).unwrap();
 
-        state.start_transfer_estimate(&key, Direction::Push);
+        state.start_transfer_estimate(&key, Direction::Push, true);
         for _ in 0..50 {
             state.pump();
             if state.transfer_estimate_jobs.is_empty() {
@@ -1987,7 +2063,10 @@ mod tests {
 
         assert_eq!(
             state.transfer_estimates.get(&(key, Direction::Push)),
-            Some(&4)
+            Some(&super::ActionPreview {
+                file_count: 1,
+                bytes: 4
+            })
         );
     }
 
@@ -2136,6 +2215,57 @@ mod tests {
         state.start_validation_for_visible_assets();
 
         assert!(state.validation_results.contains_key(&stale_key));
+    }
+
+    #[test]
+    fn periodic_validation_refresh_picks_up_external_prod_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let slug = "pansy_shell_beach_drone";
+        let key = super::RowKey {
+            asset_type: super::AssetType::Hdris,
+            slug: slug.into(),
+        };
+        let local_asset_root = temp.path().join("local").join("HDRIs").join(slug);
+        let prod_asset_root = temp.path().join("prod").join("HDRIs").join(slug);
+        std::fs::create_dir_all(&local_asset_root).unwrap();
+        let staging = prod_asset_root.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join(format!("{slug}.exr")), b"ok").unwrap();
+        std::fs::write(staging.join("colorchart.zip"), b"ok").unwrap();
+
+        let mut state = test_state();
+        state.config.local_root = temp.path().join("local");
+        state.config.prod_root = temp.path().join("prod");
+        state.assets_by_type.insert(
+            super::AssetType::Hdris,
+            super::AssetListState::Loaded(AssetList {
+                assets: vec![needs_review_asset(slug, "Alice")],
+                statuses: Vec::new(),
+            }),
+        );
+        state.selected_types = vec![super::AssetType::Hdris];
+        state.selected_status_groups = vec![StatusGroup::InProgress];
+
+        state.start_validation_for_visible_assets();
+        pump_validation(&mut state);
+        assert_eq!(state.validation_results.get(&key), Some(&Vec::new()));
+
+        std::fs::rename(&staging, prod_asset_root.join("staging_")).unwrap();
+
+        let started = std::time::Instant::now();
+        state.start_validation_if_stale(started, true);
+        assert!(state.validation_job.is_none());
+
+        state.start_validation_if_stale(started + std::time::Duration::from_secs(3), true);
+        pump_validation(&mut state);
+
+        let findings = state.validation_results.get(&key).unwrap();
+        assert!(findings
+            .iter()
+            .any(|finding| finding.text == format!("Missing /staging/{slug}.exr in Prod")));
+        assert!(findings
+            .iter()
+            .any(|finding| finding.text == "Missing /staging/colorchart.zip in Prod"));
     }
 
     #[test]
@@ -2335,6 +2465,22 @@ pub fn gear_texture(ctx: &egui::Context) -> egui::TextureHandle {
     static BYTES: &[u8] = include_bytes!("../assets/gear-fill.svg");
     static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
     TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "gear_icon", "gear-fill.svg"))
+        .clone()
+}
+
+pub fn folder_fill_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/folder-fill.svg");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "folder_fill_icon", "folder-fill.svg"))
+        .clone()
+}
+
+pub fn hdd_network_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/hdd-network.svg");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "hdd_network_icon", "hdd-network.svg"))
         .clone()
 }
 
