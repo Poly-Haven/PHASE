@@ -1,4 +1,4 @@
-use super::colors;
+use super::{colors, layout};
 
 pub struct OptionItem<T> {
     pub value: T,
@@ -21,9 +21,9 @@ pub fn draw<T: Copy + PartialEq>(
     let text_style = egui::TextStyle::Button;
     let font_id = text_style.resolve(ui.style());
     let text_color = ui.visuals().text_color();
-    let padding = egui::vec2(8.4, 3.5);
-    let height = ui.spacing().interact_size.y.max(28.0);
-    let separator_width = 1.0;
+    let padding = egui::vec2(layout::SELECTOR_PADDING_X, layout::SELECTOR_PADDING_Y);
+    let height = ui.spacing().interact_size.y.max(layout::SELECTOR_ROW_HEIGHT);
+    let separator_width = layout::SELECTOR_SEPARATOR_WIDTH;
     let rounding = height / 2.0;
 
     let text_widths: Vec<f32> = options
@@ -83,13 +83,19 @@ pub fn draw<T: Copy + PartialEq>(
             egui::Rounding::ZERO
         };
         ui.painter().rect_filled(
-            option_rect.shrink2(egui::vec2(0.0, 1.0)),
+            option_rect.shrink2(egui::vec2(
+                layout::SELECTOR_OPTION_TOP_INSET,
+                layout::SELECTOR_OPTION_BOTTOM_INSET,
+            )),
             option_rounding,
             fill,
         );
         if is_selected {
             ui.painter().rect_stroke(
-                option_rect.shrink2(egui::vec2(0.5, 1.5)),
+                option_rect.shrink2(egui::vec2(
+                    layout::SELECTOR_SELECTED_OUTER_INSET_X,
+                    layout::SELECTOR_SELECTED_OUTER_INSET_Y,
+                )),
                 option_rounding,
                 egui::Stroke::new(1.0, selected_color),
             );
@@ -110,7 +116,7 @@ pub fn draw<T: Copy + PartialEq>(
         );
         if is_selected {
             ui.painter().text(
-                option_rect.center() + egui::vec2(0.45, 0.0),
+                option_rect.center() + egui::vec2(layout::SELECTOR_SELECTED_LABEL_NUDGE_X, 0.0),
                 egui::Align2::CENTER_CENTER,
                 option.label,
                 font_id.clone(),
@@ -125,8 +131,11 @@ pub fn draw<T: Copy + PartialEq>(
         x += option_width;
         if index + 1 < options.len() {
             let separator_rect = egui::Rect::from_min_size(
-                egui::pos2(x, rect.top() + 1.0),
-                egui::vec2(separator_width, height - 2.0),
+                egui::pos2(x, rect.top() + layout::SELECTOR_SEPARATOR_WIDTH),
+                egui::vec2(
+                    separator_width,
+                    height - layout::SELECTOR_SEPARATOR_WIDTH * 2.0,
+                ),
             );
             ui.painter().rect_filled(
                 separator_rect,

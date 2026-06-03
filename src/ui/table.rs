@@ -1,5 +1,5 @@
 use super::colors;
-use super::{ActionPreview, AppState, AssetListState, RowKey};
+use super::{layout, ActionPreview, AppState, AssetListState, RowKey};
 use crate::copy::plan::Direction;
 use crate::notion::{Asset, AssetStatus, StatusGroup, StatusOption};
 use crate::ui::AssetType;
@@ -108,7 +108,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                     asset_type: row.asset_type,
                     slug: row.slug.clone(),
                 };
-                let row_height = 54.0;
+                let row_height = layout::ROW_HEIGHT;
                 let top = ui.cursor().min;
                 let row_rect = egui::Rect::from_min_size(top, egui::vec2(avail_w, row_height));
                 if ui.is_rect_visible(row_rect) {
@@ -343,7 +343,7 @@ fn icon_button(
     tint_color: egui::Color32,
     tooltip: &str,
 ) -> egui::Response {
-    let icon_size = egui::vec2(18.0, 18.0);
+    let icon_size = egui::vec2(layout::ACTION_ICON_SIZE, layout::ACTION_ICON_SIZE);
     let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     let sense = if enabled {
         egui::Sense::click()
@@ -385,14 +385,15 @@ fn open_asset_file(asset_type: AssetType, local_folder: &std::path::Path, slug: 
 }
 
 fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
-    let row_height = 54.0;
+    let row_height = layout::ROW_HEIGHT;
     let avail = ui.available_rect_before_wrap();
     let avail_w = avail.width();
     let row_rect = egui::Rect::from_min_size(avail.min, egui::vec2(avail_w, row_height));
-    let row1_rect = egui::Rect::from_min_size(avail.min, egui::vec2(avail_w, 26.0));
+    let row1_rect =
+        egui::Rect::from_min_size(avail.min, egui::vec2(avail_w, layout::ROW_PRIMARY_HEIGHT));
     let row2_rect = egui::Rect::from_min_size(
-        avail.min + egui::vec2(0.0, 26.0),
-        egui::vec2(avail_w, 28.0),
+        avail.min + egui::vec2(0.0, layout::ROW_PRIMARY_HEIGHT),
+        egui::vec2(avail_w, layout::ROW_SECONDARY_HEIGHT),
     );
 
     ui.painter()
@@ -424,9 +425,9 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     // Row 1 LTR: status pill + bold slug
     ui.allocate_ui_at_rect(row1_rect, |ui| {
         ui.horizontal_centered(|ui| {
-            ui.add_space(8.0);
+            ui.add_space(layout::ROW_SECTION_PADDING);
             draw_status_pill(state, ui, key, row);
-            ui.add_space(8.0);
+            ui.add_space(layout::ROW_SECTION_PADDING);
             if row.exists_on_prod {
                 let font_id = egui::TextStyle::Body.resolve(ui.style());
                 let galley = ui.fonts(|f| {
@@ -470,7 +471,7 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     if state.plan_jobs.contains_key(key) {
         ui.allocate_ui_at_rect(row1_rect, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
+                ui.add_space(layout::ROW_SECTION_PADDING);
                 ui.colored_label(colors::TEXT_DISABLED, "Planning…");
             });
         });
@@ -496,7 +497,7 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
         let x_tex = super::x_icon_texture(ui.ctx());
         ui.allocate_ui_at_rect(row1_rect, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
+                ui.add_space(layout::ROW_SECTION_PADDING);
                 if icon_button(ui, &x_tex, true, colors::TEXT_PRIMARY, "Cancel").clicked() {
                     if let Some(job) = state.jobs.get(key) {
                         job.progress
@@ -521,7 +522,7 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
         let push_tex = super::push_icon_texture(ui.ctx());
         ui.allocate_ui_at_rect(row1_rect, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
+                ui.add_space(layout::ROW_SECTION_PADDING);
                 if icon_button(ui, &push_tex, push.enabled, colors::PUSH, push.tooltip).clicked() {
                     super::start_job(state, key, Direction::Push);
                 }
@@ -565,15 +566,15 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     };
     ui.allocate_ui_at_rect(row2_rect, |ui| {
         ui.horizontal_centered(|ui| {
-            ui.add_space(8.0);
+            ui.add_space(layout::ROW_SECTION_PADDING);
             draw_row_context_button(state, ui, key, row);
-            ui.add_space(2.0);
+            ui.add_space(layout::ROW_INTRA_ICON_GAP);
             if icon_button(ui, &folder_tex, local_exists, colors::TEXT_PRIMARY, "Open local folder")
                 .clicked()
             {
                 let _ = open::that(&local_folder);
             }
-            ui.add_space(2.0);
+            ui.add_space(layout::ROW_INTRA_ICON_GAP);
             if icon_button(
                 ui,
                 &hdd_tex,
@@ -585,9 +586,12 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
             {
                 let _ = open::that(&prod_folder);
             }
-            ui.add_space(2.0);
+            ui.add_space(layout::ROW_INTRA_ICON_GAP);
             let (notion_rect, notion_resp) =
-                ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
+                ui.allocate_exact_size(
+                    egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
+                    egui::Sense::click(),
+                );
             if ui.is_rect_visible(notion_rect) {
                 let base_tint = text_color.linear_multiply(0.6);
                 let tint = if notion_resp.hovered() {
@@ -605,7 +609,7 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
             {
                 open_notion_link(&row.url, open_notion_in_app);
             }
-            ui.add_space(8.0);
+            ui.add_space(layout::ROW_SECTION_PADDING);
             ui.colored_label(colors::TEXT_PRIMARY.linear_multiply(0.25), &row.author);
             draw_row_messages(state, ui, key, row);
         });
@@ -626,7 +630,7 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
         let pull_tex = super::pull_icon_texture(ui.ctx());
         ui.allocate_ui_at_rect(row2_rect, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
+                ui.add_space(layout::ROW_SECTION_PADDING);
                 if icon_button(ui, &pull_tex, pull.enabled, colors::PULL, pull.tooltip).clicked() {
                     super::start_job(state, key, Direction::Pull);
                 }
@@ -669,9 +673,10 @@ fn draw_row_messages(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row:
         draw_toast(ui, toast);
     }
     for msg in &row.messages {
-        ui.add_space(8.0);
+        ui.add_space(layout::ROW_SECTION_PADDING);
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = (ui.spacing().item_spacing.x - 4.0).max(0.0);
+            ui.spacing_mut().item_spacing.x =
+                (ui.spacing().item_spacing.x - layout::ROW_INTRA_ICON_GAP).max(0.0);
             let (tex, color) = match msg.kind {
                 MsgKind::Info => (super::info_icon_texture(ui.ctx()), colors::MSG_INFO),
                 MsgKind::Warning => (super::warn_icon_texture(ui.ctx()), colors::MSG_WARNING),
@@ -681,7 +686,7 @@ fn draw_row_messages(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row:
             ui.add(
                 egui::Image::new(egui::load::SizedTexture::new(
                     tex.id(),
-                    egui::vec2(14.0, 14.0),
+                    egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
                 ))
                 .tint(color),
             );
@@ -721,7 +726,7 @@ fn draw_row_messages(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row:
                 let resp = ui.add(
                     egui::Image::new(egui::load::SizedTexture::new(
                         tex.id(),
-                        egui::vec2(12.0, 12.0),
+                        egui::vec2(layout::LINK_ICON_SIZE, layout::LINK_ICON_SIZE),
                     ))
                     .tint(color)
                     .sense(egui::Sense::click()),
@@ -739,7 +744,7 @@ fn draw_row_messages(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row:
                 let resp = ui.add(
                     egui::Image::new(egui::load::SizedTexture::new(
                         tex.id(),
-                        egui::vec2(12.0, 12.0),
+                        egui::vec2(layout::LINK_ICON_SIZE, layout::LINK_ICON_SIZE),
                     ))
                     .tint(egui::Color32::WHITE)
                     .sense(egui::Sense::click()),
@@ -830,7 +835,7 @@ fn draw_status_pill(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
                 }
             }
 
-            ui.add_space(4.0);
+            ui.add_space(layout::TOP_BAR_EDGE_PADDING);
         }
     });
 }
@@ -843,7 +848,7 @@ fn draw_context_menu(ui: &mut egui::Ui, notion_url: &str, open_notion_in_app: bo
 }
 
 fn draw_row_context_button(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
-    let icon_size = egui::vec2(18.0, 18.0);
+    let icon_size = egui::vec2(layout::ACTION_ICON_SIZE, layout::ACTION_ICON_SIZE);
     let (rect, response) = ui.allocate_exact_size(icon_size, egui::Sense::click());
     let tex = row_context_texture(ui.ctx());
     let tint = if response.hovered() {
@@ -867,7 +872,7 @@ fn draw_row_context_button(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey
         ui.memory_mut(|mem| mem.toggle_popup(popup_id));
     }
     egui::popup::popup_below_widget(ui, popup_id, &response, |ui| {
-        ui.set_min_width(140.0);
+        ui.set_min_width(layout::ROW_CONTEXT_POPUP_WIDTH);
         draw_context_menu(ui, &row.url, state.config.open_notion_links_in_desktop_app);
     });
 }
@@ -877,7 +882,7 @@ fn row_context_texture(ctx: &egui::Context) -> egui::TextureHandle {
 }
 
 fn row_context_icon_rect(rect: egui::Rect) -> egui::Rect {
-    rect.shrink(1.0)
+    rect.shrink(layout::ROW_CONTEXT_ICON_INSET)
 }
 
 fn open_notion_link(url: &str, open_in_app: bool) {
@@ -913,16 +918,16 @@ fn draw_toast(ui: &mut egui::Ui, toast: &super::RowToast) {
         1.0
     };
     let color = colors::MSG_QUESTION.linear_multiply(alpha);
-    ui.add_space(8.0);
+    ui.add_space(layout::ROW_SECTION_PADDING);
     let tex = super::check_texture(ui.ctx());
     ui.add(
         egui::Image::new(egui::load::SizedTexture::new(
             tex.id(),
-            egui::vec2(14.0, 14.0),
+            egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
         ))
         .tint(color),
     );
-    ui.add_space(2.0);
+    ui.add_space(layout::ROW_INTRA_ICON_GAP);
     ui.colored_label(color, &toast.text);
 }
 
@@ -939,7 +944,7 @@ fn status_dropdown_width(ui: &egui::Ui, options: &[StatusOption]) -> f32 {
             })
         })
         .fold(0.0, f32::max);
-    (max_label + 24.0).max(120.0)
+    (max_label + layout::STATUS_OPTION_WIDTH_PADDING).max(layout::STATUS_OPTION_MIN_WIDTH)
 }
 
 fn colored_status_option(
@@ -948,7 +953,7 @@ fn colored_status_option(
     bg: egui::Color32,
     width: f32,
 ) -> egui::Response {
-    let height = 20.0;
+    let height = layout::STATUS_OPTION_HEIGHT;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     let bg = colors::colored_background(bg);
     let fill = if response.hovered() {
@@ -957,7 +962,11 @@ fn colored_status_option(
         bg
     };
     ui.painter()
-        .rect_filled(rect.shrink2(egui::vec2(1.0, 1.0)), 4.0, fill);
+        .rect_filled(
+            rect.shrink2(egui::vec2(layout::STATUS_OPTION_INSET, layout::STATUS_OPTION_INSET)),
+            layout::STATUS_OPTION_ROUNDING,
+            fill,
+        );
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
@@ -980,9 +989,9 @@ fn status_pill_button(
             .rect
             .width()
     });
-    let icon_size = egui::vec2(10.0, 10.0);
-    let padding = egui::vec2(8.0, 3.0);
-    let height = 18.0;
+    let icon_size = egui::vec2(layout::STATUS_PILL_ICON_SIZE, layout::STATUS_PILL_ICON_SIZE);
+    let padding = egui::vec2(layout::STATUS_PILL_PADDING_X, layout::STATUS_PILL_PADDING_Y);
+    let height = layout::STATUS_PILL_HEIGHT;
     let width = text_width + icon_size.x + padding.x * 3.0;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     let bg = colors::colored_background(notion_color(&status.color));

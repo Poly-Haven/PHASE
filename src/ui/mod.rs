@@ -3,6 +3,7 @@ mod authors;
 pub mod colors;
 mod dialogs;
 mod focus_refresh;
+pub mod layout;
 mod group_selector;
 mod jobs;
 mod loading_indicator;
@@ -26,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::copy::job::{JobMsg, JobProgress, VerifyMsg};
-use crate::copy::plan::{build_plan_with_pull_filter, Action, Direction, Plan, PullFilterMode};
+use crate::copy::plan::{build_plan_with_pull_filter, Direction, Plan, PullFilterMode};
 use crate::auth::{AuthTokens, BrowserLogin};
 use crate::notion::{AssetList, AssetStatus, StatusOption};
 
@@ -1251,10 +1252,13 @@ fn active_file_action_status(state: &AppState) -> Option<String> {
 fn draw_status_bar(state: &mut AppState, ctx: &egui::Context) {
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
         egui::Frame::none()
-            .inner_margin(egui::Margin::symmetric(4.0, 2.0))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    draw_status_bar_primary(state, ui);
+        .inner_margin(egui::Margin::symmetric(
+            layout::STATUS_BAR_MARGIN_X,
+            layout::STATUS_BAR_MARGIN_Y,
+        ))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                draw_status_bar_primary(state, ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         draw_version_status(state, ui);
                     });
@@ -1281,7 +1285,7 @@ fn draw_status_bar_primary(state: &mut AppState, ui: &mut egui::Ui) {
             let resp = ui.add(
                 egui::Image::new(egui::load::SizedTexture::new(
                     tex.id(),
-                    egui::vec2(14.0, 14.0),
+                    egui::vec2(layout::STATUS_BAR_ICON_SIZE, layout::STATUS_BAR_ICON_SIZE),
                 ))
                 .tint(egui::Color32::WHITE)
                 .sense(egui::Sense::click()),
@@ -1355,7 +1359,10 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
 
     egui::TopBottomPanel::top("menu").show(ctx, |ui| {
         egui::Frame::none()
-            .inner_margin(egui::Margin::symmetric(0.0, 4.0))
+            .inner_margin(egui::Margin::symmetric(
+                0.0,
+                layout::TOP_BAR_VERTICAL_PADDING,
+            ))
             .show(ui, |ui| menu::draw(state, ui));
     });
     state.start_validation_if_visible_scope_changed();
@@ -1410,14 +1417,14 @@ fn draw_update_prompt(state: &mut AppState, ctx: &egui::Context) {
     egui::Window::new(format!("PHASE {} available", update.tag))
         .collapsible(false)
         .resizable(true)
-        .default_width(620.0)
+        .default_width(layout::UPDATE_DIALOG_WIDTH)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
             ui.label(format!("A new PHASE version is available: {}", update.tag));
-            ui.add_space(8.0);
+            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
             ui.label("Release notes:");
             egui::ScrollArea::vertical()
-                .max_height(280.0)
+                .max_height(layout::UPDATE_DIALOG_SCROLL_HEIGHT)
                 .show(ui, |ui| {
                     ui.add(
                         egui::TextEdit::multiline(&mut notes)
@@ -1426,7 +1433,7 @@ fn draw_update_prompt(state: &mut AppState, ctx: &egui::Context) {
                             .interactive(false),
                     );
                 });
-            ui.add_space(8.0);
+            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
             ui.horizontal(|ui| {
                 if ui.button("Update").clicked() {
                     install = true;
@@ -1459,17 +1466,17 @@ fn draw_verification_failure_prompt(state: &mut AppState, ctx: &egui::Context) {
     egui::Window::new(format!("Copy verification failed — {slug}"))
         .collapsible(false)
         .resizable(false)
-        .default_width(520.0)
+        .default_width(layout::VERIFICATION_DIALOG_WIDTH)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
             ui.label("The push finished, but post-copy verification found a mismatch.");
-            ui.add_space(6.0);
+            ui.add_space(layout::DIALOG_SECTION_SPACING_SMALL);
             ui.label("Problem file:");
             ui.monospace(&rel_path);
-            ui.add_space(4.0);
+            ui.add_space(layout::TOP_BAR_EDGE_PADDING);
             ui.label("Verification error:");
             ui.monospace(&error);
-            ui.add_space(8.0);
+            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
             ui.horizontal(|ui| {
                 if ui.button("Try again").clicked() {
                     retry = true;

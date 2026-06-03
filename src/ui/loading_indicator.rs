@@ -9,9 +9,15 @@ pub fn draw_button(ui: &mut egui::Ui) {
     let response = ui.add_enabled(false, egui::Button::new("        Loading"));
     let texture = super::loading_texture(ui.ctx());
     let angle = ui.input(|i| rotation_angle(i.time));
-    let size = egui::vec2(14.0, 14.0);
+    let size = egui::vec2(
+        super::layout::INLINE_ICON_SIZE,
+        super::layout::INLINE_ICON_SIZE,
+    );
     let icon_rect = egui::Rect::from_center_size(
-        egui::pos2(response.rect.left() + 15.0, response.rect.center().y),
+        egui::pos2(
+            response.rect.left() + super::layout::LOADING_BUTTON_ICON_CENTER_OFFSET_X,
+            response.rect.center().y,
+        ),
         size,
     );
     egui::Image::new(egui::load::SizedTexture::new(texture.id(), size))
