@@ -341,12 +341,12 @@ fn parse_query(query: &str) -> Result<std::collections::HashMap<String, String>>
 }
 
 fn success_http_response() -> &'static str {
-    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!doctype html><html><body><h1>PHASE login complete</h1><p>You can return to PHASE.</p></body></html>"
+    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>PHASE login complete</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#1a1a1a;color:#eee;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}main{max-width:30rem;padding:2rem 2.25rem;border:1px solid rgba(238,238,238,.12);border-radius:16px;background:rgba(26,26,26,.96);box-shadow:0 18px 48px rgba(0,0,0,.35)}h1{margin:0 0 .5rem;color:#e14d5b;font-size:1.4rem}p{margin:0;color:#eee}strong{color:#be6fff}</style></head><body><main><h1>PHASE login complete</h1><p>You can return to <strong>PHASE</strong>.</p></main></body></html>"
 }
 
 fn error_http_response(message: &str) -> String {
     format!(
-        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!doctype html><html><body><h1>PHASE login failed</h1><p>{}</p></body></html>",
+        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>PHASE login failed</title><style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#1a1a1a;color:#eee;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}}main{{max-width:30rem;padding:2rem 2.25rem;border:1px solid rgba(238,238,238,.12);border-radius:16px;background:rgba(26,26,26,.96);box-shadow:0 18px 48px rgba(0,0,0,.35)}}h1{{margin:0 0 .5rem;color:#dc5050;font-size:1.4rem}}p{{margin:0;color:#eee}}code{{display:block;margin-top:1rem;padding:.85rem 1rem;border-radius:12px;background:rgba(255,255,255,.04);color:#eee;white-space:pre-wrap;word-break:break-word}}</style></head><body><main><h1>PHASE login failed</h1><p>Please try again.</p><code>{}</code></main></body></html>",
         html_escape(message)
     )
 }
