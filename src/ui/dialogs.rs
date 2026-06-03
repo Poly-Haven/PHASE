@@ -1,4 +1,4 @@
-use super::{AppState, ConflictChoice};
+use super::{layout, AppState, ConflictChoice};
 use crate::copy::plan::Action;
 
 pub fn draw(state: &mut AppState, ctx: &egui::Context) {
@@ -27,13 +27,13 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     egui::Window::new(format!("Conflicts — {slug}"))
         .collapsible(false)
         .resizable(true)
-        .default_width(560.0)
+        .default_width(layout::CONFLICT_DIALOG_WIDTH)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             ui.label(format!("{} file(s) in conflict:", conflicts.len()));
-            ui.add_space(6.0);
+            ui.add_space(layout::DIALOG_SECTION_SPACING_SMALL);
             egui::ScrollArea::vertical()
-                .max_height(320.0)
+                .max_height(layout::CONFLICT_DIALOG_SCROLL_HEIGHT)
                 .show(ui, |ui| {
                     for (path, note) in &conflicts {
                         ui.horizontal(|ui| {
@@ -47,7 +47,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                         });
                     }
                 });
-            ui.add_space(8.0);
+            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
             ui.horizontal(|ui| {
                 if ui.button("Overwrite All").clicked() {
                     choice = Some(ConflictChoice::OverwriteAll);
@@ -82,18 +82,18 @@ pub fn token_prompt(state: &mut AppState, ctx: &egui::Context) {
     egui::Window::new("PHASE login required")
         .collapsible(false)
         .resizable(true)
-        .default_width(460.0)
+        .default_width(layout::TOKEN_PROMPT_WIDTH)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             ui.label("Log in with Poly Haven to load and update PHASE asset statuses.");
-            ui.add_space(8.0);
+            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
             ui.label("Tokens will be saved to:");
             ui.monospace(
                 crate::config::config_path()
                     .map(|p| p.display().to_string())
                     .unwrap_or_default(),
             );
-            ui.add_space(8.0);
+            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
             if let Some(login) = &state.auth_login {
                 ui.label("A browser window should open. If it does not, visit:");
                 ui.hyperlink(&login.auth_url);
@@ -105,7 +105,7 @@ pub fn token_prompt(state: &mut AppState, ctx: &egui::Context) {
             } else {
                 ui.label("Login is not currently running.");
             }
-            ui.add_space(8.0);
+            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
             ui.horizontal(|ui| {
                 if ui.button("Restart login").clicked() {
                     retry = true;
@@ -140,14 +140,14 @@ pub fn settings(state: &mut AppState, ctx: &egui::Context) {
     egui::Window::new("Settings")
         .collapsible(false)
         .resizable(false)
-        .default_width(560.0)
+        .default_width(layout::SETTINGS_DIALOG_WIDTH)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             ui.label("Local root path");
             ui.horizontal(|ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut state.settings_local_root_input)
-                        .desired_width(420.0),
+                        .desired_width(layout::SETTINGS_LOCAL_ROOT_WIDTH),
                 );
                 if ui
                     .button("Select...")
@@ -163,7 +163,7 @@ pub fn settings(state: &mut AppState, ctx: &egui::Context) {
                 }
             });
 
-            ui.add_space(8.0);
+            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
             ui.checkbox(
                 &mut state.settings_skip_pull_raw_tif_if_many_work_tifs,
                 "Skip pulling RAW and TIF files if >30 TIFs exist in /work",
@@ -173,7 +173,7 @@ pub fn settings(state: &mut AppState, ctx: &egui::Context) {
                 "Open Notion links in the desktop app",
             );
 
-            ui.add_space(12.0);
+            ui.add_space(layout::DIALOG_SECTION_SPACING_LARGE);
             ui.horizontal(|ui| {
                 if ui.button("Save").clicked() {
                     save = true;

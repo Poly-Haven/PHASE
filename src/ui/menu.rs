@@ -1,4 +1,4 @@
-use super::{AppState, AssetListState, AssetType};
+use super::{layout, AppState, AssetListState, AssetType};
 use crate::notion::StatusGroup;
 use std::sync::OnceLock;
 
@@ -17,9 +17,10 @@ fn refresh_texture(ctx: &egui::Context) -> egui::TextureHandle {
 }
 
 pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
-    ui.spacing_mut().interact_size.y = ui.spacing().interact_size.y.max(30.0);
+    ui.spacing_mut().interact_size.y =
+        ui.spacing().interact_size.y.max(layout::TOP_BAR_INTERACT_HEIGHT);
     ui.horizontal(|ui| {
-        ui.add_space(4.0);
+        ui.add_space(layout::TOP_BAR_EDGE_PADDING);
 
         let options: Vec<_> = AssetType::all()
             .iter()
@@ -122,7 +123,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
             let gear_resp = ui.add(
                 egui::Image::new(egui::load::SizedTexture::new(
                     gear_tex.id(),
-                    egui::vec2(16.0, 16.0),
+                    egui::vec2(layout::TOP_BAR_ICON_SIZE, layout::TOP_BAR_ICON_SIZE),
                 ))
                 .tint(super::colors::TEXT_PRIMARY)
                 .sense(egui::Sense::click()),
@@ -134,7 +135,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
             {
                 state.open_settings();
             }
-            ui.add_space(6.0);
+            ui.add_space(layout::TOP_BAR_ACTION_GAP);
 
             let is_loading = state
                 .selected_types
@@ -142,7 +143,10 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                 .any(|t| state.refreshing.contains(t));
             if is_loading {
                 let (spinner_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                    ui.allocate_exact_size(
+                        egui::vec2(layout::TOP_BAR_ICON_SIZE, layout::TOP_BAR_ICON_SIZE),
+                        egui::Sense::hover(),
+                    );
                 super::loading_indicator::draw_image_at(
                     ui,
                     spinner_rect,
@@ -153,7 +157,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                 let refresh_resp = ui.add(
                     egui::Image::new(egui::load::SizedTexture::new(
                         refresh_tex.id(),
-                        egui::vec2(16.0, 16.0),
+                        egui::vec2(layout::TOP_BAR_ICON_SIZE, layout::TOP_BAR_ICON_SIZE),
                     ))
                     .tint(super::colors::TEXT_PRIMARY)
                     .sense(egui::Sense::click()),
@@ -173,7 +177,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
 }
 
 fn draw_search_box(ui: &mut egui::Ui, state: &mut super::AppState) {
-    let desired_width = 170.0;
+    let desired_width = layout::SEARCH_FIELD_WIDTH;
     let height = ui.spacing().interact_size.y;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(desired_width, height), egui::Sense::hover());
 
@@ -188,8 +192,8 @@ fn draw_search_box(ui: &mut egui::Ui, state: &mut super::AppState) {
     );
 
     // X button: 12px icon, 8px from right edge, centred vertically
-    let x_size = 12.0_f32;
-    let x_pad = 8.0_f32;
+    let x_size = layout::SEARCH_CLEAR_ICON_SIZE;
+    let x_pad = layout::SEARCH_CLEAR_ICON_RIGHT_PADDING;
     let x_rect = egui::Rect::from_center_size(
         egui::pos2(rect.max.x - x_pad - x_size / 2.0, rect.center().y),
         egui::vec2(x_size, x_size),
@@ -197,9 +201,13 @@ fn draw_search_box(ui: &mut egui::Ui, state: &mut super::AppState) {
 
     // Leave room on the right for X when text is present
     let text_width = if is_empty {
-        desired_width - 16.0
+        desired_width - layout::SEARCH_FIELD_HORIZONTAL_PADDING * 2.0
     } else {
-        desired_width - 16.0 - x_pad - x_size - 4.0
+        desired_width
+            - layout::SEARCH_FIELD_HORIZONTAL_PADDING * 2.0
+            - x_pad
+            - x_size
+            - layout::SEARCH_CLEAR_ICON_TEXT_GAP
     };
 
     let hint = egui::RichText::new("Search...")
@@ -208,7 +216,7 @@ fn draw_search_box(ui: &mut egui::Ui, state: &mut super::AppState) {
     let edit = egui::TextEdit::singleline(&mut state.search_query)
         .desired_width(text_width)
         .frame(false)
-        .margin(egui::vec2(8.0, 0.0))
+        .margin(egui::vec2(layout::SEARCH_FIELD_HORIZONTAL_PADDING, 0.0))
         .hint_text(hint);
 
     ui.allocate_ui_at_rect(rect, |ui| {
@@ -240,7 +248,10 @@ fn draw_search_box(ui: &mut egui::Ui, state: &mut super::AppState) {
 
 fn author_filter_option(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {
     let height = ui.spacing().interact_size.y;
-    let icon_size = egui::vec2(12.0, 12.0);
+    let icon_size = egui::vec2(
+        layout::AUTHOR_FILTER_ICON_SIZE,
+        layout::AUTHOR_FILTER_ICON_SIZE,
+    );
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(author_filter_row_width(ui.available_width()), height),
         egui::Sense::click(),
@@ -261,7 +272,10 @@ fn author_filter_option(ui: &mut egui::Ui, selected: bool, label: &str) -> egui:
     }
 
     let icon_rect = egui::Rect::from_center_size(
-        egui::pos2(rect.left() + 4.0 + icon_size.x / 2.0, rect.center().y),
+        egui::pos2(
+            rect.left() + layout::AUTHOR_FILTER_ICON_LEFT_PADDING + icon_size.x / 2.0,
+            rect.center().y,
+        ),
         icon_size,
     );
     if selected {
@@ -275,7 +289,7 @@ fn author_filter_option(ui: &mut egui::Ui, selected: bool, label: &str) -> egui:
     }
 
     ui.painter().text(
-        egui::pos2(icon_rect.right() + 4.0, rect.center().y),
+        egui::pos2(icon_rect.right() + layout::AUTHOR_FILTER_TEXT_GAP, rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
         egui::TextStyle::Button.resolve(ui.style()),
@@ -312,7 +326,7 @@ fn author_filter_combo_width(
             .fold(0.0_f32, f32::max)
     });
     // Add room for the dropdown arrow and button padding.
-    max_text_w + 36.0
+    max_text_w + layout::AUTHOR_FILTER_COMBO_EXTRA_WIDTH
 }
 
 fn current_authors(state: &AppState) -> Vec<String> {
