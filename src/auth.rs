@@ -23,6 +23,13 @@ pub struct AuthTokens {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoggedInIdentity {
+    pub name: String,
+    pub user_id: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserLogin {
     pub auth_url: String,
     pub redirect_uri: String,
@@ -64,6 +71,10 @@ pub fn callback_url() -> &'static str {
 
 pub fn auth0_audience() -> &'static str {
     "https://admin.polyhaven.com/api/phase"
+}
+
+pub fn userinfo_url() -> String {
+    format!("https://{AUTH0_DOMAIN}/userinfo")
 }
 
 pub fn phase_api_base_url() -> &'static str {
@@ -192,6 +203,115 @@ pub fn apply_tokens(config: &mut crate::config::Config, tokens: &AuthTokens) {
     config.auth_access_token = tokens.access_token.clone();
     config.auth_refresh_token = tokens.refresh_token.clone();
     config.auth_expires_at = tokens.expires_at;
+}
+
+pub fn logged_in_identity(access_token: &str) -> Option<LoggedInIdentity> {
+    let claims = decode_jwt_claims(access_token)?;
+    let user_id = claim_string(&claims, &["sub"]).unwrap_or_else(|| "Unknown".to_string());
+    let name = claim_string(
+        &claims,
+        &[
+            "name",
+            "preferred_username",
+            "nickname",
+            "email",
+            "given_name",
+        ],
+    )
+    .map(|value| {
+        if value.contains('@') {
+            value.split('@').next().unwrap_or(&value).to_string()
+        } else {
+            value
+        }
+    })
+    .unwrap_or_else(|| user_id.clone());
+    let role = claim_string(
+        &claims,
+        &[
+            "role",
+            "roles",
+            "https://admin.polyhaven.com/role",
+            "https://admin.polyhaven.com/roles",
+            "https://polyhaven.com/role",
+            "https://polyhaven.com/roles",
+        ],
+    )
+    .unwrap_or_else(|| "Unknown".to_string());
+    Some(LoggedInIdentity {
+        name,
+        user_id,
+        role,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct UserInfoResponse {
+    sub: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    preferred_username: Option<String>,
+    #[serde(default)]
+    nickname: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+}
+
+pub fn fetch_logged_in_identity(access_token: &str) -> Result<LoggedInIdentity> {
+    let client = client()?;
+    let resp = client
+        .get(userinfo_url())
+        .bearer_auth(access_token)
+        .send()
+        .context("fetching Auth0 userinfo")?;
+
+    let status = resp.status();
+    let text = resp.text().unwrap_or_default();
+    if !status.is_success() {
+        return Err(anyhow!(
+            "Authentication required: Auth0 userinfo request failed {status}: {text}"
+        ));
+    }
+
+    let userinfo: UserInfoResponse =
+        serde_json::from_str(&text).context("parsing Auth0 userinfo response")?;
+    let claims = decode_jwt_claims(access_token);
+    let name = first_non_empty_text(&[
+        userinfo.name.as_deref(),
+        userinfo.preferred_username.as_deref(),
+        userinfo.nickname.as_deref(),
+        userinfo.email.as_deref(),
+    ])
+    .map(|value| {
+        if value.contains('@') {
+            value.split('@').next().unwrap_or(&value).to_string()
+        } else {
+            value
+        }
+    })
+    .unwrap_or_else(|| userinfo.sub.clone());
+    let role = claims
+        .as_ref()
+        .and_then(|claims| {
+            claim_string(
+                claims,
+                &[
+                    "role",
+                    "roles",
+                    "https://admin.polyhaven.com/role",
+                    "https://admin.polyhaven.com/roles",
+                    "https://polyhaven.com/role",
+                    "https://polyhaven.com/roles",
+                ],
+            )
+        })
+        .unwrap_or_else(|| "Unknown".to_string());
+    Ok(LoggedInIdentity {
+        name,
+        user_id: userinfo.sub,
+        role,
+    })
 }
 
 pub fn is_auth_required_error(message: &str) -> bool {
@@ -358,6 +478,49 @@ fn html_escape(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
+fn decode_jwt_claims(access_token: &str) -> Option<serde_json::Value> {
+    let mut parts = access_token.split('.');
+    parts.next()?;
+    let payload = parts.next()?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload.as_bytes()).ok()?;
+    serde_json::from_slice(&decoded).ok()
+}
+
+fn claim_string(claims: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        let Some(value) = claims.get(key) else {
+            continue;
+        };
+        if let Some(text) = value.as_str() {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        if let Some(values) = value.as_array() {
+            let items: Vec<_> = values
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .collect();
+            if !items.is_empty() {
+                return Some(items.join(", "));
+            }
+        }
+    }
+    None
+}
+
+fn first_non_empty_text<'a>(values: &[Option<&'a str>]) -> Option<String> {
+    values
+        .iter()
+        .flatten()
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 fn client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -367,6 +530,7 @@ fn client() -> Result<reqwest::blocking::Client> {
 
 #[cfg(test)]
 mod tests {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use super::*;
 
     #[test]
@@ -448,5 +612,90 @@ mod tests {
         assert_eq!(tokens.access_token, "access");
         assert_eq!(tokens.refresh_token, "refresh");
         assert_eq!(tokens.expires_at, Some(3610));
+    }
+
+    #[test]
+    fn logged_in_identity_prefers_standard_claims_and_role_arrays() {
+        let payload = serde_json::json!({
+            "name": "Ada Lovelace",
+            "email": "ada@example.com",
+            "https://admin.polyhaven.com/roles": ["admin", "editor"],
+        });
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("header.{payload}.signature");
+
+        let identity = logged_in_identity(&token).unwrap();
+        assert_eq!(identity.name, "Ada Lovelace");
+        assert_eq!(identity.role, "admin, editor");
+    }
+
+    #[test]
+    fn logged_in_identity_falls_back_to_email_prefix_and_unknown_role() {
+        let payload = serde_json::json!({
+            "email": "ada@example.com",
+        });
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("header.{payload}.signature");
+
+        let identity = logged_in_identity(&token).unwrap();
+        assert_eq!(identity.name, "ada");
+        assert_eq!(identity.user_id, "Unknown");
+        assert_eq!(identity.role, "Unknown");
+    }
+
+    #[test]
+    fn logged_in_identity_uses_user_id_when_no_name_claim_is_present() {
+        let payload = serde_json::json!({
+            "sub": "auth0|abc123",
+            "role": "editor",
+        });
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("header.{payload}.signature");
+
+        let identity = logged_in_identity(&token).unwrap();
+        assert_eq!(identity.name, "auth0|abc123");
+        assert_eq!(identity.user_id, "auth0|abc123");
+        assert_eq!(identity.role, "editor");
+    }
+
+    #[test]
+    fn fetch_logged_in_identity_uses_userinfo_name_when_available() {
+        let payload = serde_json::json!({
+            "sub": "auth0|abc123",
+            "role": "editor",
+        });
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("header.{payload}.signature");
+
+        let userinfo = UserInfoResponse {
+            sub: "auth0|abc123".into(),
+            name: Some("Ada Lovelace".into()),
+            preferred_username: None,
+            nickname: None,
+            email: Some("ada@example.com".into()),
+        };
+        let claims = decode_jwt_claims(&token).unwrap();
+        let name = first_non_empty_text(&[
+            userinfo.name.as_deref(),
+            userinfo.preferred_username.as_deref(),
+            userinfo.nickname.as_deref(),
+            userinfo.email.as_deref(),
+        ])
+        .unwrap();
+        assert_eq!(name, "Ada Lovelace");
+        assert_eq!(
+            claim_string(
+                &claims,
+                &[
+                    "role",
+                    "roles",
+                    "https://admin.polyhaven.com/role",
+                    "https://admin.polyhaven.com/roles",
+                    "https://polyhaven.com/role",
+                    "https://polyhaven.com/roles",
+                ],
+            ),
+            Some("editor".into())
+        );
     }
 }

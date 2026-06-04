@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use crate::config::Config;
 use crate::copy::job::{JobMsg, JobProgress, VerifyMsg};
 use crate::copy::plan::{build_plan_with_pull_filter, Direction, Plan, PullFilterMode};
-use crate::auth::{AuthTokens, BrowserLogin};
+use crate::auth::{AuthTokens, BrowserLogin, LoggedInIdentity};
 use crate::notion::{AssetList, AssetStatus, StatusOption};
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
@@ -213,6 +213,7 @@ pub struct AppState {
     pub token_input: String,
     pub auth_login: Option<BrowserLogin>,
     pub auth_rx: Option<Receiver<AuthMsg>>,
+    pub logged_in_identity: Option<LoggedInIdentity>,
     pub settings_open: bool,
     pub settings_local_root_input: String,
     pub settings_skip_pull_raw_tif_if_many_work_tifs: bool,
@@ -361,6 +362,7 @@ impl AppState {
             token_input: String::new(),
             auth_login: None,
             auth_rx: None,
+            logged_in_identity: None,
             settings_open: false,
             settings_local_root_input: String::new(),
             settings_skip_pull_raw_tif_if_many_work_tifs: false,
@@ -400,6 +402,7 @@ impl AppState {
             s.config.skip_pull_raw_tif_if_many_work_tifs;
         s.settings_open_notion_links_in_desktop_app =
             s.config.open_notion_links_in_desktop_app;
+        s.refresh_logged_in_identity();
         // Warm the UI from cache immediately, then refresh in the background.
         for t in [AssetType::Hdris, AssetType::Textures] {
             if let Some(cached) = crate::cache::load(t.cache_name()) {
@@ -1036,6 +1039,7 @@ impl AppState {
                 }
                 AuthMsg::Success(tokens) => {
                     crate::auth::apply_tokens(&mut self.config, &tokens);
+                    self.refresh_logged_in_identity();
                     if let Err(err) = crate::config::save(&self.config) {
                         self.error_banner = Some(format!("Failed to save login: {err}"));
                     }
@@ -1117,6 +1121,7 @@ impl AppState {
                     Ok((list, tokens)) => {
                         if let Some(tokens) = tokens {
                             crate::auth::apply_tokens(&mut self.config, &tokens);
+                            self.refresh_logged_in_identity();
                             if let Err(err) = crate::config::save(&self.config) {
                                 self.error_banner =
                                     Some(format!("Failed to save refreshed login: {err}"));
@@ -1183,6 +1188,7 @@ impl AppState {
                     Ok(tokens) => {
                         if let Some(tokens) = tokens {
                             crate::auth::apply_tokens(&mut self.config, &tokens);
+                            self.refresh_logged_in_identity();
                             if let Err(err) = crate::config::save(&self.config) {
                                 self.error_banner =
                                     Some(format!("Failed to save refreshed login: {err}"));
@@ -1221,6 +1227,7 @@ impl AppState {
                     Ok(tokens) => {
                         if let Some(tokens) = tokens {
                             crate::auth::apply_tokens(&mut self.config, &tokens);
+                            self.refresh_logged_in_identity();
                             if let Err(err) = crate::config::save(&self.config) {
                                 self.error_banner =
                                     Some(format!("Failed to save refreshed login: {err}"));
@@ -1432,6 +1439,20 @@ impl AppState {
         self.settings_open = true;
     }
 
+    pub fn refresh_logged_in_identity(&mut self) {
+        self.logged_in_identity = if self.config.has_access_token() {
+            match crate::auth::fetch_logged_in_identity(&self.config.auth_access_token) {
+                Ok(identity) => Some(identity),
+                Err(err) => {
+                    log::warn!("Failed to fetch Auth0 userinfo: {err}");
+                    crate::auth::logged_in_identity(&self.config.auth_access_token)
+                }
+            }
+        } else {
+            None
+        };
+    }
+
     fn start_push_verification(&mut self, key: RowKey, plan: crate::copy::plan::Plan) {
         let (tx, rx) = std::sync::mpsc::channel();
         let progress = Arc::new(JobProgress::default());
@@ -1526,6 +1547,17 @@ fn active_file_action_status(state: &AppState) -> Option<String> {
             };
             format!("Verifying {target}")
         })
+}
+
+fn logged_in_status_text(state: &AppState) -> Option<String> {
+    state.logged_in_identity.as_ref().map(|identity| {
+        format!("Logged in as {} [{}]", identity.name, identity.role)
+    }).or_else(|| {
+        state
+            .config
+            .has_access_token()
+            .then(|| "Logged in as Unknown [Unknown]".to_string())
+    })
 }
 
 fn draw_status_bar(state: &mut AppState, ctx: &egui::Context) {
@@ -1625,6 +1657,11 @@ fn draw_status_bar_primary(state: &mut AppState, ui: &mut egui::Ui) {
             .any(|t| state.refreshing.contains(t));
     if refreshing {
         ui.label(egui::RichText::new("Updating Notion data...").color(colors::TEXT_DISABLED));
+        return;
+    }
+
+    if let Some(status) = logged_in_status_text(state) {
+        ui.label(egui::RichText::new(status).color(colors::TEXT_DISABLED));
     }
 }
 
