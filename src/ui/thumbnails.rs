@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::config::Config;
 
-use super::{layout, RowKey};
+use super::{layout, AssetType, RowKey};
 
 const THUMBNAIL_SOURCE_RELATIVE_PATH: &[&str] = &["staging", "renders", "thumbnail.png"];
 const THUMBNAIL_TARGET_HEIGHT: u32 = layout::ROW_HEIGHT as u32;
@@ -32,13 +32,21 @@ impl ThumbnailFormat {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThumbnailSignature {
+    pub asset_type: AssetType,
     pub slug: String,
     pub source_mtime: u64,
     pub source_size: u64,
 }
 
 pub struct ThumbnailJob {
-    pub rx: Receiver<Result<PathBuf, String>>,
+    pub signature: ThumbnailSignature,
+    pub rx: Receiver<Result<ThumbnailJobResult, String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThumbnailJobResult {
+    pub signature: ThumbnailSignature,
+    pub cache_path: PathBuf,
 }
 
 pub fn thumbnail_source_path(config: &Config, key: &RowKey) -> Option<PathBuf> {
@@ -61,7 +69,11 @@ pub fn thumbnail_source_path_from_roots(
     None
 }
 
-pub fn thumbnail_signature(source_path: &Path, slug: &str) -> Result<ThumbnailSignature, String> {
+pub fn thumbnail_signature(
+    source_path: &Path,
+    asset_type: AssetType,
+    slug: &str,
+) -> Result<ThumbnailSignature, String> {
     let metadata = fs::metadata(source_path).map_err(|err| err.to_string())?;
     let modified = metadata
         .modified()
@@ -70,6 +82,7 @@ pub fn thumbnail_signature(source_path: &Path, slug: &str) -> Result<ThumbnailSi
         .map_err(|err| err.to_string())?
         .as_secs();
     Ok(ThumbnailSignature {
+        asset_type,
         slug: slug.to_string(),
         source_mtime: modified,
         source_size: metadata.len(),
@@ -81,7 +94,8 @@ pub fn thumbnail_cache_path(
     signature: &ThumbnailSignature,
     format: ThumbnailFormat,
 ) -> PathBuf {
-    cache_root.join(thumbnail_cache_file_name(signature, format))
+    thumbnail_cache_asset_root(cache_root, signature.asset_type)
+        .join(thumbnail_cache_file_name(signature, format))
 }
 
 pub fn thumbnail_cache_file_name(
@@ -95,6 +109,10 @@ pub fn thumbnail_cache_file_name(
         signature.source_size,
         format.extension()
     )
+}
+
+pub fn thumbnail_cache_asset_root(cache_root: &Path, asset_type: AssetType) -> PathBuf {
+    cache_root.join(asset_type.cache_name())
 }
 
 pub fn prune_thumbnail_cache(cache_root: &Path) -> Result<usize, String> {
@@ -112,22 +130,7 @@ pub fn prune_thumbnail_cache_older_than(
         .checked_sub(max_age)
         .unwrap_or(SystemTime::UNIX_EPOCH);
     let mut removed = 0;
-    for entry in fs::read_dir(cache_root).map_err(|err| err.to_string())? {
-        let entry = entry.map_err(|err| err.to_string())?;
-        let path = entry.path();
-        if !path.is_file() || !is_thumbnail_cache_file(&path) {
-            continue;
-        }
-        let modified = entry
-            .metadata()
-            .map_err(|err| err.to_string())?
-            .modified()
-            .map_err(|err| err.to_string())?;
-        if modified < cutoff {
-            fs::remove_file(&path).map_err(|err| err.to_string())?;
-            removed += 1;
-        }
-    }
+    prune_thumbnail_cache_dir(cache_root, cutoff, &mut removed)?;
     Ok(removed)
 }
 
@@ -136,13 +139,18 @@ pub fn spawn_thumbnail_job(
     local_root: PathBuf,
     prod_root: PathBuf,
     key: RowKey,
+    signature: ThumbnailSignature,
 ) -> ThumbnailJob {
     let (tx, rx) = channel();
+    let job_signature = signature.clone();
     thread::spawn(move || {
-        let result = render_thumbnail(&cache_root, &local_root, &prod_root, &key).map(|path| path);
+        let result = render_thumbnail(&cache_root, &local_root, &prod_root, &key, &signature);
         let _ = tx.send(result);
     });
-    ThumbnailJob { rx }
+    ThumbnailJob {
+        signature: job_signature,
+        rx,
+    }
 }
 
 pub fn load_thumbnail_texture(
@@ -165,8 +173,10 @@ fn render_thumbnail(
     local_root: &Path,
     prod_root: &Path,
     key: &RowKey,
-) -> Result<PathBuf, String> {
-    fs::create_dir_all(cache_root).map_err(|err| err.to_string())?;
+    signature: &ThumbnailSignature,
+) -> Result<ThumbnailJobResult, String> {
+    fs::create_dir_all(thumbnail_cache_asset_root(cache_root, signature.asset_type))
+        .map_err(|err| err.to_string())?;
     let Some(source_path) = thumbnail_source_path_from_roots(local_root, prod_root, key) else {
         return Err(format!(
             "Missing thumbnail source for {}/{}",
@@ -174,17 +184,32 @@ fn render_thumbnail(
             key.slug
         ));
     };
-    let signature = thumbnail_signature(&source_path, &key.slug)?;
-    if let Some(path) = existing_cache_path(cache_root, &signature) {
-        return Ok(path);
+    if let Some(path) = existing_cache_path(cache_root, signature) {
+        return Ok(ThumbnailJobResult {
+            signature: signature.clone(),
+            cache_path: path,
+        });
     }
 
-    remove_stale_cache_files(cache_root, &signature)?;
+    remove_stale_cache_files(cache_root, signature)?;
     let source_bytes = fs::read(&source_path).map_err(|err| err.to_string())?;
+    let current_signature =
+        thumbnail_signature(&source_path, signature.asset_type, &signature.slug)?;
+    if &current_signature != signature {
+        return Err("thumbnail source changed while rendering".into());
+    }
     let decoded = image::load_from_memory(&source_bytes).map_err(|err| err.to_string())?;
     let resized = resize_for_thumbnail(decoded);
-    let cache_path = write_thumbnail(cache_root, &signature, &resized)?;
-    Ok(cache_path)
+    let current_signature =
+        thumbnail_signature(&source_path, signature.asset_type, &signature.slug)?;
+    if &current_signature != signature {
+        return Err("thumbnail source changed while rendering".into());
+    }
+    let cache_path = write_thumbnail(cache_root, signature, &resized)?;
+    Ok(ThumbnailJobResult {
+        signature: signature.clone(),
+        cache_path,
+    })
 }
 
 fn resize_for_thumbnail(image: image::DynamicImage) -> image::DynamicImage {
@@ -243,11 +268,12 @@ fn remove_stale_cache_files(
     cache_root: &Path,
     signature: &ThumbnailSignature,
 ) -> Result<(), String> {
-    if !cache_root.exists() {
+    let asset_root = thumbnail_cache_asset_root(cache_root, signature.asset_type);
+    if !asset_root.exists() {
         return Ok(());
     }
     let prefix = format!("{}-", signature.slug);
-    for entry in fs::read_dir(cache_root).map_err(|err| err.to_string())? {
+    for entry in fs::read_dir(&asset_root).map_err(|err| err.to_string())? {
         let entry = entry.map_err(|err| err.to_string())?;
         let path = entry.path();
         if !path.is_file() || !is_thumbnail_cache_file(&path) {
@@ -258,6 +284,37 @@ fn remove_stale_cache_files(
         };
         if name.starts_with(&prefix) {
             let _ = fs::remove_file(&path);
+        }
+    }
+    Ok(())
+}
+
+fn prune_thumbnail_cache_dir(
+    cache_root: &Path,
+    cutoff: SystemTime,
+    removed: &mut usize,
+) -> Result<(), String> {
+    if !cache_root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(cache_root).map_err(|err| err.to_string())? {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let path = entry.path();
+        if path.is_dir() {
+            prune_thumbnail_cache_dir(&path, cutoff, removed)?;
+            continue;
+        }
+        if !path.is_file() || !is_thumbnail_cache_file(&path) {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .map_err(|err| err.to_string())?
+            .modified()
+            .map_err(|err| err.to_string())?;
+        if modified < cutoff {
+            fs::remove_file(&path).map_err(|err| err.to_string())?;
+            *removed += 1;
         }
     }
     Ok(())

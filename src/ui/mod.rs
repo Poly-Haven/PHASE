@@ -122,6 +122,12 @@ pub struct RowToast {
     pub text: String,
     pub created_at: Instant,
 }
+
+pub struct ThumbnailPreview {
+    pub signature: thumbnails::ThumbnailSignature,
+    pub texture: egui::TextureHandle,
+}
+
 pub struct PendingConflict {
     pub key: RowKey,
     pub direction: Direction,
@@ -235,7 +241,7 @@ pub struct AppState {
     pub prod_cache_rx: Option<Receiver<HashMap<RowKey, bool>>>,
     pub thumbnail_cache_root: PathBuf,
     pub thumbnail_jobs: HashMap<RowKey, thumbnails::ThumbnailJob>,
-    pub thumbnail_previews: HashMap<RowKey, egui::TextureHandle>,
+    pub thumbnail_previews: HashMap<RowKey, ThumbnailPreview>,
     pub thumbnail_cleanup_rx: Option<Receiver<Result<usize, String>>>,
     /// Cached result of `is_dir()` for each asset's local working folder.
     /// Rebuilt synchronously (local disk) on focus gain and after pulls.
@@ -670,15 +676,48 @@ impl AppState {
         self.thumbnail_cleanup_rx = Some(rx);
     }
 
+    fn thumbnail_signature_for(
+        &self,
+        key: &RowKey,
+    ) -> Result<Option<thumbnails::ThumbnailSignature>, String> {
+        let Some(source_path) = thumbnails::thumbnail_source_path(&self.config, key) else {
+            return Ok(None);
+        };
+        thumbnails::thumbnail_signature(&source_path, key.asset_type, &key.slug).map(Some)
+    }
+
     pub fn ensure_thumbnail_job(&mut self, key: &RowKey) {
-        if self.thumbnail_previews.contains_key(key) || self.thumbnail_jobs.contains_key(key) {
+        let Ok(Some(signature)) = self.thumbnail_signature_for(key) else {
+            self.thumbnail_previews.remove(key);
+            self.thumbnail_jobs.remove(key);
+            return;
+        };
+        let preview_matches = self
+            .thumbnail_previews
+            .get(key)
+            .is_some_and(|preview| preview.signature == signature);
+        let job_matches = self
+            .thumbnail_jobs
+            .get(key)
+            .is_some_and(|job| job.signature == signature);
+        if preview_matches {
+            if job_matches {
+                return;
+            }
+            self.thumbnail_jobs.remove(key);
             return;
         }
+        self.thumbnail_previews.remove(key);
+        if job_matches {
+            return;
+        }
+        self.thumbnail_jobs.remove(key);
         let job = thumbnails::spawn_thumbnail_job(
             self.thumbnail_cache_root.clone(),
             self.config.local_root.clone(),
             self.config.prod_root.clone(),
             key.clone(),
+            signature,
         );
         self.thumbnail_jobs.insert(key.clone(), job);
     }
@@ -1374,8 +1413,43 @@ impl AppState {
             self.watch_dirty = true;
         }
 
+        let preview_keys: Vec<RowKey> = self.thumbnail_previews.keys().cloned().collect();
+        for key in preview_keys {
+            let current_signature = match self.thumbnail_signature_for(&key) {
+                Ok(Some(signature)) => signature,
+                Ok(None) => {
+                    self.thumbnail_previews.remove(&key);
+                    self.thumbnail_jobs.remove(&key);
+                    continue;
+                }
+                Err(err) => {
+                    log::warn!(
+                        "Failed to inspect thumbnail source for {}/{}: {err}",
+                        key.asset_type.folder(),
+                        key.slug
+                    );
+                    continue;
+                }
+            };
+            let preview_matches = self
+                .thumbnail_previews
+                .get(&key)
+                .is_some_and(|preview| preview.signature == current_signature);
+            if !preview_matches {
+                self.thumbnail_previews.remove(&key);
+                self.ensure_thumbnail_job(&key);
+            }
+        }
+
         let thumbnail_keys: Vec<RowKey> = self.thumbnail_jobs.keys().cloned().collect();
         for key in thumbnail_keys {
+            let Some(job_signature) = self
+                .thumbnail_jobs
+                .get(&key)
+                .map(|job| job.signature.clone())
+            else {
+                continue;
+            };
             let result_opt = self
                 .thumbnail_jobs
                 .get(&key)
@@ -1383,14 +1457,41 @@ impl AppState {
             if let Some(result) = result_opt {
                 self.thumbnail_jobs.remove(&key);
                 match result {
-                    Ok(cache_path) => {
+                    Ok(result) => {
+                        let current_signature = match self.thumbnail_signature_for(&key) {
+                            Ok(Some(signature)) => signature,
+                            Ok(None) => {
+                                self.thumbnail_previews.remove(&key);
+                                continue;
+                            }
+                            Err(err) => {
+                                log::warn!(
+                                    "Failed to inspect thumbnail source for {}/{}: {err}",
+                                    key.asset_type.folder(),
+                                    key.slug
+                                );
+                                continue;
+                            }
+                        };
+                        if result.signature != current_signature
+                            || result.signature != job_signature
+                        {
+                            self.ensure_thumbnail_job(&key);
+                            continue;
+                        }
                         match thumbnails::load_thumbnail_texture(
                             ctx,
-                            &cache_path,
+                            &result.cache_path,
                             &Self::thumbnail_texture_name(&key),
                         ) {
                             Ok(texture) => {
-                                self.thumbnail_previews.insert(key, texture);
+                                self.thumbnail_previews.insert(
+                                    key,
+                                    ThumbnailPreview {
+                                        signature: result.signature,
+                                        texture,
+                                    },
+                                );
                             }
                             Err(err) => {
                                 log::warn!(
