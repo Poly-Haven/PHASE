@@ -3,13 +3,15 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use crate::config::Config;
-
 use super::{layout, AssetType, RowKey};
+#[cfg(test)]
+use crate::config::Config;
 
 const THUMBNAIL_SOURCE_RELATIVE_PATH: &[&str] = &["staging", "renders", "primary.png"];
 const THUMBNAIL_TARGET_HEIGHT: u32 = layout::ROW_HEIGHT as u32;
@@ -43,6 +45,7 @@ pub struct ThumbnailSignature {
 pub struct ThumbnailJob {
     pub revision: u64,
     pub rx: Receiver<Result<ThumbnailJobResult, String>>,
+    #[cfg(test)]
     pub completed: Arc<(Mutex<bool>, Condvar)>,
 }
 
@@ -53,6 +56,7 @@ pub struct ThumbnailJobResult {
     pub cache_path: PathBuf,
 }
 
+#[cfg(test)]
 pub fn thumbnail_source_path(config: &Config, key: &RowKey) -> Option<PathBuf> {
     thumbnail_source_path_from_roots(&config.local_root, &config.prod_root, key)
 }
@@ -146,20 +150,26 @@ pub fn spawn_thumbnail_job(
     revision_state: Arc<AtomicU64>,
 ) -> ThumbnailJob {
     let (tx, rx) = channel();
+    #[cfg(test)]
     let completed = Arc::new((Mutex::new(false), Condvar::new()));
+    #[cfg(test)]
     let completed_thread = Arc::clone(&completed);
     thread::spawn(move || {
         let result = render_thumbnail(&cache_root, &local_root, &prod_root, &key, revision, &revision_state);
         let _ = tx.send(result);
-        let (lock, cvar) = &*completed_thread;
-        if let Ok(mut finished) = lock.lock() {
-            *finished = true;
-            cvar.notify_all();
+        #[cfg(test)]
+        {
+            let (lock, cvar) = &*completed_thread;
+            if let Ok(mut finished) = lock.lock() {
+                *finished = true;
+                cvar.notify_all();
+            }
         }
     });
     ThumbnailJob {
         revision,
         rx,
+        #[cfg(test)]
         completed,
     }
 }
