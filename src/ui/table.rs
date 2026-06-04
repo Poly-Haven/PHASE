@@ -420,7 +420,7 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
         egui::Sense::hover(),
     );
     row_response.context_menu(|ui| {
-        draw_context_menu(ui, &row.url, open_notion_in_app);
+        super::scripts::draw_context_menu(ui, state, key, &row.url, open_notion_in_app);
     });
 
     let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -467,6 +467,7 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                         .color(colors::TEXT_DISABLED),
                 ));
             }
+            super::scripts::draw_row_status(state, ui, key);
         });
     });
 
@@ -843,13 +844,6 @@ fn draw_status_pill(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: 
     });
 }
 
-fn draw_context_menu(ui: &mut egui::Ui, notion_url: &str, open_notion_in_app: bool) {
-    if ui.button("Open on Notion").clicked() {
-        open_notion_link(notion_url, open_notion_in_app);
-        ui.close_menu();
-    }
-}
-
 fn draw_row_context_button(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
     let icon_size = egui::vec2(layout::ACTION_ICON_SIZE, layout::ACTION_ICON_SIZE);
     let (rect, response) = ui.allocate_exact_size(icon_size, egui::Sense::click());
@@ -876,7 +870,13 @@ fn draw_row_context_button(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey
     }
     egui::popup::popup_below_widget(ui, popup_id, &response, |ui| {
         ui.set_min_width(layout::ROW_CONTEXT_POPUP_WIDTH);
-        draw_context_menu(ui, &row.url, state.config.open_notion_links_in_desktop_app);
+        super::scripts::draw_context_menu(
+            ui,
+            state,
+            key,
+            &row.url,
+            state.config.open_notion_links_in_desktop_app,
+        );
     });
 }
 

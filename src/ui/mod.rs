@@ -9,6 +9,7 @@ mod group_selector;
 mod jobs;
 mod loading_indicator;
 mod menu;
+mod scripts;
 mod status_groups;
 mod table;
 mod textures;
@@ -244,6 +245,9 @@ pub struct AppState {
     pub update_install: Option<UpdateInstallJob>,
     pub transfer_estimates: HashMap<(RowKey, Direction), ActionPreview>,
     pub transfer_estimate_jobs: HashMap<(RowKey, Direction), TransferEstimateJob>,
+    pub script_jobs: HashMap<scripts::ScriptKey, scripts::ScriptJob>,
+    pub script_results: HashMap<scripts::ScriptKey, scripts::ScriptRun>,
+    pub script_output_dialog: Option<scripts::ScriptKey>,
     pub search_query: String,
     /// Filesystem watcher (lazily created once an egui Context is available).
     pub file_watcher: Option<file_watcher::FileWatcher>,
@@ -385,6 +389,9 @@ impl AppState {
             update_install: None,
             transfer_estimates: HashMap::new(),
             transfer_estimate_jobs: HashMap::new(),
+            script_jobs: HashMap::new(),
+            script_results: HashMap::new(),
+            script_output_dialog: None,
             search_query: String::new(),
             file_watcher: None,
             last_activity_at: Instant::now(),
@@ -1453,6 +1460,18 @@ impl AppState {
         };
     }
 
+    pub fn is_admin(&self) -> bool {
+        self.logged_in_identity
+            .as_ref()
+            .map(|identity| {
+                identity
+                    .role
+                    .split([',', ';', '|'])
+                    .any(|role| role.trim().eq_ignore_ascii_case("admin"))
+            })
+            .unwrap_or(false)
+    }
+
     fn start_push_verification(&mut self, key: RowKey, plan: crate::copy::plan::Plan) {
         let (tx, rx) = std::sync::mpsc::channel();
         let progress = Arc::new(JobProgress::default());
@@ -1727,6 +1746,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             .show(ui, |ui| menu::draw(state, ui));
     });
     state.start_validation_if_visible_scope_changed();
+    scripts::pump(state);
     dialogs::token_prompt(state, ctx);
     dialogs::settings(state, ctx);
     dialogs::draw(state, ctx);
@@ -1758,6 +1778,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         || state.update_check_rx.is_some()
         || state.update_install.is_some()
         || !state.transfer_estimate_jobs.is_empty()
+        || !state.script_jobs.is_empty()
     {
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }
