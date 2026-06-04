@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{mpsc::channel, Arc, Mutex};
+use std::sync::{mpsc::channel, Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
 use egui::{epaint::ClippedShape, Pos2, RawInput, Rect, Vec2};
@@ -184,6 +184,62 @@ fn wait_for_thumbnail_job(state: &super::AppState, key: &super::RowKey) {
     assert!(!result.timed_out(), "thumbnail job did not finish");
 }
 
+struct ConfigBackup {
+    _lock: MutexGuard<'static, ()>,
+    config_path: Option<std::path::PathBuf>,
+    config_bytes: Option<Vec<u8>>,
+    backup_path: Option<std::path::PathBuf>,
+    backup_bytes: Option<Vec<u8>>,
+}
+
+impl ConfigBackup {
+    fn capture() -> Self {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = LOCK.get_or_init(|| Mutex::new(()));
+        let guard = lock.lock().unwrap();
+        let config_path = crate::config::config_path().ok();
+        let backup_path = config_path.as_ref().map(|path| {
+            let mut os = path.as_os_str().to_owned();
+            os.push(".bak");
+            std::path::PathBuf::from(os)
+        });
+        let config_bytes = config_path.as_ref().and_then(|path| std::fs::read(path).ok());
+        let backup_bytes = backup_path.as_ref().and_then(|path| std::fs::read(path).ok());
+        Self {
+            _lock: guard,
+            config_path,
+            config_bytes,
+            backup_path,
+            backup_bytes,
+        }
+    }
+}
+
+impl Drop for ConfigBackup {
+    fn drop(&mut self) {
+        if let Some(path) = &self.config_path {
+            match &self.config_bytes {
+                Some(bytes) => {
+                    let _ = std::fs::write(path, bytes);
+                }
+                None => {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        if let Some(path) = &self.backup_path {
+            match &self.backup_bytes {
+                Some(bytes) => {
+                    let _ = std::fs::write(path, bytes);
+                }
+                None => {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn prod_folder_structure_creates_expected_subfolders() {
     let temp = tempfile::tempdir().unwrap();
@@ -197,6 +253,7 @@ fn prod_folder_structure_creates_expected_subfolders() {
 
 #[test]
 fn all_authors_persistence_does_not_fall_back_to_legacy_per_type_filter() {
+    let _config_backup = ConfigBackup::capture();
     let mut config = Config::default();
     config.last_asset_types = vec!["HDRIs".into()];
     config.last_author_filter = String::new();
@@ -213,6 +270,7 @@ fn all_authors_persistence_does_not_fall_back_to_legacy_per_type_filter() {
 
 #[test]
 fn selected_asset_types_combine_saved_author_filters_per_type() {
+    let _config_backup = ConfigBackup::capture();
     let mut config = Config::default();
     config.last_asset_types = vec!["HDRIs".into(), "Textures".into()];
     config
