@@ -558,9 +558,16 @@ fn thumbnail_source_prefers_local_source_then_prod() {
 }
 
 #[test]
-fn thumbnail_cache_key_includes_slug_mtime_and_size() {
+fn thumbnail_cache_key_includes_asset_type_namespace() {
     let cache_root = tempfile::tempdir().unwrap();
     let signature = super::thumbnails::ThumbnailSignature {
+        asset_type: super::AssetType::Hdris,
+        slug: "asset".into(),
+        source_mtime: 1_700_000_000,
+        source_size: 12_345,
+    };
+    let other_signature = super::thumbnails::ThumbnailSignature {
+        asset_type: super::AssetType::Textures,
         slug: "asset".into(),
         source_mtime: 1_700_000_000,
         source_size: 12_345,
@@ -571,23 +578,31 @@ fn thumbnail_cache_key_includes_slug_mtime_and_size() {
         &signature,
         super::thumbnails::ThumbnailFormat::WebP,
     );
+    let other_cache_path = super::thumbnails::thumbnail_cache_path(
+        cache_root.path(),
+        &other_signature,
+        super::thumbnails::ThumbnailFormat::WebP,
+    );
     let filename = cache_path
         .file_name()
         .unwrap()
         .to_string_lossy()
         .to_string();
 
+    assert!(cache_path.starts_with(cache_root.path().join("hdris")));
+    assert!(other_cache_path.starts_with(cache_root.path().join("textures")));
+    assert_ne!(cache_path, other_cache_path);
     assert!(filename.starts_with("asset-"));
     assert!(filename.contains("1700000000"));
     assert!(filename.contains("12345"));
     assert!(filename.ends_with(".webp"));
-    assert!(cache_path.starts_with(cache_root.path()));
 }
 
 #[test]
 fn thumbnail_pruning_removes_entries_older_than_60_days() {
     let cache_root = tempfile::tempdir().unwrap();
     let signature = super::thumbnails::ThumbnailSignature {
+        asset_type: super::AssetType::Hdris,
         slug: "asset".into(),
         source_mtime: 1_700_000_000,
         source_size: 12_345,
@@ -600,12 +615,15 @@ fn thumbnail_pruning_removes_entries_older_than_60_days() {
     let stale = super::thumbnails::thumbnail_cache_path(
         cache_root.path(),
         &super::thumbnails::ThumbnailSignature {
+            asset_type: super::AssetType::Textures,
             slug: "old".into(),
             source_mtime: 1_700_000_001,
             source_size: 9_999,
         },
         super::thumbnails::ThumbnailFormat::Png,
     );
+    std::fs::create_dir_all(fresh.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
     std::fs::write(&fresh, b"fresh").unwrap();
     std::fs::write(&stale, b"stale").unwrap();
     let old_time = filetime::FileTime::from_unix_time(1_500_000_000, 0);
@@ -619,7 +637,7 @@ fn thumbnail_pruning_removes_entries_older_than_60_days() {
 }
 
 #[test]
-fn thumbnail_generation_loads_a_texture_preview_on_the_ui_thread() {
+fn thumbnail_generation_replaces_stale_preview_after_source_changes() {
     let temp = tempfile::tempdir().unwrap();
     let mut state = test_state();
     state.config.local_root = temp.path().join("local");
@@ -653,12 +671,41 @@ fn thumbnail_generation_loads_a_texture_preview_on_the_ui_thread() {
     }
 
     assert!(state.thumbnail_jobs.is_empty());
-    assert!(state.thumbnail_previews.contains_key(&key));
+    let initial_signature = state
+        .thumbnail_previews
+        .get(&key)
+        .expect("expected initial preview")
+        .signature
+        .clone();
     assert!(!std::fs::read_dir(&state.thumbnail_cache_root)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap()
         .is_empty());
+
+    image::RgbaImage::from_pixel(12, 12, image::Rgba([0, 255, 0, 255]))
+        .save(&source)
+        .unwrap();
+
+    for _ in 0..50 {
+        state.pump(&ctx);
+        if state.thumbnail_jobs.is_empty()
+            && state
+                .thumbnail_previews
+                .get(&key)
+                .is_some_and(|preview| preview.signature != initial_signature)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    let preview = state
+        .thumbnail_previews
+        .get(&key)
+        .expect("expected refreshed preview");
+    assert_ne!(preview.signature, initial_signature);
+    assert_eq!(preview.signature.asset_type, super::AssetType::Hdris);
 }
 
 #[test]

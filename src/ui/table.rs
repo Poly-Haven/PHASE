@@ -435,9 +435,9 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     });
 
     let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-    if let Some(tex) = state.thumbnail_previews.get(key) {
+    if let Some(preview) = state.thumbnail_previews.get(key) {
         ui.painter().image(
-            tex.id(),
+            preview.texture.id(),
             thumbnail_rect.shrink(2.0),
             uv_full,
             egui::Color32::WHITE,
