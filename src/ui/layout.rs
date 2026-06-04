@@ -17,10 +17,10 @@ pub const AUTHOR_FILTER_ICON_LEFT_PADDING: f32 = 4.0;
 pub const AUTHOR_FILTER_TEXT_GAP: f32 = 4.0;
 pub const AUTHOR_FILTER_COMBO_EXTRA_WIDTH: f32 = 36.0;
 
-pub const ROW_HEIGHT: f32 = 54.0;
+pub const ROW_HEIGHT: f32 = 52.0;
 pub const ROW_PRIMARY_HEIGHT: f32 = 26.0;
-pub const ROW_SECONDARY_HEIGHT: f32 = 28.0;
-pub const ROW_SECTION_PADDING: f32 = 8.0;
+pub const ROW_SECONDARY_HEIGHT: f32 = 24.0;
+pub const ROW_SECTION_PADDING: f32 = 6.0;
 pub const ROW_INTRA_ICON_GAP: f32 = 2.0;
 pub const ACTION_ICON_SIZE: f32 = 18.0;
 pub const INLINE_ICON_SIZE: f32 = 14.0;
