@@ -393,7 +393,6 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     let row_height = layout::ROW_HEIGHT;
     let avail = ui.available_rect_before_wrap();
     let avail_w = avail.width();
-    state.ensure_thumbnail_job(key);
     let thumbnail_rect = egui::Rect::from_min_size(avail.min, egui::vec2(row_height, row_height));
     let content_min = egui::pos2(
         avail.min.x + row_height + layout::ROW_SECTION_PADDING,
