@@ -69,6 +69,9 @@ fn test_state() -> super::AppState {
         update_install: None,
         transfer_estimates: HashMap::new(),
         transfer_estimate_jobs: HashMap::new(),
+        script_jobs: HashMap::new(),
+        script_results: HashMap::new(),
+        script_output_dialog: None,
         search_query: String::new(),
         file_watcher: None,
         last_activity_at: Instant::now(),
@@ -537,6 +540,18 @@ fn idle_status_bar_shows_logged_in_identity() {
     assert!(texts
         .iter()
         .any(|(text, _)| text == "Logged in as Ada [admin]"));
+}
+
+#[test]
+fn admin_role_detection_accepts_comma_separated_roles() {
+    let mut state = test_state();
+    state.logged_in_identity = Some(crate::auth::LoggedInIdentity {
+        name: "Ada".into(),
+        user_id: "auth0|abc123".into(),
+        role: "Admin, Editor".into(),
+    });
+
+    assert!(state.is_admin());
 }
 
 #[test]

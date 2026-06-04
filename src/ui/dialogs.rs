@@ -2,72 +2,73 @@ use super::{layout, AppState, ConflictChoice};
 use crate::copy::plan::Action;
 
 pub fn draw(state: &mut AppState, ctx: &egui::Context) {
-    let Some(pc) = state.pending_conflict.as_ref() else {
-        return;
-    };
-    let slug = pc.key.slug.clone();
-    let conflicts: Vec<(String, &'static str)> = pc
-        .plan
-        .files
-        .iter()
-        .filter_map(|f| match f.action {
-            Action::Conflict { dest_newer: true } => Some((
-                f.rel_path.to_string_lossy().to_string(),
-                "Newer at destination",
-            )),
-            Action::Conflict { dest_newer: false } => {
-                Some((f.rel_path.to_string_lossy().to_string(), "Newer at source"))
-            }
-            _ => None,
-        })
-        .collect();
+    if let Some(pc) = state.pending_conflict.as_ref() {
+        let slug = pc.key.slug.clone();
+        let conflicts: Vec<(String, &'static str)> = pc
+            .plan
+            .files
+            .iter()
+            .filter_map(|f| match f.action {
+                Action::Conflict { dest_newer: true } => Some((
+                    f.rel_path.to_string_lossy().to_string(),
+                    "Newer at destination",
+                )),
+                Action::Conflict { dest_newer: false } => {
+                    Some((f.rel_path.to_string_lossy().to_string(), "Newer at source"))
+                }
+                _ => None,
+            })
+            .collect();
 
-    let mut choice: Option<ConflictChoice> = None;
+        let mut choice: Option<ConflictChoice> = None;
 
-    egui::Window::new(format!("Conflicts — {slug}"))
-        .collapsible(false)
-        .resizable(true)
-        .default_width(layout::CONFLICT_DIALOG_WIDTH)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            ui.label(format!("{} file(s) in conflict:", conflicts.len()));
-            ui.add_space(layout::DIALOG_SECTION_SPACING_SMALL);
-            egui::ScrollArea::vertical()
-                .max_height(layout::CONFLICT_DIALOG_SCROLL_HEIGHT)
-                .show(ui, |ui| {
-                    for (path, note) in &conflicts {
-                        ui.horizontal(|ui| {
-                            ui.monospace(path);
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.weak(*note);
-                                },
-                            );
-                        });
+        egui::Window::new(format!("Conflicts — {slug}"))
+            .collapsible(false)
+            .resizable(true)
+            .default_width(layout::CONFLICT_DIALOG_WIDTH)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!("{} file(s) in conflict:", conflicts.len()));
+                ui.add_space(layout::DIALOG_SECTION_SPACING_SMALL);
+                egui::ScrollArea::vertical()
+                    .max_height(layout::CONFLICT_DIALOG_SCROLL_HEIGHT)
+                    .show(ui, |ui| {
+                        for (path, note) in &conflicts {
+                            ui.horizontal(|ui| {
+                                ui.monospace(path);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.weak(*note);
+                                    },
+                                );
+                            });
+                        }
+                    });
+                ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
+                ui.horizontal(|ui| {
+                    if ui.button("Overwrite All").clicked() {
+                        choice = Some(ConflictChoice::OverwriteAll);
+                    }
+                    if ui.button("Copy Only New").clicked() {
+                        choice = Some(ConflictChoice::CopyOnlyNew);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        choice = Some(ConflictChoice::Cancel);
                     }
                 });
-            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
-            ui.horizontal(|ui| {
-                if ui.button("Overwrite All").clicked() {
-                    choice = Some(ConflictChoice::OverwriteAll);
-                }
-                if ui.button("Copy Only New").clicked() {
-                    choice = Some(ConflictChoice::CopyOnlyNew);
-                }
-                if ui.button("Cancel").clicked() {
-                    choice = Some(ConflictChoice::Cancel);
-                }
             });
-        });
 
-    if let Some(c) = choice {
-        if matches!(c, ConflictChoice::Cancel) {
-            state.pending_conflict = None;
-        } else {
-            super::execute_after_conflict(state, c);
+        if let Some(c) = choice {
+            if matches!(c, ConflictChoice::Cancel) {
+                state.pending_conflict = None;
+            } else {
+                super::execute_after_conflict(state, c);
+            }
         }
     }
+
+    super::scripts::draw_output_dialog(state, ctx);
 }
 
 pub fn token_prompt(state: &mut AppState, ctx: &egui::Context) {
