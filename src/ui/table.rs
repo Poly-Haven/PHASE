@@ -395,7 +395,7 @@ fn thumbnail_source_path(prod_root: &std::path::Path, key: &RowKey) -> std::path
         .join(&key.slug)
         .join("staging")
         .join("renders")
-        .join("thumbnail.png")
+        .join("primary.png")
 }
 
 struct RowLayout {
@@ -1330,7 +1330,7 @@ mod tests {
 
         assert_eq!(
             super::thumbnail_source_path(&std::path::PathBuf::from(r"C:\prod"), &key),
-            std::path::PathBuf::from(r"C:\prod\HDRIs\asset\staging\renders\thumbnail.png")
+            std::path::PathBuf::from(r"C:\prod\HDRIs\asset\staging\renders\primary.png")
         );
     }
 
