@@ -697,6 +697,14 @@ impl AppState {
             .clone()
     }
 
+    fn prune_thumbnail_revisions_to_visible_scope(&mut self) {
+        let visible: HashSet<RowKey> = self.visible_asset_keys().into_iter().collect();
+        self.thumbnail_revisions.retain(|key, _| {
+            visible.contains(key) || self.thumbnail_jobs.contains_key(key)
+                || self.thumbnail_previews.contains_key(key)
+        });
+    }
+
     fn spawn_thumbnail_job_for_key(&mut self, key: &RowKey) {
         if self.thumbnail_jobs.contains_key(key) {
             return;
@@ -1084,6 +1092,7 @@ impl AppState {
         self.watch_dirty = true;
         self.start_validation_for_keys(scope.keys.clone());
         self.start_thumbnail_refresh_for_keys(scope.keys.clone());
+        self.prune_thumbnail_revisions_to_visible_scope();
         for key in &scope.keys {
             self.start_transfer_estimate(key, Direction::Push, false);
             self.start_transfer_estimate(key, Direction::Pull, false);
@@ -1476,6 +1485,7 @@ impl AppState {
                     Err(err) => {
                         if err.contains("Missing thumbnail source") {
                             self.thumbnail_previews.remove(&key);
+                            self.thumbnail_revisions.remove(&key);
                         } else if current_revision != job_revision {
                             self.spawn_thumbnail_job_for_key(&key);
                         } else {
