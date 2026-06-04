@@ -25,7 +25,6 @@ pub const ROW_INTRA_ICON_GAP: f32 = 2.0;
 pub const ACTION_ICON_SIZE: f32 = 18.0;
 pub const INLINE_ICON_SIZE: f32 = 14.0;
 pub const LINK_ICON_SIZE: f32 = 12.0;
-pub const LOADING_BUTTON_ICON_CENTER_OFFSET_X: f32 = 15.0;
 
 pub const STATUS_BAR_MARGIN_X: f32 = 4.0;
 pub const STATUS_BAR_MARGIN_Y: f32 = 2.0;

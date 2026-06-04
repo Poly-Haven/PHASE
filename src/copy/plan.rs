@@ -34,6 +34,7 @@ const MTIME_TOLERANCE_SECS: i64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PullFilterMode {
+    #[allow(dead_code)]
     AlwaysSkipRawAndTif,
     SkipRawAndTifWhenWorkTifsExceed { threshold: usize },
     None,
@@ -72,7 +73,9 @@ pub fn classify(
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub direction: Direction,
+    #[allow(dead_code)]
     pub src_root: PathBuf,
+    #[allow(dead_code)]
     pub dst_root: PathBuf,
     pub files: Vec<PlannedFile>,
     pub total_bytes_to_copy: u64,
@@ -88,6 +91,7 @@ impl Plan {
 }
 
 /// Walk `src_root`, classify each file against `dst_root`, return the plan.
+#[allow(dead_code)]
 pub fn build_plan(direction: Direction, src_root: &Path, dst_root: &Path) -> Result<Plan> {
     build_plan_with_pull_filter(
         direction,

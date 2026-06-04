@@ -5,28 +5,6 @@ pub fn rotation_angle(time_seconds: f64) -> f32 {
     (progress * std::f64::consts::TAU) as f32
 }
 
-pub fn draw_button(ui: &mut egui::Ui) {
-    let response = ui.add_enabled(false, egui::Button::new("        Loading"));
-    let texture = super::loading_texture(ui.ctx());
-    let angle = ui.input(|i| rotation_angle(i.time));
-    let size = egui::vec2(
-        super::layout::INLINE_ICON_SIZE,
-        super::layout::INLINE_ICON_SIZE,
-    );
-    let icon_rect = egui::Rect::from_center_size(
-        egui::pos2(
-            response.rect.left() + super::layout::LOADING_BUTTON_ICON_CENTER_OFFSET_X,
-            response.rect.center().y,
-        ),
-        size,
-    );
-    egui::Image::new(egui::load::SizedTexture::new(texture.id(), size))
-        .rotate(angle, egui::Vec2::splat(0.5))
-        .paint_at(ui, icon_rect);
-    ui.ctx()
-        .request_repaint_after(std::time::Duration::from_millis(16));
-}
-
 pub fn draw_image_at(ui: &mut egui::Ui, rect: egui::Rect, tint: egui::Color32) {
     let texture = super::loading_texture(ui.ctx());
     let angle = ui.input(|i| rotation_angle(i.time));
