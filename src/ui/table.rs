@@ -389,6 +389,15 @@ fn open_asset_file(asset_type: AssetType, local_folder: &std::path::Path, slug: 
     }
 }
 
+fn thumbnail_source_path(prod_root: &std::path::Path, key: &RowKey) -> std::path::PathBuf {
+    prod_root
+        .join(key.asset_type.folder())
+        .join(&key.slug)
+        .join("staging")
+        .join("renders")
+        .join("thumbnail.png")
+}
+
 struct RowLayout {
     thumbnail_rect: Option<egui::Rect>,
     content_min: egui::Pos2,
@@ -463,12 +472,21 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
 
     let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     if let (Some(preview), Some(thumbnail_rect)) = (state.thumbnail_previews.get(key), row_layout.thumbnail_rect) {
-        ui.painter().image(
-            preview.texture.id(),
+        let thumbnail_response = ui.interact(
             thumbnail_rect,
-            uv_full,
-            egui::Color32::WHITE,
+            ui.id().with(("thumbnail", key.asset_type, &key.slug)),
+            egui::Sense::click(),
         );
+        ui.painter().image(preview.texture.id(), thumbnail_rect, uv_full, egui::Color32::WHITE);
+        if thumbnail_response.clicked() {
+            let source_path = thumbnail_source_path(&state.config.prod_root, key);
+            if source_path.is_file() {
+                let _ = open::that(source_path);
+            }
+        }
+        thumbnail_response
+            .on_hover_text("Open source image on Prod")
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
     }
 
     // Row 1 LTR: status pill + bold slug
@@ -1301,6 +1319,19 @@ mod tests {
             egui::pos2(10.0 + 96.0 + layout::ROW_SECTION_PADDING, 20.0)
         );
         assert_eq!(layout.content_w, 400.0 - 96.0 - layout::ROW_SECTION_PADDING);
+    }
+
+    #[test]
+    fn thumbnail_source_path_targets_prod_root() {
+        let key = crate::ui::RowKey {
+            asset_type: crate::ui::AssetType::Hdris,
+            slug: "asset".into(),
+        };
+
+        assert_eq!(
+            super::thumbnail_source_path(&std::path::PathBuf::from(r"C:\prod"), &key),
+            std::path::PathBuf::from(r"C:\prod\HDRIs\asset\staging\renders\thumbnail.png")
+        );
     }
 
     #[test]
