@@ -4,15 +4,16 @@ pub mod colors;
 mod dialogs;
 mod file_watcher;
 mod focus_refresh;
-pub mod layout;
 mod group_selector;
 mod jobs;
+pub mod layout;
 mod loading_indicator;
 mod menu;
 mod scripts;
 mod status_groups;
 mod table;
 mod textures;
+mod thumbnails;
 
 pub use textures::*;
 
@@ -27,10 +28,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::auth::{AuthTokens, BrowserLogin, LoggedInIdentity};
 use crate::config::Config;
 use crate::copy::job::{JobMsg, JobProgress, VerifyMsg};
 use crate::copy::plan::{build_plan_with_pull_filter, Direction, Plan, PullFilterMode};
-use crate::auth::{AuthTokens, BrowserLogin, LoggedInIdentity};
 use crate::notion::{AssetList, AssetStatus, StatusOption};
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
@@ -232,6 +233,10 @@ pub struct AppState {
     pub prod_folder_cache: HashMap<RowKey, bool>,
     /// Receiver for an in-flight background rebuild of `prod_folder_cache`.
     pub prod_cache_rx: Option<Receiver<HashMap<RowKey, bool>>>,
+    pub thumbnail_cache_root: PathBuf,
+    pub thumbnail_jobs: HashMap<RowKey, thumbnails::ThumbnailJob>,
+    pub thumbnail_previews: HashMap<RowKey, egui::TextureHandle>,
+    pub thumbnail_cleanup_rx: Option<Receiver<Result<usize, String>>>,
     /// Cached result of `is_dir()` for each asset's local working folder.
     /// Rebuilt synchronously (local disk) on focus gain and after pulls.
     pub local_folder_cache: HashMap<RowKey, bool>,
@@ -319,6 +324,12 @@ fn current_update_check_day() -> u64 {
         .unwrap_or(0)
 }
 
+fn thumbnail_cache_root() -> PathBuf {
+    crate::config::cache_dir()
+        .map(|dir| dir.join("thumbnails"))
+        .unwrap_or_else(|_| PathBuf::from("thumbnails"))
+}
+
 fn should_check_for_update(last_check_day: Option<u64>, current_day: u64) -> bool {
     last_check_day != Some(current_day)
 }
@@ -378,6 +389,10 @@ impl AppState {
             focus_refresh: focus_refresh::State::default(),
             prod_folder_cache: HashMap::new(),
             prod_cache_rx: None,
+            thumbnail_cache_root: thumbnail_cache_root(),
+            thumbnail_jobs: HashMap::new(),
+            thumbnail_previews: HashMap::new(),
+            thumbnail_cleanup_rx: None,
             local_folder_cache: HashMap::new(),
             dismissed_warning_keys: crate::validation::load_dismissed_warning_keys()
                 .unwrap_or_default(),
@@ -409,8 +424,7 @@ impl AppState {
         s.settings_local_root_input = s.config.local_root.display().to_string();
         s.settings_skip_pull_raw_tif_if_many_work_tifs =
             s.config.skip_pull_raw_tif_if_many_work_tifs;
-        s.settings_open_notion_links_in_desktop_app =
-            s.config.open_notion_links_in_desktop_app;
+        s.settings_open_notion_links_in_desktop_app = s.config.open_notion_links_in_desktop_app;
         s.refresh_logged_in_identity();
         // Warm the UI from cache immediately, then refresh in the background.
         for t in [AssetType::Hdris, AssetType::Textures] {
@@ -419,6 +433,7 @@ impl AppState {
             }
         }
         s.rebuild_prod_folder_cache();
+        s.start_thumbnail_cleanup();
         s.start_update_check();
         s
     }
@@ -642,6 +657,36 @@ impl AppState {
         }
     }
 
+    pub fn start_thumbnail_cleanup(&mut self) {
+        if self.thumbnail_cleanup_rx.is_some() {
+            return;
+        }
+        let cache_root = self.thumbnail_cache_root.clone();
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            let result = thumbnails::prune_thumbnail_cache(&cache_root);
+            let _ = tx.send(result);
+        });
+        self.thumbnail_cleanup_rx = Some(rx);
+    }
+
+    pub fn ensure_thumbnail_job(&mut self, key: &RowKey) {
+        if self.thumbnail_previews.contains_key(key) || self.thumbnail_jobs.contains_key(key) {
+            return;
+        }
+        let job = thumbnails::spawn_thumbnail_job(
+            self.thumbnail_cache_root.clone(),
+            self.config.local_root.clone(),
+            self.config.prod_root.clone(),
+            key.clone(),
+        );
+        self.thumbnail_jobs.insert(key.clone(), job);
+    }
+
+    fn thumbnail_texture_name(key: &RowKey) -> String {
+        format!("thumbnail:{}:{}", key.asset_type.order(), key.slug)
+    }
+
     /// Update the local cache for a single asset after a pull finishes.
     pub fn update_local_folder_cache_for(&mut self, key: &RowKey) {
         let exists = self.local_root_for(key.asset_type).join(&key.slug).is_dir();
@@ -692,7 +737,11 @@ impl AppState {
     /// Map a filesystem path to the asset it belongs to, by stripping the
     /// matching (case-insensitive) type-root prefix and taking the next
     /// component as the slug.
-    fn key_for_path(&self, path: &std::path::Path, source: file_watcher::WatchSource) -> Option<RowKey> {
+    fn key_for_path(
+        &self,
+        path: &std::path::Path,
+        source: file_watcher::WatchSource,
+    ) -> Option<RowKey> {
         for &asset_type in &self.selected_types {
             let root = match source {
                 file_watcher::WatchSource::Local => self.local_root_for(asset_type),
@@ -736,7 +785,10 @@ impl AppState {
         let prod_paths: Vec<(PathBuf, notify::RecursiveMode)> = if mode.is_real_time() {
             let mut paths = Vec::new();
             for &asset_type in &self.selected_types {
-                paths.push((self.prod_root_for(asset_type), notify::RecursiveMode::NonRecursive));
+                paths.push((
+                    self.prod_root_for(asset_type),
+                    notify::RecursiveMode::NonRecursive,
+                ));
             }
             for key in self.error_keys_with_prod_folder() {
                 let slug = self.prod_root_for(key.asset_type).join(&key.slug);
@@ -833,7 +885,11 @@ impl AppState {
         // 3. Handle mode transitions and poll ticks.
         let mode = self.watch_mode();
         if mode != self.last_watch_mode {
-            log::debug!("watcher mode change: {:?} -> {:?}", self.last_watch_mode, mode);
+            log::debug!(
+                "watcher mode change: {:?} -> {:?}",
+                self.last_watch_mode,
+                mode
+            );
             self.last_watch_mode = mode;
             self.watch_dirty = true;
             if let Some(interval) = mode.poll_interval() {
@@ -1040,7 +1096,18 @@ impl AppState {
     }
 
     /// Drain asset API + job channels each frame.
-    pub fn pump(&mut self) {
+    pub fn pump(&mut self, ctx: &egui::Context) {
+        if let Some(res) = self
+            .thumbnail_cleanup_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.thumbnail_cleanup_rx = None;
+            if let Err(err) = res {
+                log::warn!("Thumbnail cache cleanup failed: {err}");
+            }
+        }
+
         while let Some(msg) = self.auth_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             match msg {
                 AuthMsg::Started(login) => {
@@ -1246,15 +1313,17 @@ impl AppState {
                         if let Some(AssetListState::Loaded(list)) =
                             self.assets_by_type.get_mut(&key.asset_type)
                         {
-                            if let Some(asset) =
-                                list.assets.iter_mut().find(|a| a.slug == key.slug)
+                            if let Some(asset) = list.assets.iter_mut().find(|a| a.slug == key.slug)
                             {
                                 asset.slug = job.new_title.clone();
                             }
                             let _ = crate::cache::save(key.asset_type.cache_name(), list);
                         }
                         // Re-validate with the new slug key.
-                        let new_key = RowKey { asset_type: key.asset_type, slug: job.new_title };
+                        let new_key = RowKey {
+                            asset_type: key.asset_type,
+                            slug: job.new_title,
+                        };
                         self.start_validation_for_keys(vec![new_key]);
                     }
                     Err(msg) => {
@@ -1303,6 +1372,44 @@ impl AppState {
             self.prod_folder_cache = cache;
             self.prod_cache_rx = None;
             self.watch_dirty = true;
+        }
+
+        let thumbnail_keys: Vec<RowKey> = self.thumbnail_jobs.keys().cloned().collect();
+        for key in thumbnail_keys {
+            let result_opt = self
+                .thumbnail_jobs
+                .get(&key)
+                .and_then(|job| job.rx.try_recv().ok());
+            if let Some(result) = result_opt {
+                self.thumbnail_jobs.remove(&key);
+                match result {
+                    Ok(cache_path) => {
+                        match thumbnails::load_thumbnail_texture(
+                            ctx,
+                            &cache_path,
+                            &Self::thumbnail_texture_name(&key),
+                        ) {
+                            Ok(texture) => {
+                                self.thumbnail_previews.insert(key, texture);
+                            }
+                            Err(err) => {
+                                log::warn!(
+                                    "Failed to load thumbnail texture for {}/{}: {err}",
+                                    key.asset_type.folder(),
+                                    key.slug
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "Thumbnail generation failed for {}/{}: {err}",
+                            key.asset_type.folder(),
+                            key.slug
+                        );
+                    }
+                }
+            }
         }
 
         // Drain completed plan jobs and either open the conflict dialog or start copying.
@@ -1571,26 +1678,28 @@ fn active_file_action_status(state: &AppState) -> Option<String> {
 }
 
 fn logged_in_status_text(state: &AppState) -> Option<String> {
-    state.logged_in_identity.as_ref().map(|identity| {
-        format!("Logged in as {} [{}]", identity.name, identity.role)
-    }).or_else(|| {
-        state
-            .config
-            .has_access_token()
-            .then(|| "Logged in as Unknown [Unknown]".to_string())
-    })
+    state
+        .logged_in_identity
+        .as_ref()
+        .map(|identity| format!("Logged in as {} [{}]", identity.name, identity.role))
+        .or_else(|| {
+            state
+                .config
+                .has_access_token()
+                .then(|| "Logged in as Unknown [Unknown]".to_string())
+        })
 }
 
 fn draw_status_bar(state: &mut AppState, ctx: &egui::Context) {
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
         egui::Frame::none()
-        .inner_margin(egui::Margin::symmetric(
-            layout::STATUS_BAR_MARGIN_X,
-            layout::STATUS_BAR_MARGIN_Y,
-        ))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                draw_status_bar_primary(state, ui);
+            .inner_margin(egui::Margin::symmetric(
+                layout::STATUS_BAR_MARGIN_X,
+                layout::STATUS_BAR_MARGIN_Y,
+            ))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    draw_status_bar_primary(state, ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         draw_version_status(state, ui);
                     });
@@ -1640,7 +1749,6 @@ fn components_eq_ci(a: std::path::Component, b: std::path::Component) -> bool {
         .to_string_lossy()
         .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy())
 }
-
 
 fn draw_status_bar_primary(state: &mut AppState, ui: &mut egui::Ui) {
     if let Some(err) = state.error_banner.clone() {
@@ -1780,6 +1888,8 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         || state.update_check_rx.is_some()
         || state.update_install.is_some()
         || !state.transfer_estimate_jobs.is_empty()
+        || !state.thumbnail_jobs.is_empty()
+        || state.thumbnail_cleanup_rx.is_some()
         || !state.script_jobs.is_empty()
         || !state.script_queue.is_empty()
     {

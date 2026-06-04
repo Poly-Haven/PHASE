@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod cache;
 mod auth;
+mod cache;
 mod config;
 mod copy;
 mod notion;
@@ -98,7 +98,7 @@ impl eframe::App for App {
         });
 
         self.state.ensure_file_watcher(ctx);
-        self.state.pump();
+        self.state.pump(ctx);
         ui::draw(&mut self.state, ctx);
         if !self.state.jobs.is_empty()
             || !self.state.notion_rx.is_empty()
@@ -110,6 +110,8 @@ impl eframe::App for App {
             || !self.state.row_toasts.is_empty()
             || self.state.validation_job.is_some()
             || !self.state.transfer_estimate_jobs.is_empty()
+            || !self.state.thumbnail_jobs.is_empty()
+            || self.state.thumbnail_cleanup_rx.is_some()
             || !self.state.script_jobs.is_empty()
             || !self.state.script_queue.is_empty()
         {
