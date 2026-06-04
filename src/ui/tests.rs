@@ -58,6 +58,10 @@ fn test_state() -> super::AppState {
         focus_refresh: super::focus_refresh::State::default(),
         prod_folder_cache: HashMap::new(),
         prod_cache_rx: None,
+        thumbnail_cache_root: std::path::PathBuf::from("thumbnail-cache-test"),
+        thumbnail_jobs: HashMap::new(),
+        thumbnail_previews: HashMap::new(),
+        thumbnail_cleanup_rx: None,
         local_folder_cache: HashMap::new(),
         dismissed_warning_keys: HashSet::new(),
         validation_results: HashMap::new(),
@@ -153,8 +157,9 @@ fn needs_review_asset(slug: &str, author: &str) -> Asset {
 }
 
 fn pump_validation(state: &mut super::AppState) {
+    let ctx = egui::Context::default();
     for _ in 0..50 {
-        state.pump();
+        state.pump(&ctx);
         if state.validation_job.is_none() {
             return;
         }
@@ -266,7 +271,7 @@ fn transfer_estimate_uses_copy_plan_total_bytes() {
 
     state.start_transfer_estimate(&key, Direction::Push, true);
     for _ in 0..50 {
-        state.pump();
+        state.pump(&egui::Context::default());
         if state.transfer_estimate_jobs.is_empty() {
             break;
         }
@@ -386,7 +391,7 @@ fn folder_caches_rebuild_only_for_visible_assets() {
 
     state.rebuild_prod_folder_cache();
     for _ in 0..50 {
-        state.pump();
+        state.pump(&egui::Context::default());
         if state.prod_cache_rx.is_none() {
             break;
         }
@@ -508,6 +513,152 @@ fn visible_validation_scope_changes_when_filters_change_even_if_keys_do_not() {
             slug: "visible_hdri".into()
         }]
     );
+}
+
+#[test]
+fn thumbnail_source_prefers_local_source_then_prod() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.local_root = temp.path().join("local");
+    config.prod_root = temp.path().join("prod");
+    let key = super::RowKey {
+        asset_type: super::AssetType::Hdris,
+        slug: "asset".into(),
+    };
+
+    let local_source = config
+        .local_root
+        .join("HDRIs")
+        .join("asset")
+        .join("staging")
+        .join("renders")
+        .join("thumbnail.png");
+    let prod_source = config
+        .prod_root
+        .join("HDRIs")
+        .join("asset")
+        .join("staging")
+        .join("renders")
+        .join("thumbnail.png");
+    std::fs::create_dir_all(local_source.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(prod_source.parent().unwrap()).unwrap();
+    std::fs::write(&prod_source, b"prod").unwrap();
+
+    assert_eq!(
+        super::thumbnails::thumbnail_source_path(&config, &key),
+        Some(prod_source.clone())
+    );
+
+    std::fs::write(&local_source, b"local").unwrap();
+
+    assert_eq!(
+        super::thumbnails::thumbnail_source_path(&config, &key),
+        Some(local_source)
+    );
+}
+
+#[test]
+fn thumbnail_cache_key_includes_slug_mtime_and_size() {
+    let cache_root = tempfile::tempdir().unwrap();
+    let signature = super::thumbnails::ThumbnailSignature {
+        slug: "asset".into(),
+        source_mtime: 1_700_000_000,
+        source_size: 12_345,
+    };
+
+    let cache_path = super::thumbnails::thumbnail_cache_path(
+        cache_root.path(),
+        &signature,
+        super::thumbnails::ThumbnailFormat::WebP,
+    );
+    let filename = cache_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    assert!(filename.starts_with("asset-"));
+    assert!(filename.contains("1700000000"));
+    assert!(filename.contains("12345"));
+    assert!(filename.ends_with(".webp"));
+    assert!(cache_path.starts_with(cache_root.path()));
+}
+
+#[test]
+fn thumbnail_pruning_removes_entries_older_than_60_days() {
+    let cache_root = tempfile::tempdir().unwrap();
+    let signature = super::thumbnails::ThumbnailSignature {
+        slug: "asset".into(),
+        source_mtime: 1_700_000_000,
+        source_size: 12_345,
+    };
+    let fresh = super::thumbnails::thumbnail_cache_path(
+        cache_root.path(),
+        &signature,
+        super::thumbnails::ThumbnailFormat::WebP,
+    );
+    let stale = super::thumbnails::thumbnail_cache_path(
+        cache_root.path(),
+        &super::thumbnails::ThumbnailSignature {
+            slug: "old".into(),
+            source_mtime: 1_700_000_001,
+            source_size: 9_999,
+        },
+        super::thumbnails::ThumbnailFormat::Png,
+    );
+    std::fs::write(&fresh, b"fresh").unwrap();
+    std::fs::write(&stale, b"stale").unwrap();
+    let old_time = filetime::FileTime::from_unix_time(1_500_000_000, 0);
+    filetime::set_file_mtime(&stale, old_time).unwrap();
+
+    let removed = super::thumbnails::prune_thumbnail_cache(cache_root.path()).unwrap();
+
+    assert_eq!(removed, 1);
+    assert!(fresh.exists());
+    assert!(!stale.exists());
+}
+
+#[test]
+fn thumbnail_generation_loads_a_texture_preview_on_the_ui_thread() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = test_state();
+    state.config.local_root = temp.path().join("local");
+    state.config.prod_root = temp.path().join("prod");
+    state.thumbnail_cache_root = temp.path().join("thumbs");
+    let key = super::RowKey {
+        asset_type: super::AssetType::Hdris,
+        slug: "asset".into(),
+    };
+    let source = state
+        .config
+        .local_root
+        .join("HDRIs")
+        .join("asset")
+        .join("staging")
+        .join("renders")
+        .join("thumbnail.png");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]))
+        .save(&source)
+        .unwrap();
+
+    state.ensure_thumbnail_job(&key);
+    let ctx = egui::Context::default();
+    for _ in 0..50 {
+        state.pump(&ctx);
+        if state.thumbnail_jobs.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    assert!(state.thumbnail_jobs.is_empty());
+    assert!(state.thumbnail_previews.contains_key(&key));
+    assert!(!std::fs::read_dir(&state.thumbnail_cache_root)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -678,14 +829,18 @@ fn error_keys_with_prod_folder_only_includes_errored_visible_assets_with_prod_fo
         text: "boom".into(),
         dismiss_id: None,
     }];
-    state.validation_results.insert(errored.clone(), error_finding.clone());
+    state
+        .validation_results
+        .insert(errored.clone(), error_finding.clone());
     state.validation_results.insert(clean.clone(), Vec::new());
     state
         .validation_results
         .insert(errored_no_folder.clone(), error_finding);
     state.prod_folder_cache.insert(errored.clone(), true);
     state.prod_folder_cache.insert(clean.clone(), true);
-    state.prod_folder_cache.insert(errored_no_folder.clone(), false);
+    state
+        .prod_folder_cache
+        .insert(errored_no_folder.clone(), false);
 
     let keys = state.error_keys_with_prod_folder();
     assert_eq!(keys, vec![errored]);

@@ -176,10 +176,7 @@ impl RowView {
         if let Some(text) = crate::slug::message(&a.slug) {
             let fixed = crate::slug::fix(&a.slug);
             let (action, display_text) = if !fixed.is_empty() && fixed != a.slug {
-                (
-                    Some(RowMsgAction::RenameTitle(fixed)),
-                    format!("{text} ·"),
-                )
+                (Some(RowMsgAction::RenameTitle(fixed)), format!("{text} ·"))
             } else {
                 (None, text)
             };
@@ -209,7 +206,9 @@ impl RowView {
                 dismiss_key: None,
             });
         }
-        if exists_local && crate::validation::status_has_passed_review(a.status.as_ref(), status_options) {
+        if exists_local
+            && crate::validation::status_has_passed_review(a.status.as_ref(), status_options)
+        {
             messages.push(RowMsg {
                 kind: MsgKind::Info,
                 text: "Passed review;".into(),
@@ -256,7 +255,10 @@ impl RowView {
             })
             .cloned()
             .collect::<Vec<_>>();
-        if filtered.iter().any(|msg| matches!(msg.kind, MsgKind::Error)) {
+        if filtered
+            .iter()
+            .any(|msg| matches!(msg.kind, MsgKind::Error))
+        {
             filtered
                 .into_iter()
                 .filter(|msg| matches!(msg.kind, MsgKind::Error))
@@ -391,12 +393,21 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     let row_height = layout::ROW_HEIGHT;
     let avail = ui.available_rect_before_wrap();
     let avail_w = avail.width();
+    state.ensure_thumbnail_job(key);
+    let thumbnail_rect = egui::Rect::from_min_size(avail.min, egui::vec2(row_height, row_height));
+    let content_min = egui::pos2(
+        avail.min.x + row_height + layout::ROW_SECTION_PADDING,
+        avail.min.y,
+    );
+    let content_w = (avail_w - row_height - layout::ROW_SECTION_PADDING).max(0.0);
     let row_rect = egui::Rect::from_min_size(avail.min, egui::vec2(avail_w, row_height));
-    let row1_rect =
-        egui::Rect::from_min_size(avail.min, egui::vec2(avail_w, layout::ROW_PRIMARY_HEIGHT));
+    let row1_rect = egui::Rect::from_min_size(
+        content_min,
+        egui::vec2(content_w, layout::ROW_PRIMARY_HEIGHT),
+    );
     let row2_rect = egui::Rect::from_min_size(
-        avail.min + egui::vec2(0.0, layout::ROW_PRIMARY_HEIGHT),
-        egui::vec2(avail_w, layout::ROW_SECONDARY_HEIGHT),
+        content_min + egui::vec2(0.0, layout::ROW_PRIMARY_HEIGHT),
+        egui::vec2(content_w, layout::ROW_SECONDARY_HEIGHT),
     );
 
     ui.painter()
@@ -424,6 +435,14 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     });
 
     let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    if let Some(tex) = state.thumbnail_previews.get(key) {
+        ui.painter().image(
+            tex.id(),
+            thumbnail_rect.shrink(2.0),
+            uv_full,
+            egui::Color32::WHITE,
+        );
+    }
 
     // Row 1 LTR: status pill + bold slug
     ui.allocate_ui_at_rect(row1_rect, |ui| {
@@ -433,14 +452,11 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
             ui.add_space(layout::ROW_SECTION_PADDING);
             if row.exists_on_prod {
                 let font_id = egui::TextStyle::Body.resolve(ui.style());
-                let galley = ui.fonts(|f| {
-                    f.layout_no_wrap(row.slug.clone(), font_id, egui::Color32::WHITE)
-                });
+                let galley =
+                    ui.fonts(|f| f.layout_no_wrap(row.slug.clone(), font_id, egui::Color32::WHITE));
                 let slug_size = galley.rect.size();
-                let slug_start = egui::pos2(
-                    ui.cursor().min.x,
-                    row1_rect.center().y - slug_size.y / 2.0,
-                );
+                let slug_start =
+                    egui::pos2(ui.cursor().min.x, row1_rect.center().y - slug_size.y / 2.0);
                 let slug_rect = egui::Rect::from_min_size(slug_start, slug_size);
                 let is_hovered = ui.rect_contains_pointer(slug_rect);
                 let slug_color = if is_hovered {
@@ -450,10 +466,8 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                 };
                 let slug_resp = ui
                     .add(
-                        egui::Label::new(
-                            egui::RichText::new(&row.slug).strong().color(slug_color),
-                        )
-                        .sense(egui::Sense::click()),
+                        egui::Label::new(egui::RichText::new(&row.slug).strong().color(slug_color))
+                            .sense(egui::Sense::click()),
                     )
                     .on_hover_text("Open asset file")
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -491,12 +505,20 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
         let done = state
             .jobs
             .get(key)
-            .map(|j| j.progress.bytes_done.load(std::sync::atomic::Ordering::Relaxed))
+            .map(|j| {
+                j.progress
+                    .bytes_done
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            })
             .unwrap_or(0);
         let tot = state
             .jobs
             .get(key)
-            .map(|j| j.progress.bytes_total.load(std::sync::atomic::Ordering::Relaxed))
+            .map(|j| {
+                j.progress
+                    .bytes_total
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            })
             .unwrap_or(0);
         let x_tex = super::x_icon_texture(ui.ctx());
         ui.allocate_ui_at_rect(row1_rect, |ui| {
@@ -532,10 +554,16 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                 }
                 if let Some(p) = push_preview {
                     if p.file_count > 0 {
-                        let preview_color =
-                            if push.enabled { colors::PUSH } else { colors::TEXT_DISABLED };
-                        let sense =
-                            if push.enabled { egui::Sense::click() } else { egui::Sense::hover() };
+                        let preview_color = if push.enabled {
+                            colors::PUSH
+                        } else {
+                            colors::TEXT_DISABLED
+                        };
+                        let sense = if push.enabled {
+                            egui::Sense::click()
+                        } else {
+                            egui::Sense::hover()
+                        };
                         let cursor = if push.enabled {
                             egui::CursorIcon::PointingHand
                         } else {
@@ -573,8 +601,14 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
             ui.add_space(layout::ROW_SECTION_PADDING);
             draw_row_context_button(state, ui, key, row);
             ui.add_space(layout::ROW_INTRA_ICON_GAP);
-            if icon_button(ui, &folder_tex, local_exists, colors::TEXT_PRIMARY, "Open local folder")
-                .clicked()
+            if icon_button(
+                ui,
+                &folder_tex,
+                local_exists,
+                colors::TEXT_PRIMARY,
+                "Open local folder",
+            )
+            .clicked()
             {
                 let _ = open::that(&local_folder);
             }
@@ -591,11 +625,10 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                 let _ = open::that(&prod_folder);
             }
             ui.add_space(layout::ROW_INTRA_ICON_GAP);
-            let (notion_rect, notion_resp) =
-                ui.allocate_exact_size(
-                    egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
-                    egui::Sense::click(),
-                );
+            let (notion_rect, notion_resp) = ui.allocate_exact_size(
+                egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
+                egui::Sense::click(),
+            );
             if ui.is_rect_visible(notion_rect) {
                 let base_tint = text_color.linear_multiply(0.6);
                 let tint = if notion_resp.hovered() {
@@ -640,10 +673,16 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                 }
                 if let Some(p) = pull_preview {
                     if p.file_count > 0 {
-                        let preview_color =
-                            if pull.enabled { colors::PULL } else { colors::TEXT_DISABLED };
-                        let sense =
-                            if pull.enabled { egui::Sense::click() } else { egui::Sense::hover() };
+                        let preview_color = if pull.enabled {
+                            colors::PULL
+                        } else {
+                            colors::TEXT_DISABLED
+                        };
+                        let sense = if pull.enabled {
+                            egui::Sense::click()
+                        } else {
+                            egui::Sense::hover()
+                        };
                         let cursor = if pull.enabled {
                             egui::CursorIcon::PointingHand
                         } else {
@@ -782,17 +821,16 @@ fn handle_row_message_action(state: &mut AppState, key: &RowKey, action: &RowMsg
             state.pending_local_folder_delete = Some(key.clone());
         }
         RowMsgAction::RenameTitle(new_title) => {
-            if let Some(page_id) = state
-                .assets_by_type
-                .get(&key.asset_type)
-                .and_then(|s| {
-                    if let AssetListState::Loaded(list) = s {
-                        list.assets.iter().find(|a| a.slug == key.slug).map(|a| a.page_id.clone())
-                    } else {
-                        None
-                    }
-                })
-            {
+            if let Some(page_id) = state.assets_by_type.get(&key.asset_type).and_then(|s| {
+                if let AssetListState::Loaded(list) = s {
+                    list.assets
+                        .iter()
+                        .find(|a| a.slug == key.slug)
+                        .map(|a| a.page_id.clone())
+                } else {
+                    None
+                }
+            }) {
                 super::start_title_rename(state, key, &page_id, new_title);
             }
         }
@@ -964,12 +1002,14 @@ fn colored_status_option(
     } else {
         bg
     };
-    ui.painter()
-        .rect_filled(
-            rect.shrink2(egui::vec2(layout::STATUS_OPTION_INSET, layout::STATUS_OPTION_INSET)),
-            layout::STATUS_OPTION_ROUNDING,
-            fill,
-        );
+    ui.painter().rect_filled(
+        rect.shrink2(egui::vec2(
+            layout::STATUS_OPTION_INSET,
+            layout::STATUS_OPTION_INSET,
+        )),
+        layout::STATUS_OPTION_ROUNDING,
+        fill,
+    );
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
@@ -1281,10 +1321,7 @@ mod tests {
             &HashSet::new(),
         );
 
-        assert!(row
-            .messages
-            .iter()
-            .any(|msg| msg.text == "Passed review;"));
+        assert!(row.messages.iter().any(|msg| msg.text == "Passed review;"));
     }
 
     #[test]
