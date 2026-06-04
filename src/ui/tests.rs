@@ -69,6 +69,14 @@ fn test_state() -> super::AppState {
         transfer_estimates: HashMap::new(),
         transfer_estimate_jobs: HashMap::new(),
         search_query: String::new(),
+        file_watcher: None,
+        last_activity_at: Instant::now(),
+        watcher_was_focused: false,
+        last_watch_mode: super::file_watcher::WatchMode::RealTime,
+        next_poll_at: Instant::now(),
+        watch_dirty: true,
+        watch_pending: HashMap::new(),
+        pending_validation_keys: HashSet::new(),
     }
 }
 
@@ -418,6 +426,9 @@ fn starting_visible_validation_keeps_cached_results_in_memory() {
 
 #[test]
 fn periodic_validation_refresh_picks_up_external_prod_changes() {
+    // The activity-aware poll only re-checks prod for assets that ALREADY have a
+    // validation error (and an existing prod folder), so this test starts from an
+    // errored asset and confirms an external prod fix resolves it on the next poll.
     let temp = tempfile::tempdir().unwrap();
     let slug = "pansy_shell_beach_drone";
     let key = super::RowKey {
@@ -427,10 +438,8 @@ fn periodic_validation_refresh_picks_up_external_prod_changes() {
     let local_asset_root = temp.path().join("local").join("HDRIs").join(slug);
     let prod_asset_root = temp.path().join("prod").join("HDRIs").join(slug);
     std::fs::create_dir_all(&local_asset_root).unwrap();
-    let staging = prod_asset_root.join("staging");
-    std::fs::create_dir_all(&staging).unwrap();
-    std::fs::write(staging.join(format!("{slug}.exr")), b"ok").unwrap();
-    std::fs::write(staging.join("colorchart.zip"), b"ok").unwrap();
+    // Prod folder exists but staging is missing -> needs-review HDRI is in error.
+    std::fs::create_dir_all(&prod_asset_root).unwrap();
 
     let mut state = test_state();
     state.config.local_root = temp.path().join("local");
@@ -447,24 +456,25 @@ fn periodic_validation_refresh_picks_up_external_prod_changes() {
 
     state.start_validation_for_visible_assets();
     pump_validation(&mut state);
-    assert_eq!(state.validation_results.get(&key), Some(&Vec::new()));
+    state.update_prod_folder_cache_for(&key);
 
-    std::fs::rename(&staging, prod_asset_root.join("staging_")).unwrap();
-
-    let started = std::time::Instant::now();
-    state.start_validation_if_stale(started, true);
-    assert!(state.validation_job.is_none());
-
-    state.start_validation_if_stale(started + std::time::Duration::from_secs(3), true);
-    pump_validation(&mut state);
-
-    let findings = state.validation_results.get(&key).unwrap();
-    assert!(findings
+    // The asset is currently errored and therefore eligible for prod monitoring.
+    let errored = state.validation_results.get(&key).unwrap();
+    assert!(errored
         .iter()
         .any(|finding| finding.text == format!("Missing /staging/{slug}.exr in Prod")));
-    assert!(findings
-        .iter()
-        .any(|finding| finding.text == "Missing /staging/colorchart.zip in Prod"));
+    assert!(state.error_keys_with_prod_folder().contains(&key));
+
+    // Fix prod externally, then run a poll tick: the error should resolve.
+    let staging = prod_asset_root.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join(format!("{slug}.exr")), b"ok").unwrap();
+    std::fs::write(staging.join("colorchart.zip"), b"ok").unwrap();
+
+    state.poll_prod_error_assets();
+    pump_validation(&mut state);
+
+    assert_eq!(state.validation_results.get(&key), Some(&Vec::new()));
 }
 
 #[test]
@@ -550,3 +560,124 @@ fn error_message_replaces_active_progress_text_while_visible() {
         .iter()
         .any(|(text, _)| { text.contains("Uploading HDRIs/foo/bar.xyz to Prod") }));
 }
+
+#[test]
+fn key_for_path_maps_prod_and_local_paths_case_insensitively() {
+    let mut state = test_state();
+    state.config.local_root = std::path::PathBuf::from("C:\\PHASE");
+    state.config.prod_root = std::path::PathBuf::from("P:\\Assets");
+    state.selected_types = vec![super::AssetType::Hdris, super::AssetType::Textures];
+
+    let prod_key = state.key_for_path(
+        std::path::Path::new("P:\\Assets\\HDRIs\\beach_tide_pools\\staging\\x.exr"),
+        super::file_watcher::WatchSource::Prod,
+    );
+    assert_eq!(
+        prod_key,
+        Some(super::RowKey {
+            asset_type: super::AssetType::Hdris,
+            slug: "beach_tide_pools".into(),
+        })
+    );
+
+    // Case-insensitive drive/folder matching (Windows paths vary in casing).
+    let local_key = state.key_for_path(
+        std::path::Path::new("c:\\phase\\Textures\\forest_floor\\work"),
+        super::file_watcher::WatchSource::Local,
+    );
+    assert_eq!(
+        local_key,
+        Some(super::RowKey {
+            asset_type: super::AssetType::Textures,
+            slug: "forest_floor".into(),
+        })
+    );
+
+    // A path outside the watched roots maps to nothing.
+    assert_eq!(
+        state.key_for_path(
+            std::path::Path::new("D:\\Other\\HDRIs\\foo"),
+            super::file_watcher::WatchSource::Prod,
+        ),
+        None
+    );
+    // The type root itself (no slug component) maps to nothing.
+    assert_eq!(
+        state.key_for_path(
+            std::path::Path::new("P:\\Assets\\HDRIs"),
+            super::file_watcher::WatchSource::Prod,
+        ),
+        None
+    );
+}
+
+#[test]
+fn error_keys_with_prod_folder_only_includes_errored_visible_assets_with_prod_folder() {
+    let mut state = test_state();
+    let errored = super::RowKey {
+        asset_type: super::AssetType::Hdris,
+        slug: "errored".into(),
+    };
+    let clean = super::RowKey {
+        asset_type: super::AssetType::Hdris,
+        slug: "clean".into(),
+    };
+    let errored_no_folder = super::RowKey {
+        asset_type: super::AssetType::Hdris,
+        slug: "errored_no_folder".into(),
+    };
+    state.assets_by_type.insert(
+        super::AssetType::Hdris,
+        super::AssetListState::Loaded(AssetList {
+            assets: vec![
+                asset("errored", "Alice", StatusGroup::InProgress),
+                asset("clean", "Alice", StatusGroup::InProgress),
+                asset("errored_no_folder", "Alice", StatusGroup::InProgress),
+            ],
+            statuses: Vec::new(),
+        }),
+    );
+    state.selected_types = vec![super::AssetType::Hdris];
+    state.selected_status_groups = vec![StatusGroup::InProgress];
+
+    let error_finding = vec![crate::validation::Finding {
+        severity: crate::validation::Severity::Error,
+        text: "boom".into(),
+        dismiss_id: None,
+    }];
+    state.validation_results.insert(errored.clone(), error_finding.clone());
+    state.validation_results.insert(clean.clone(), Vec::new());
+    state
+        .validation_results
+        .insert(errored_no_folder.clone(), error_finding);
+    state.prod_folder_cache.insert(errored.clone(), true);
+    state.prod_folder_cache.insert(clean.clone(), true);
+    state.prod_folder_cache.insert(errored_no_folder.clone(), false);
+
+    let keys = state.error_keys_with_prod_folder();
+    assert_eq!(keys, vec![errored]);
+}
+
+#[test]
+fn queue_revalidation_coalesces_while_a_job_is_running() {
+    let mut state = test_state();
+    let key_a = super::RowKey {
+        asset_type: super::AssetType::Hdris,
+        slug: "a".into(),
+    };
+    let key_b = super::RowKey {
+        asset_type: super::AssetType::Hdris,
+        slug: "b".into(),
+    };
+    // Simulate an in-flight validation job so the queue must defer.
+    let (_tx, rx) = channel();
+    state.validation_job = Some(super::ValidationJob { rx });
+
+    state.queue_revalidation(vec![key_a.clone()]);
+    state.queue_revalidation(vec![key_b.clone()]);
+
+    // Nothing started a new job; both keys are queued for when the job finishes.
+    assert!(state.pending_validation_keys.contains(&key_a));
+    assert!(state.pending_validation_keys.contains(&key_b));
+}
+

@@ -255,12 +255,14 @@ impl RowView {
             })
             .cloned()
             .collect::<Vec<_>>();
-        filtered
-            .iter()
-            .find(|msg| matches!(msg.kind, MsgKind::Error))
-            .cloned()
-            .map(|msg| vec![msg])
-            .unwrap_or(filtered)
+        if filtered.iter().any(|msg| matches!(msg.kind, MsgKind::Error)) {
+            filtered
+                .into_iter()
+                .filter(|msg| matches!(msg.kind, MsgKind::Error))
+                .collect()
+        } else {
+            filtered
+        }
     }
 
     fn msg_kind_from_validation_severity(severity: crate::validation::Severity) -> MsgKind {

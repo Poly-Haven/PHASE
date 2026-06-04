@@ -97,6 +97,7 @@ impl eframe::App for App {
             }
         });
 
+        self.state.ensure_file_watcher(ctx);
         self.state.pump();
         ui::draw(&mut self.state, ctx);
         if !self.state.jobs.is_empty()
