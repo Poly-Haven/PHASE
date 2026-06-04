@@ -125,6 +125,7 @@ pub struct RowToast {
 }
 
 pub struct ThumbnailPreview {
+    #[cfg(test)]
     pub signature: thumbnails::ThumbnailSignature,
     pub texture: egui::TextureHandle,
 }
@@ -1468,6 +1469,7 @@ impl AppState {
                                 self.thumbnail_previews.insert(
                                     key,
                                     ThumbnailPreview {
+                                        #[cfg(test)]
                                         signature: result.signature,
                                         texture,
                                     },
