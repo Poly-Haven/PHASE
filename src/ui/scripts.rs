@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, ExitStatus, Stdio};
@@ -10,6 +11,7 @@ use super::{colors, layout, AppState, AssetType, RowKey};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ScriptKind {
     Normalize,
+    Render,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -19,20 +21,69 @@ pub struct ScriptKey {
 }
 
 pub struct ScriptJob {
-    pub kind: ScriptKind,
+    pub key: ScriptKey,
     pub rx: Receiver<ScriptEvent>,
     pub started_at: Instant,
     pub output: String,
 }
 
+pub struct QueuedScript {
+    pub key: ScriptKey,
+    spec: ScriptSpec,
+    depends_on: Vec<ScriptKey>,
+}
+
 #[derive(Clone)]
 pub struct ScriptRun {
     pub kind: ScriptKind,
+    pub status: ScriptRunStatus,
     pub output: String,
     pub started_at: Instant,
     pub finished_at: Instant,
-    pub exit_code: Option<i32>,
-    pub succeeded: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScriptRunStatus {
+    Succeeded,
+    Failed,
+    Blocked,
+}
+
+impl ScriptRun {
+    fn succeeded(kind: ScriptKind, output: String, started_at: Instant, finished_at: Instant) -> Self {
+        Self {
+            kind,
+            status: ScriptRunStatus::Succeeded,
+            output,
+            started_at,
+            finished_at,
+        }
+    }
+
+    fn failed(kind: ScriptKind, output: String, started_at: Instant, finished_at: Instant) -> Self {
+        Self {
+            kind,
+            status: ScriptRunStatus::Failed,
+            output,
+            started_at,
+            finished_at,
+        }
+    }
+
+    fn blocked(kind: ScriptKind, output: String) -> Self {
+        let now = Instant::now();
+        Self {
+            kind,
+            status: ScriptRunStatus::Blocked,
+            output,
+            started_at: now,
+            finished_at: now,
+        }
+    }
+
+    pub fn succeeded_flag(&self) -> bool {
+        matches!(self.status, ScriptRunStatus::Succeeded)
+    }
 }
 
 pub enum ScriptEvent {
@@ -53,78 +104,109 @@ pub fn draw_context_menu(
     notion_url: &str,
     open_notion_in_app: bool,
 ) {
+    if state.is_admin() && matches!(key.asset_type, AssetType::Hdris) {
+        draw_script_button(ui, state, key, "Normalize & Render", ScriptAction::NormalizeAndRender);
+        draw_script_button(ui, state, key, "Normalize", ScriptAction::Normalize);
+        draw_script_button(ui, state, key, "Render", ScriptAction::Render);
+    }
+
     if ui.button("Open on Notion").clicked() {
         open_notion_link(notion_url, open_notion_in_app);
         ui.close_menu();
     }
+}
 
-    if state.is_admin() && matches!(key.asset_type, AssetType::Hdris) {
-        let running = state.script_jobs.contains_key(&ScriptKey {
-            row: key.clone(),
-            kind: ScriptKind::Normalize,
-        });
-        if ui
-            .add_enabled(!running, egui::Button::new("Normalize"))
-            .clicked()
-        {
-            start(state, key, ScriptKind::Normalize);
-            ui.close_menu();
-        }
+fn draw_script_button(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    key: &RowKey,
+    label: &str,
+    action: ScriptAction,
+) {
+    let scheduled = action
+        .kinds()
+        .iter()
+        .all(|kind| script_is_scheduled(state, key, *kind));
+    if ui.add_enabled(!scheduled, egui::Button::new(label)).clicked() {
+        enqueue_action(state, key, action);
+        ui.close_menu();
     }
 }
 
 pub fn draw_row_status(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey) {
-    let script_key = ScriptKey {
-        row: key.clone(),
-        kind: ScriptKind::Normalize,
-    };
-
-    if state.script_jobs.contains_key(&script_key) {
+    if let Some(active_kind) = active_script_kind_for_row(state, key) {
         ui.add_space(layout::ROW_INTRA_ICON_GAP);
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
-            egui::Sense::click(),
-        );
-        super::loading_indicator::draw_image_at(ui, rect, egui::Color32::WHITE);
-        if response
-            .on_hover_text("View Normalize output")
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .clicked()
-        {
-            state.script_output_dialog = Some(script_key);
-        }
+        ui.horizontal(|ui| {
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
+                egui::Sense::click(),
+            );
+            super::loading_indicator::draw_image_at(ui, rect, egui::Color32::WHITE);
+            if response
+                .on_hover_text("View script output")
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                if let Some(key) = active_script_key(state, key) {
+                    state.script_output_dialog = Some(key);
+                }
+            }
+            ui.add_space(layout::ROW_INTRA_ICON_GAP);
+            ui.label(egui::RichText::new(active_kind.label()).color(colors::TEXT_PRIMARY));
+        });
         return;
     }
 
-    let failed = state
-        .script_results
-        .get(&script_key)
-        .map(|run| !run.succeeded)
-        .unwrap_or(false);
-    if failed {
+    if script_is_queued_for_row(state, key) {
+        ui.add_space(layout::ROW_INTRA_ICON_GAP);
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
+                egui::Sense::hover(),
+            );
+            super::loading_indicator::draw_image_at(ui, rect, egui::Color32::WHITE);
             ui.add_space(layout::ROW_INTRA_ICON_GAP);
-            ui.horizontal(|ui| {
-                let tex = super::warn_icon_texture(ui.ctx());
-                ui.add(
-                    egui::Image::new(egui::load::SizedTexture::new(
-                        tex.id(),
-                        egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
-                    ))
-                    .tint(colors::MSG_WARNING),
-                );
-                let resp = ui
-                    .add(
-                        egui::Label::new(
-                            egui::RichText::new(ScriptKind::Normalize.failed_label())
-                                .color(colors::MSG_WARNING),
-                        )
-                        .sense(egui::Sense::click()),
+            ui.label(egui::RichText::new("Queued").color(colors::TEXT_DISABLED));
+        });
+        return;
+    }
+
+    if let Some(run) = latest_alert_run_for_row(state, key) {
+        let failed_kind = run.kind;
+        let failed_status = run.status;
+        ui.add_space(layout::ROW_INTRA_ICON_GAP);
+        ui.horizontal(|ui| {
+            let tex = match failed_kind {
+                ScriptKind::Normalize => super::warn_icon_texture(ui.ctx()),
+                ScriptKind::Render => super::warn_icon_texture(ui.ctx()),
+            };
+            ui.add(
+                egui::Image::new(egui::load::SizedTexture::new(
+                    tex.id(),
+                    egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
+                ))
+                .tint(colors::MSG_WARNING),
+            );
+            ui.add_space(layout::ROW_INTRA_ICON_GAP);
+            let resp = ui
+                .add(
+                    egui::Label::new(
+                        egui::RichText::new(match failed_status {
+                            ScriptRunStatus::Blocked => format!("{} blocked", failed_kind.label()),
+                            _ => failed_kind.failed_label().to_string(),
+                        })
+                        .color(colors::MSG_WARNING),
                     )
-                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                if resp.clicked() {
-                    state.script_output_dialog = Some(script_key);
-                }
-            });
+                    .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if resp.clicked() {
+                state.script_output_dialog = Some(ScriptKey {
+                    row: key.clone(),
+                    kind: failed_kind,
+                });
+            }
+        });
     }
 }
 
@@ -134,16 +216,12 @@ pub fn draw_output_dialog(state: &mut AppState, ctx: &egui::Context) {
     };
 
     if let Some(job) = state.script_jobs.get(&script_key) {
-        let kind = job.kind;
-        let output = job.output.clone();
-        let duration = job.started_at.elapsed();
         draw_dialog_contents(
             ctx,
             state,
             &script_key,
-            kind,
-            output,
-            duration,
+            DialogState::Running(job.key.kind),
+            job.output.clone(),
         );
         return;
     }
@@ -156,43 +234,52 @@ pub fn draw_output_dialog(state: &mut AppState, ctx: &egui::Context) {
         ctx,
         state,
         &script_key,
-        run.kind,
+        match run.status {
+            ScriptRunStatus::Succeeded => {
+                DialogState::Succeeded(run.kind, run.finished_at.saturating_duration_since(run.started_at))
+            }
+            ScriptRunStatus::Failed => DialogState::Failed(run.kind),
+            ScriptRunStatus::Blocked => DialogState::Blocked(run.kind),
+        },
         run.output,
-        run.finished_at.saturating_duration_since(run.started_at),
     );
 }
 
 pub fn pump(state: &mut AppState) {
-    let keys: Vec<_> = state.script_jobs.keys().cloned().collect();
-    for key in keys {
+    if let Some(active_key) = state.script_jobs.keys().next().cloned() {
         let mut finished: Option<ScriptRun> = None;
-        if let Some(job) = state.script_jobs.get_mut(&key) {
+        if let Some(job) = state.script_jobs.get_mut(&active_key) {
             while let Ok(event) = job.rx.try_recv() {
                 match event {
                     ScriptEvent::Output(text) => job.output.push_str(&text),
                     ScriptEvent::FailedToStart(message) => {
-                        let output = if job.output.is_empty() {
-                            message
-                        } else {
-                            format!("{}\n{}", message, job.output)
-                        };
-                        finished = Some(ScriptRun {
-                            kind: job.kind,
-                            output,
-                            started_at: job.started_at,
-                            finished_at: Instant::now(),
-                            exit_code: None,
-                            succeeded: false,
-                        });
+                        finished = Some(ScriptRun::failed(
+                            job.key.kind,
+                            if job.output.is_empty() {
+                                message
+                            } else {
+                                format!("{}\n{}", message, job.output)
+                            },
+                            job.started_at,
+                            Instant::now(),
+                        ));
                     }
                     ScriptEvent::Finished { exit_status } => {
-                        finished = Some(ScriptRun {
-                            kind: job.kind,
-                            output: job.output.clone(),
-                            started_at: job.started_at,
-                            finished_at: Instant::now(),
-                            exit_code: exit_status.code(),
-                            succeeded: exit_status.success(),
+                        let finished_at = Instant::now();
+                        finished = Some(if exit_status.success() {
+                            ScriptRun::succeeded(
+                                job.key.kind,
+                                job.output.clone(),
+                                job.started_at,
+                                finished_at,
+                            )
+                        } else {
+                            ScriptRun::failed(
+                                job.key.kind,
+                                job.output.clone(),
+                                job.started_at,
+                                finished_at,
+                            )
                         });
                     }
                 }
@@ -200,43 +287,91 @@ pub fn pump(state: &mut AppState) {
         }
 
         if let Some(run) = finished {
-            let succeeded = run.succeeded;
-            let duration = format_duration(run.finished_at.saturating_duration_since(run.started_at));
+            let key = active_key.clone();
+            let success = run.succeeded_flag();
             state.script_results.insert(key.clone(), run);
             state.script_jobs.remove(&key);
-            if succeeded {
+            if success {
                 state.row_toasts.insert(
                     key.row.clone(),
                     super::RowToast {
-                        text: format!("{} in {duration}", ScriptKind::Normalize.success_label()),
+                        text: format!(
+                            "{} in {}",
+                            key.kind.success_label(),
+                            format_duration(
+                                state
+                                    .script_results
+                                    .get(&key)
+                                    .map(|run| run.finished_at.saturating_duration_since(run.started_at))
+                                    .unwrap_or_else(|| Duration::from_secs(1))
+                            )
+                        ),
                         created_at: Instant::now(),
                     },
                 );
+            } else {
+                block_dependents(state, &key);
             }
         }
     }
+
+    resolve_blocked_tasks(state);
+    start_next_ready_task(state);
 }
 
-pub fn start(state: &mut AppState, key: &RowKey, kind: ScriptKind) {
-    let script_key = ScriptKey {
-        row: key.clone(),
-        kind,
-    };
-    if state.script_jobs.contains_key(&script_key) {
+pub fn enqueue_action(state: &mut AppState, key: &RowKey, action: ScriptAction) {
+    let kinds = action.kinds();
+    let mut depends_on = Vec::new();
+
+    for &kind in kinds {
+        let script_key = ScriptKey {
+            row: key.clone(),
+            kind,
+        };
+
+        if script_is_scheduled(state, key, kind) {
+            depends_on = vec![script_key.clone()];
+            continue;
+        }
+
+        let Some(spec) = script_spec(state, key, kind) else {
+            state.error_banner = Some(format!("Could not resolve script path for {}", kind.label()));
+            return;
+        };
+        state.script_results.remove(&script_key);
+        state.script_queue.push_back(QueuedScript {
+            key: script_key.clone(),
+            spec,
+            depends_on: depends_on.clone(),
+        });
+        depends_on = vec![script_key];
+    }
+
+    start_next_ready_task(state);
+}
+
+fn start_next_ready_task(state: &mut AppState) {
+    if !state.script_jobs.is_empty() {
         return;
     }
-    let Some(spec) = script_spec(state, key, kind) else {
+    let Some(index) = state
+        .script_queue
+        .iter()
+        .position(|entry| entry.depends_on.iter().all(|dep| dependency_succeeded(state, dep)))
+    else {
         return;
     };
-    state.script_results.remove(&script_key);
-
+    let entry = state.script_queue.remove(index).expect("queue entry exists");
     let (tx, rx) = channel();
     let started_at = Instant::now();
-    thread::spawn(move || run_script(spec, tx));
+    thread::spawn({
+        let spec = entry.spec;
+        move || run_script(spec, tx)
+    });
     state.script_jobs.insert(
-        script_key,
+        entry.key.clone(),
         ScriptJob {
-            kind,
+            key: entry.key,
             rx,
             started_at,
             output: String::new(),
@@ -244,25 +379,238 @@ pub fn start(state: &mut AppState, key: &RowKey, kind: ScriptKind) {
     );
 }
 
-fn script_spec(state: &AppState, key: &RowKey, kind: ScriptKind) -> Option<ScriptSpec> {
-    match kind {
-        ScriptKind::Normalize => normalize_spec(state, key),
+fn resolve_blocked_tasks(state: &mut AppState) {
+    loop {
+        let mut changed = false;
+        let mut next_queue = VecDeque::new();
+        while let Some(entry) = state.script_queue.pop_front() {
+            if let Some(failed_dep) = entry
+                .depends_on
+                .iter()
+                .find(|dep| matches!(state.script_results.get(dep), Some(run) if !run.succeeded_flag()))
+                .cloned()
+            {
+                state.script_results.insert(
+                    entry.key.clone(),
+                    ScriptRun::blocked(
+                        entry.key.kind,
+                        format!(
+                            "{} blocked because {} did not succeed",
+                            entry.key.kind.label(),
+                            failed_dep.kind.label()
+                        ),
+                    ),
+                );
+                changed = true;
+            } else {
+                next_queue.push_back(entry);
+            }
+        }
+        state.script_queue = next_queue;
+        if !changed {
+            break;
+        }
     }
 }
 
-fn normalize_spec(state: &AppState, key: &RowKey) -> Option<ScriptSpec> {
-    if !state.is_admin() || !matches!(key.asset_type, AssetType::Hdris) {
-        return None;
+fn block_dependents(state: &mut AppState, failed_key: &ScriptKey) {
+    let mut changed = false;
+    let mut next_queue = VecDeque::new();
+    while let Some(entry) = state.script_queue.pop_front() {
+        if entry.depends_on.iter().any(|dep| dep == failed_key) {
+            state.script_results.insert(
+                entry.key.clone(),
+                ScriptRun::blocked(
+                    entry.key.kind,
+                    format!(
+                        "{} blocked because {} failed",
+                        entry.key.kind.label(),
+                        failed_key.kind.label()
+                    ),
+                ),
+            );
+            changed = true;
+        } else {
+            next_queue.push_back(entry);
+        }
+    }
+    state.script_queue = next_queue;
+    if changed {
+        resolve_blocked_tasks(state);
+    }
+}
+
+fn dependency_succeeded(state: &AppState, dep: &ScriptKey) -> bool {
+    state
+        .script_results
+        .get(dep)
+        .map(|run| run.succeeded_flag())
+        .unwrap_or(false)
+}
+
+fn script_is_scheduled(state: &AppState, key: &RowKey, kind: ScriptKind) -> bool {
+    let script_key = ScriptKey {
+        row: key.clone(),
+        kind,
+    };
+    state.script_jobs.contains_key(&script_key) || state.script_queue.iter().any(|entry| entry.key == script_key)
+}
+
+fn active_script_kind_for_row(state: &AppState, key: &RowKey) -> Option<ScriptKind> {
+    state
+        .script_jobs
+        .keys()
+        .find(|script_key| script_key.row == *key)
+        .map(|script_key| script_key.kind)
+}
+
+fn active_script_key(state: &AppState, key: &RowKey) -> Option<ScriptKey> {
+    state
+        .script_jobs
+        .keys()
+        .find(|script_key| script_key.row == *key)
+        .cloned()
+}
+
+fn script_is_queued_for_row(state: &AppState, key: &RowKey) -> bool {
+    state
+        .script_queue
+        .iter()
+        .any(|entry| entry.key.row == *key)
+        && active_script_kind_for_row(state, key).is_none()
+}
+
+fn latest_alert_run_for_row<'a>(state: &'a AppState, key: &RowKey) -> Option<&'a ScriptRun> {
+    state
+        .script_results
+        .iter()
+        .filter(|(script_key, run)| script_key.row == *key && !matches!(run.status, ScriptRunStatus::Succeeded))
+        .max_by_key(|(_, run)| run.finished_at)
+        .map(|(_, run)| run)
+}
+
+fn draw_dialog_contents(
+    ctx: &egui::Context,
+    state: &mut AppState,
+    script_key: &ScriptKey,
+    dialog_state: DialogState,
+    output: String,
+) {
+    let mut close = false;
+    let mut text = output;
+    egui::Window::new(format!("{} output — {}", dialog_state.kind().label(), script_key.row.slug))
+        .collapsible(false)
+        .resizable(true)
+        .default_size(egui::vec2(
+            layout::UPDATE_DIALOG_WIDTH,
+            layout::UPDATE_DIALOG_SCROLL_HEIGHT,
+        ))
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let (icon, label) = dialog_state.banner(ui.ctx());
+                ui.add(icon);
+                ui.label(label);
+            });
+            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
+            egui::ScrollArea::vertical()
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut text)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY)
+                            .interactive(false),
+                    );
+                });
+            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
+            if ui.button("Close").clicked() {
+                close = true;
+            }
+        });
+    if close {
+        state.script_output_dialog = None;
+    }
+}
+
+enum DialogState {
+    Running(ScriptKind),
+    Succeeded(ScriptKind, Duration),
+    Failed(ScriptKind),
+    Blocked(ScriptKind),
+}
+
+impl DialogState {
+    fn kind(&self) -> ScriptKind {
+        match *self {
+            DialogState::Running(kind)
+            | DialogState::Succeeded(kind, _)
+            | DialogState::Failed(kind)
+            | DialogState::Blocked(kind) => kind,
+        }
     }
 
-    let script = r"C:\Users\gregz\Poly Haven Dropbox\Assets\PH Utils\Scripts\HDRIs\normalize.py";
-    let prod_folder = state.prod_root_for(key.asset_type).join(&key.slug);
-    let exr = prod_folder.join("staging").join(format!("{}.exr", key.slug));
+    fn banner(&self, ctx: &egui::Context) -> (egui::Image<'_>, egui::WidgetText) {
+        match *self {
+            DialogState::Running(kind) => {
+                let tex = super::loading_texture(ctx);
+                (
+                    egui::Image::new(egui::load::SizedTexture::new(
+                        tex.id(),
+                        egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
+                    )),
+                    egui::WidgetText::from(egui::RichText::new(kind.label()).color(colors::TEXT_PRIMARY)),
+                )
+            }
+            DialogState::Succeeded(kind, duration) => {
+                let tex = super::check_texture(ctx);
+                (
+                    egui::Image::new(egui::load::SizedTexture::new(
+                        tex.id(),
+                        egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
+                    ))
+                    .tint(colors::MSG_INFO),
+                    egui::WidgetText::from(egui::RichText::new(format!(
+                        "{} in {}",
+                        kind.success_label(),
+                        format_duration(duration)
+                    ))
+                    .color(colors::MSG_INFO)),
+                )
+            }
+            DialogState::Failed(kind) => {
+                let tex = super::warn_icon_texture(ctx);
+                (
+                    egui::Image::new(egui::load::SizedTexture::new(
+                        tex.id(),
+                        egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
+                    ))
+                    .tint(colors::MSG_WARNING),
+                    egui::WidgetText::from(egui::RichText::new(kind.failed_label()).color(colors::MSG_WARNING)),
+                )
+            }
+            DialogState::Blocked(kind) => {
+                let tex = super::warn_icon_texture(ctx);
+                (
+                    egui::Image::new(egui::load::SizedTexture::new(
+                        tex.id(),
+                        egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
+                    ))
+                    .tint(colors::MSG_WARNING),
+                    egui::WidgetText::from(egui::RichText::new(format!("{} blocked", kind.label())).color(colors::MSG_WARNING)),
+                )
+            }
+        }
+    }
+}
 
-    Some(ScriptSpec {
-        program: OsString::from("python"),
-        args: vec![OsString::from(script), exr.into_os_string()],
-    })
+fn format_duration(duration: Duration) -> String {
+    let secs = duration.as_secs().max(1);
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m {}s", secs / 60, secs % 60)
+    }
 }
 
 fn run_script(spec: ScriptSpec, tx: Sender<ScriptEvent>) {
@@ -327,56 +675,73 @@ where
     })
 }
 
-fn draw_dialog_contents(
-    ctx: &egui::Context,
-    state: &mut AppState,
-    script_key: &ScriptKey,
-    kind: ScriptKind,
-    output: String,
-    duration: Duration,
-) {
-    let mut close = false;
-    let mut text = output;
-    egui::Window::new(format!("{} output — {}", kind.label(), script_key.row.slug))
-        .collapsible(false)
-        .resizable(true)
-        .default_size(egui::vec2(
-            layout::UPDATE_DIALOG_WIDTH,
-            layout::UPDATE_DIALOG_SCROLL_HEIGHT,
-        ))
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.strong(kind.label());
-                ui.label(format!("elapsed {}", format_duration(duration)));
-            });
-            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
-            egui::ScrollArea::vertical()
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut text)
-                            .font(egui::TextStyle::Monospace)
-                            .desired_width(f32::INFINITY)
-                            .interactive(false),
-                    );
-                });
-            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
-            if ui.button("Close").clicked() {
-                close = true;
-            }
-        });
-    if close {
-        state.script_output_dialog = None;
+fn script_spec(state: &AppState, key: &RowKey, kind: ScriptKind) -> Option<ScriptSpec> {
+    match kind {
+        ScriptKind::Normalize => normalize_spec(state, key),
+        ScriptKind::Render => render_spec(state, key),
     }
 }
 
-fn format_duration(duration: Duration) -> String {
-    let secs = duration.as_secs().max(1);
-    if secs < 60 {
-        format!("{secs}s")
-    } else {
-        format!("{}m {}s", secs / 60, secs % 60)
+fn normalize_spec(state: &AppState, key: &RowKey) -> Option<ScriptSpec> {
+    if !state.is_admin() || !matches!(key.asset_type, AssetType::Hdris) {
+        return None;
+    }
+    let script = script_root()?.join("normalize.py");
+    Some(ScriptSpec {
+        program: OsString::from("python"),
+        args: vec![script.into_os_string(), normalize_target_path(state, key).into_os_string()],
+    })
+}
+
+fn render_spec(state: &AppState, key: &RowKey) -> Option<ScriptSpec> {
+    if !state.is_admin() || !matches!(key.asset_type, AssetType::Hdris) {
+        return None;
+    }
+    let script = script_root()?.join("make_previews.py");
+    Some(ScriptSpec {
+        program: OsString::from("python"),
+        args: vec![
+            script.into_os_string(),
+            normalize_target_path(state, key).into_os_string(),
+            OsString::from("ground"),
+            OsString::from("tonemap"),
+            OsString::from("nonstudio"),
+        ],
+    })
+}
+
+fn script_root() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|home| {
+        home.join("Poly Haven Dropbox")
+            .join("Assets")
+            .join("PH Utils")
+            .join("Scripts")
+            .join("HDRIs")
+    })
+}
+
+fn normalize_target_path(state: &AppState, key: &RowKey) -> std::path::PathBuf {
+    state
+        .prod_root_for(key.asset_type)
+        .join(&key.slug)
+        .join("staging")
+        .join(format!("{}.exr", key.slug))
+}
+
+#[derive(Clone, Copy)]
+pub enum ScriptAction {
+    Normalize,
+    Render,
+    NormalizeAndRender,
+}
+
+impl ScriptAction {
+    fn kinds(self) -> &'static [ScriptKind] {
+        match self {
+            ScriptAction::Normalize => &[ScriptKind::Normalize],
+            ScriptAction::Render => &[ScriptKind::Render],
+            ScriptAction::NormalizeAndRender => &[ScriptKind::Normalize, ScriptKind::Render],
+        }
     }
 }
 
@@ -384,18 +749,21 @@ impl ScriptKind {
     fn label(self) -> &'static str {
         match self {
             ScriptKind::Normalize => "Normalize",
+            ScriptKind::Render => "Render",
         }
     }
 
     fn success_label(self) -> &'static str {
         match self {
             ScriptKind::Normalize => "Normalized",
+            ScriptKind::Render => "Rendered",
         }
     }
 
     fn failed_label(self) -> &'static str {
         match self {
             ScriptKind::Normalize => "Normalize failed",
+            ScriptKind::Render => "Render failed",
         }
     }
 }

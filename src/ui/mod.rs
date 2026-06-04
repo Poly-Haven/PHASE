@@ -20,7 +20,7 @@ pub use jobs::{
     create_prod_folder, execute_after_conflict, start_job, start_status_update, start_title_rename,
 };
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
@@ -246,6 +246,7 @@ pub struct AppState {
     pub transfer_estimates: HashMap<(RowKey, Direction), ActionPreview>,
     pub transfer_estimate_jobs: HashMap<(RowKey, Direction), TransferEstimateJob>,
     pub script_jobs: HashMap<scripts::ScriptKey, scripts::ScriptJob>,
+    pub script_queue: VecDeque<scripts::QueuedScript>,
     pub script_results: HashMap<scripts::ScriptKey, scripts::ScriptRun>,
     pub script_output_dialog: Option<scripts::ScriptKey>,
     pub search_query: String,
@@ -390,6 +391,7 @@ impl AppState {
             transfer_estimates: HashMap::new(),
             transfer_estimate_jobs: HashMap::new(),
             script_jobs: HashMap::new(),
+            script_queue: VecDeque::new(),
             script_results: HashMap::new(),
             script_output_dialog: None,
             search_query: String::new(),
@@ -1779,6 +1781,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         || state.update_install.is_some()
         || !state.transfer_estimate_jobs.is_empty()
         || !state.script_jobs.is_empty()
+        || !state.script_queue.is_empty()
     {
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }
