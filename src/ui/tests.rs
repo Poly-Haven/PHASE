@@ -177,10 +177,11 @@ fn wait_for_thumbnail_job(state: &super::AppState, key: &super::RowKey) {
         .completed
         .clone();
     let (lock, cvar) = &*completion;
-    let mut finished = lock.lock().unwrap();
-    while !*finished {
-        finished = cvar.wait(finished).unwrap();
-    }
+    let finished = lock.lock().unwrap();
+    let (_finished, result) = cvar
+        .wait_timeout_while(finished, std::time::Duration::from_secs(5), |done| !*done)
+        .unwrap();
+    assert!(!result.timed_out(), "thumbnail job did not finish");
 }
 
 #[test]
