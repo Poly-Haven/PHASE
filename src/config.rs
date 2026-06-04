@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -106,6 +106,8 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     #[test]
     fn skip_pull_raw_tif_if_many_work_tifs_defaults_to_enabled() {
         assert!(super::Config::default().skip_pull_raw_tif_if_many_work_tifs);
@@ -161,6 +163,31 @@ local_root = "C:\\PHASE"
         assert!(!cfg.access_token_expired_at(939));
         assert!(cfg.can_refresh_access_token());
     }
+
+    #[test]
+    fn load_recovers_from_a_corrupted_primary_config_using_the_backup() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let mut cfg = super::Config::default();
+        cfg.auth_access_token = "access".into();
+        cfg.auth_refresh_token = "refresh".into();
+        cfg.auth_expires_at = Some(12345);
+        cfg.local_root = PathBuf::from(r"C:\PHASE");
+        let config_path = temp.path().join("config.toml");
+        super::save_to_path(&config_path, &cfg).unwrap();
+
+        let mut updated = cfg.clone();
+        updated.local_root = PathBuf::from(r"C:\PHASE\changed");
+        super::save_to_path(&config_path, &updated).unwrap();
+
+        std::fs::write(&config_path, "this is not valid toml").unwrap();
+
+        let loaded = super::load_from_path(&config_path).unwrap();
+        assert_eq!(loaded.auth_access_token, "access");
+        assert_eq!(loaded.auth_refresh_token, "refresh");
+        assert_eq!(loaded.auth_expires_at, Some(12345));
+        assert_eq!(loaded.local_root, PathBuf::from(r"C:\PHASE"));
+    }
 }
 
 /// Returns `%APPDATA%\phase`, creating it if missing.
@@ -188,18 +215,87 @@ pub fn cache_dir() -> Result<PathBuf> {
 
 pub fn load() -> Result<Config> {
     let path = config_path()?;
-    if !path.exists() {
-        return Ok(Config::default());
+    match load_from_path(&path) {
+        Ok(cfg) => Ok(cfg),
+        Err(primary_err) => {
+            let backup = backup_path(&path);
+            if backup.exists() {
+                match load_from_path(&backup) {
+                    Ok(cfg) => Ok(cfg),
+                    Err(_) => Err(primary_err),
+                }
+            } else if !path.exists() {
+                Ok(Config::default())
+            } else {
+                Err(primary_err)
+            }
+        }
     }
-    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let cfg: Config =
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    Ok(cfg)
 }
 
 pub fn save(cfg: &Config) -> Result<()> {
     let path = config_path()?;
+    save_to_path(&path, cfg)
+}
+
+fn load_from_path(path: &Path) -> Result<Config> {
+    if !path.exists() {
+        return Err(anyhow::anyhow!("missing {}", path.display()));
+    }
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    match toml::from_str::<Config>(&text) {
+        Ok(cfg) => Ok(cfg),
+        Err(primary_err) => {
+            let backup = backup_path(path);
+            if !backup.exists() {
+                return Err(primary_err).with_context(|| format!("parsing {}", path.display()));
+            }
+            let backup_text =
+                fs::read_to_string(&backup).with_context(|| format!("reading {}", backup.display()))?;
+            let backup_cfg: Config = toml::from_str(&backup_text)
+                .with_context(|| format!("parsing {}", backup.display()))?;
+            Ok(backup_cfg)
+        }
+    }
+}
+
+fn save_to_path(path: &Path, cfg: &Config) -> Result<()> {
     let text = toml::to_string_pretty(cfg).context("serialising config")?;
-    fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    save_text_atomically(path, &text)
+}
+
+fn save_text_atomically(path: &Path, text: &str) -> Result<()> {
+    let temp = temp_path(path);
+    let backup = backup_path(path);
+    let _ = fs::remove_file(&temp);
+    let _ = fs::remove_file(&backup);
+
+    fs::write(&temp, text).with_context(|| format!("writing {}", temp.display()))?;
+    if path.exists() {
+        fs::rename(path, &backup)
+            .with_context(|| format!("backing up {} -> {}", path.display(), backup.display()))?;
+    }
+
+    match fs::rename(&temp, path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if backup.exists() {
+                let _ = fs::rename(&backup, path);
+            }
+            let _ = fs::remove_file(&temp);
+            Err(err).with_context(|| format!("replacing {}", path.display()))
+        }
+    }
+}
+
+fn backup_path(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".bak");
+    PathBuf::from(s)
+}
+
+fn temp_path(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".tmp");
+    PathBuf::from(s)
 }
