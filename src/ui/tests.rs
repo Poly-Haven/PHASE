@@ -47,6 +47,7 @@ fn test_state() -> super::AppState {
         token_input: String::new(),
         auth_login: None,
         auth_rx: None,
+        logged_in_identity: None,
         settings_open: false,
         settings_local_root_input: String::new(),
         settings_skip_pull_raw_tif_if_many_work_tifs: true,
@@ -523,6 +524,22 @@ fn error_message_renders_in_bottom_status_bar_area() {
 }
 
 #[test]
+fn idle_status_bar_shows_logged_in_identity() {
+    let mut state = test_state();
+    state.logged_in_identity = Some(crate::auth::LoggedInIdentity {
+        name: "Ada".into(),
+        user_id: "auth0|abc123".into(),
+        role: "admin".into(),
+    });
+
+    let texts = render_text_shapes(&mut state);
+
+    assert!(texts
+        .iter()
+        .any(|(text, _)| text == "Logged in as Ada [admin]"));
+}
+
+#[test]
 fn error_message_replaces_active_progress_text_while_visible() {
     let mut state = test_state();
     state.error_banner = Some("Cannot create Prod folder".into());
@@ -680,4 +697,3 @@ fn queue_revalidation_coalesces_while_a_job_is_running() {
     assert!(state.pending_validation_keys.contains(&key_a));
     assert!(state.pending_validation_keys.contains(&key_b));
 }
-
