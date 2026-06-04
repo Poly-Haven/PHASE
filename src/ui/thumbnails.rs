@@ -11,7 +11,7 @@ use crate::config::Config;
 
 use super::{layout, AssetType, RowKey};
 
-const THUMBNAIL_SOURCE_RELATIVE_PATH: &[&str] = &["staging", "renders", "thumbnail.png"];
+const THUMBNAIL_SOURCE_RELATIVE_PATH: &[&str] = &["staging", "renders", "primary.png"];
 const THUMBNAIL_TARGET_HEIGHT: u32 = layout::ROW_HEIGHT as u32;
 const THUMBNAIL_CACHE_MAX_AGE: Duration = Duration::from_secs(60 * 60 * 24 * 60);
 

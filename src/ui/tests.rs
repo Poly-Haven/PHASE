@@ -548,14 +548,14 @@ fn thumbnail_source_prefers_local_source_then_prod() {
         .join("asset")
         .join("staging")
         .join("renders")
-        .join("thumbnail.png");
+        .join("primary.png");
     let prod_source = config
         .prod_root
         .join("HDRIs")
         .join("asset")
         .join("staging")
         .join("renders")
-        .join("thumbnail.png");
+        .join("primary.png");
     std::fs::create_dir_all(local_source.parent().unwrap()).unwrap();
     std::fs::create_dir_all(prod_source.parent().unwrap()).unwrap();
     std::fs::write(&prod_source, b"prod").unwrap();
@@ -669,7 +669,7 @@ fn thumbnail_generation_replaces_stale_preview_after_source_changes() {
         .join("asset")
         .join("staging")
         .join("renders")
-        .join("thumbnail.png");
+        .join("primary.png");
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]))
         .save(&source)
@@ -731,7 +731,7 @@ fn thumbnail_cleanup_only_touches_the_exact_asset_directory() {
         .join("foo")
         .join("staging")
         .join("renders")
-        .join("thumbnail.png");
+        .join("primary.png");
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]))
         .save(&source)
