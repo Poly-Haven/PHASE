@@ -1,7 +1,9 @@
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -39,12 +41,14 @@ pub struct ThumbnailSignature {
 }
 
 pub struct ThumbnailJob {
-    pub signature: ThumbnailSignature,
+    pub revision: u64,
     pub rx: Receiver<Result<ThumbnailJobResult, String>>,
+    pub completed: Arc<(Mutex<bool>, Condvar)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThumbnailJobResult {
+    pub revision: u64,
     pub signature: ThumbnailSignature,
     pub cache_path: PathBuf,
 }
@@ -95,6 +99,7 @@ pub fn thumbnail_cache_path(
     format: ThumbnailFormat,
 ) -> PathBuf {
     thumbnail_cache_asset_root(cache_root, signature.asset_type)
+        .join(&signature.slug)
         .join(thumbnail_cache_file_name(signature, format))
 }
 
@@ -102,17 +107,15 @@ pub fn thumbnail_cache_file_name(
     signature: &ThumbnailSignature,
     format: ThumbnailFormat,
 ) -> String {
-    format!(
-        "{}-{}-{}.{}",
-        signature.slug,
-        signature.source_mtime,
-        signature.source_size,
-        format.extension()
-    )
+    format!("{}-{}.{}", signature.source_mtime, signature.source_size, format.extension())
 }
 
 pub fn thumbnail_cache_asset_root(cache_root: &Path, asset_type: AssetType) -> PathBuf {
     cache_root.join(asset_type.cache_name())
+}
+
+pub fn thumbnail_cache_asset_dir(cache_root: &Path, signature: &ThumbnailSignature) -> PathBuf {
+    thumbnail_cache_asset_root(cache_root, signature.asset_type).join(&signature.slug)
 }
 
 pub fn prune_thumbnail_cache(cache_root: &Path) -> Result<usize, String> {
@@ -139,17 +142,25 @@ pub fn spawn_thumbnail_job(
     local_root: PathBuf,
     prod_root: PathBuf,
     key: RowKey,
-    signature: ThumbnailSignature,
+    revision: u64,
+    revision_state: Arc<AtomicU64>,
 ) -> ThumbnailJob {
     let (tx, rx) = channel();
-    let job_signature = signature.clone();
+    let completed = Arc::new((Mutex::new(false), Condvar::new()));
+    let completed_thread = Arc::clone(&completed);
     thread::spawn(move || {
-        let result = render_thumbnail(&cache_root, &local_root, &prod_root, &key, &signature);
+        let result = render_thumbnail(&cache_root, &local_root, &prod_root, &key, revision, &revision_state);
         let _ = tx.send(result);
+        let (lock, cvar) = &*completed_thread;
+        if let Ok(mut finished) = lock.lock() {
+            *finished = true;
+            cvar.notify_all();
+        }
     });
     ThumbnailJob {
-        signature: job_signature,
+        revision,
         rx,
+        completed,
     }
 }
 
@@ -173,10 +184,12 @@ fn render_thumbnail(
     local_root: &Path,
     prod_root: &Path,
     key: &RowKey,
-    signature: &ThumbnailSignature,
+    revision: u64,
+    revision_state: &AtomicU64,
 ) -> Result<ThumbnailJobResult, String> {
-    fs::create_dir_all(thumbnail_cache_asset_root(cache_root, signature.asset_type))
-        .map_err(|err| err.to_string())?;
+    if revision_state.load(Ordering::Acquire) != revision {
+        return Err("thumbnail refresh superseded".into());
+    }
     let Some(source_path) = thumbnail_source_path_from_roots(local_root, prod_root, key) else {
         return Err(format!(
             "Missing thumbnail source for {}/{}",
@@ -184,29 +197,43 @@ fn render_thumbnail(
             key.slug
         ));
     };
-    if let Some(path) = existing_cache_path(cache_root, signature) {
+    let signature = thumbnail_signature(&source_path, key.asset_type, &key.slug)?;
+    fs::create_dir_all(thumbnail_cache_asset_dir(cache_root, &signature))
+        .map_err(|err| err.to_string())?;
+    if revision_state.load(Ordering::Acquire) != revision {
+        return Err("thumbnail refresh superseded".into());
+    }
+    if let Some(path) = existing_cache_path(cache_root, &signature) {
         return Ok(ThumbnailJobResult {
+            revision,
             signature: signature.clone(),
             cache_path: path,
         });
     }
 
-    remove_stale_cache_files(cache_root, signature)?;
+    remove_stale_cache_files(cache_root, &signature)?;
     let source_bytes = fs::read(&source_path).map_err(|err| err.to_string())?;
+    if revision_state.load(Ordering::Acquire) != revision {
+        return Err("thumbnail refresh superseded".into());
+    }
     let current_signature =
         thumbnail_signature(&source_path, signature.asset_type, &signature.slug)?;
-    if &current_signature != signature {
+    if current_signature != signature {
         return Err("thumbnail source changed while rendering".into());
     }
     let decoded = image::load_from_memory(&source_bytes).map_err(|err| err.to_string())?;
     let resized = resize_for_thumbnail(decoded);
+    if revision_state.load(Ordering::Acquire) != revision {
+        return Err("thumbnail refresh superseded".into());
+    }
     let current_signature =
         thumbnail_signature(&source_path, signature.asset_type, &signature.slug)?;
-    if &current_signature != signature {
+    if current_signature != signature {
         return Err("thumbnail source changed while rendering".into());
     }
-    let cache_path = write_thumbnail(cache_root, signature, &resized)?;
+    let cache_path = write_thumbnail(cache_root, &signature, &resized)?;
     Ok(ThumbnailJobResult {
+        revision,
         signature: signature.clone(),
         cache_path,
     })
@@ -268,23 +295,17 @@ fn remove_stale_cache_files(
     cache_root: &Path,
     signature: &ThumbnailSignature,
 ) -> Result<(), String> {
-    let asset_root = thumbnail_cache_asset_root(cache_root, signature.asset_type);
+    let asset_root = thumbnail_cache_asset_dir(cache_root, signature);
     if !asset_root.exists() {
         return Ok(());
     }
-    let prefix = format!("{}-", signature.slug);
     for entry in fs::read_dir(&asset_root).map_err(|err| err.to_string())? {
         let entry = entry.map_err(|err| err.to_string())?;
         let path = entry.path();
         if !path.is_file() || !is_thumbnail_cache_file(&path) {
             continue;
         }
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if name.starts_with(&prefix) {
-            let _ = fs::remove_file(&path);
-        }
+        let _ = fs::remove_file(&path);
     }
     Ok(())
 }

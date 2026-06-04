@@ -23,6 +23,7 @@ pub use jobs::{
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -240,6 +241,7 @@ pub struct AppState {
     /// Receiver for an in-flight background rebuild of `prod_folder_cache`.
     pub prod_cache_rx: Option<Receiver<HashMap<RowKey, bool>>>,
     pub thumbnail_cache_root: PathBuf,
+    pub thumbnail_revisions: HashMap<RowKey, Arc<AtomicU64>>,
     pub thumbnail_jobs: HashMap<RowKey, thumbnails::ThumbnailJob>,
     pub thumbnail_previews: HashMap<RowKey, ThumbnailPreview>,
     pub thumbnail_cleanup_rx: Option<Receiver<Result<usize, String>>>,
@@ -331,9 +333,20 @@ fn current_update_check_day() -> u64 {
 }
 
 fn thumbnail_cache_root() -> PathBuf {
-    crate::config::cache_dir()
-        .map(|dir| dir.join("thumbnails"))
-        .unwrap_or_else(|_| PathBuf::from("thumbnails"))
+    match crate::config::cache_dir() {
+        Ok(dir) => dir.join("thumbnails"),
+        Err(err) => {
+            let fallback_root = dirs::data_local_dir()
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from(r"C:\"));
+            let path = fallback_root.join("phase").join("cache").join("thumbnails");
+            log::warn!(
+                "Using degraded thumbnail cache root {} after cache dir lookup failed: {err}",
+                path.display()
+            );
+            path
+        }
+    }
 }
 
 fn should_check_for_update(last_check_day: Option<u64>, current_day: u64) -> bool {
@@ -396,6 +409,7 @@ impl AppState {
             prod_folder_cache: HashMap::new(),
             prod_cache_rx: None,
             thumbnail_cache_root: thumbnail_cache_root(),
+            thumbnail_revisions: HashMap::new(),
             thumbnail_jobs: HashMap::new(),
             thumbnail_previews: HashMap::new(),
             thumbnail_cleanup_rx: None,
@@ -676,50 +690,46 @@ impl AppState {
         self.thumbnail_cleanup_rx = Some(rx);
     }
 
-    fn thumbnail_signature_for(
-        &self,
-        key: &RowKey,
-    ) -> Result<Option<thumbnails::ThumbnailSignature>, String> {
-        let Some(source_path) = thumbnails::thumbnail_source_path(&self.config, key) else {
-            return Ok(None);
-        };
-        thumbnails::thumbnail_signature(&source_path, key.asset_type, &key.slug).map(Some)
+    fn thumbnail_revision_state(&mut self, key: &RowKey) -> Arc<AtomicU64> {
+        self.thumbnail_revisions
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .clone()
     }
 
-    pub fn ensure_thumbnail_job(&mut self, key: &RowKey) {
-        let Ok(Some(signature)) = self.thumbnail_signature_for(key) else {
-            self.thumbnail_previews.remove(key);
-            self.thumbnail_jobs.remove(key);
-            return;
-        };
-        let preview_matches = self
-            .thumbnail_previews
-            .get(key)
-            .is_some_and(|preview| preview.signature == signature);
-        let job_matches = self
-            .thumbnail_jobs
-            .get(key)
-            .is_some_and(|job| job.signature == signature);
-        if preview_matches {
-            if job_matches {
-                return;
-            }
-            self.thumbnail_jobs.remove(key);
+    fn spawn_thumbnail_job_for_key(&mut self, key: &RowKey) {
+        if self.thumbnail_jobs.contains_key(key) {
             return;
         }
-        self.thumbnail_previews.remove(key);
-        if job_matches {
+        let revision_state = self.thumbnail_revision_state(key);
+        let revision = revision_state.load(Ordering::Acquire);
+        if revision == 0 {
             return;
         }
-        self.thumbnail_jobs.remove(key);
         let job = thumbnails::spawn_thumbnail_job(
             self.thumbnail_cache_root.clone(),
             self.config.local_root.clone(),
             self.config.prod_root.clone(),
             key.clone(),
-            signature,
+            revision,
+            revision_state,
         );
         self.thumbnail_jobs.insert(key.clone(), job);
+    }
+
+    pub fn start_thumbnail_refresh_for_keys<I>(&mut self, keys: I)
+    where
+        I: IntoIterator<Item = RowKey>,
+    {
+        let mut unique = HashSet::new();
+        for key in keys {
+            if !unique.insert(key.clone()) {
+                continue;
+            }
+            let revision_state = self.thumbnail_revision_state(&key);
+            revision_state.fetch_add(1, Ordering::AcqRel);
+            self.spawn_thumbnail_job_for_key(&key);
+        }
     }
 
     fn thumbnail_texture_name(key: &RowKey) -> String {
@@ -916,7 +926,11 @@ impl AppState {
             }
         }
         let due_count = due.len();
+        let thumbnail_due = due.clone();
         self.queue_revalidation(due);
+        if due_count > 0 {
+            self.start_thumbnail_refresh_for_keys(thumbnail_due);
+        }
         if due_count > 0 {
             log::debug!("watcher re-validating {due_count} asset(s) after debounce");
         }
@@ -1069,6 +1083,7 @@ impl AppState {
         self.rebuild_local_folder_cache();
         self.watch_dirty = true;
         self.start_validation_for_keys(scope.keys.clone());
+        self.start_thumbnail_refresh_for_keys(scope.keys.clone());
         for key in &scope.keys {
             self.start_transfer_estimate(key, Direction::Push, false);
             self.start_transfer_estimate(key, Direction::Pull, false);
@@ -1413,43 +1428,16 @@ impl AppState {
             self.watch_dirty = true;
         }
 
-        let preview_keys: Vec<RowKey> = self.thumbnail_previews.keys().cloned().collect();
-        for key in preview_keys {
-            let current_signature = match self.thumbnail_signature_for(&key) {
-                Ok(Some(signature)) => signature,
-                Ok(None) => {
-                    self.thumbnail_previews.remove(&key);
-                    self.thumbnail_jobs.remove(&key);
-                    continue;
-                }
-                Err(err) => {
-                    log::warn!(
-                        "Failed to inspect thumbnail source for {}/{}: {err}",
-                        key.asset_type.folder(),
-                        key.slug
-                    );
-                    continue;
-                }
-            };
-            let preview_matches = self
-                .thumbnail_previews
-                .get(&key)
-                .is_some_and(|preview| preview.signature == current_signature);
-            if !preview_matches {
-                self.thumbnail_previews.remove(&key);
-                self.ensure_thumbnail_job(&key);
-            }
-        }
-
         let thumbnail_keys: Vec<RowKey> = self.thumbnail_jobs.keys().cloned().collect();
         for key in thumbnail_keys {
-            let Some(job_signature) = self
-                .thumbnail_jobs
-                .get(&key)
-                .map(|job| job.signature.clone())
-            else {
+            let Some(job_revision) = self.thumbnail_jobs.get(&key).map(|job| job.revision) else {
                 continue;
             };
+            let revision_state = self.thumbnail_revisions.get(&key).cloned();
+            let current_revision = revision_state
+                .as_ref()
+                .map(|revision| revision.load(Ordering::Acquire))
+                .unwrap_or(job_revision);
             let result_opt = self
                 .thumbnail_jobs
                 .get(&key)
@@ -1458,25 +1446,8 @@ impl AppState {
                 self.thumbnail_jobs.remove(&key);
                 match result {
                     Ok(result) => {
-                        let current_signature = match self.thumbnail_signature_for(&key) {
-                            Ok(Some(signature)) => signature,
-                            Ok(None) => {
-                                self.thumbnail_previews.remove(&key);
-                                continue;
-                            }
-                            Err(err) => {
-                                log::warn!(
-                                    "Failed to inspect thumbnail source for {}/{}: {err}",
-                                    key.asset_type.folder(),
-                                    key.slug
-                                );
-                                continue;
-                            }
-                        };
-                        if result.signature != current_signature
-                            || result.signature != job_signature
-                        {
-                            self.ensure_thumbnail_job(&key);
+                        if result.revision != current_revision {
+                            self.spawn_thumbnail_job_for_key(&key);
                             continue;
                         }
                         match thumbnails::load_thumbnail_texture(
@@ -1503,11 +1474,17 @@ impl AppState {
                         }
                     }
                     Err(err) => {
-                        log::warn!(
-                            "Thumbnail generation failed for {}/{}: {err}",
-                            key.asset_type.folder(),
-                            key.slug
-                        );
+                        if err.contains("Missing thumbnail source") {
+                            self.thumbnail_previews.remove(&key);
+                        } else if current_revision != job_revision {
+                            self.spawn_thumbnail_job_for_key(&key);
+                        } else {
+                            log::warn!(
+                                "Thumbnail generation failed for {}/{}: {err}",
+                                key.asset_type.folder(),
+                                key.slug
+                            );
+                        }
                     }
                 }
             }

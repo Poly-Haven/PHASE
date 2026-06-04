@@ -59,6 +59,7 @@ fn test_state() -> super::AppState {
         prod_folder_cache: HashMap::new(),
         prod_cache_rx: None,
         thumbnail_cache_root: std::path::PathBuf::from("thumbnail-cache-test"),
+        thumbnail_revisions: HashMap::new(),
         thumbnail_jobs: HashMap::new(),
         thumbnail_previews: HashMap::new(),
         thumbnail_cleanup_rx: None,
@@ -166,6 +167,20 @@ fn pump_validation(state: &mut super::AppState) {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     panic!("validation job did not finish");
+}
+
+fn wait_for_thumbnail_job(state: &super::AppState, key: &super::RowKey) {
+    let completion = state
+        .thumbnail_jobs
+        .get(key)
+        .expect("expected thumbnail job")
+        .completed
+        .clone();
+    let (lock, cvar) = &*completion;
+    let mut finished = lock.lock().unwrap();
+    while !*finished {
+        finished = cvar.wait(finished).unwrap();
+    }
 }
 
 #[test]
@@ -590,11 +605,10 @@ fn thumbnail_cache_key_includes_asset_type_namespace() {
         .to_string();
 
     assert!(cache_path.starts_with(cache_root.path().join("hdris")));
-    assert!(other_cache_path.starts_with(cache_root.path().join("textures")));
+    assert!(cache_path.starts_with(cache_root.path().join("hdris").join("asset")));
+    assert!(other_cache_path.starts_with(cache_root.path().join("textures").join("asset")));
     assert_ne!(cache_path, other_cache_path);
-    assert!(filename.starts_with("asset-"));
-    assert!(filename.contains("1700000000"));
-    assert!(filename.contains("12345"));
+    assert_eq!(filename, "1700000000-12345.webp");
     assert!(filename.ends_with(".webp"));
 }
 
@@ -660,15 +674,10 @@ fn thumbnail_generation_replaces_stale_preview_after_source_changes() {
         .save(&source)
         .unwrap();
 
-    state.ensure_thumbnail_job(&key);
+    state.start_thumbnail_refresh_for_keys(vec![key.clone()]);
     let ctx = egui::Context::default();
-    for _ in 0..50 {
-        state.pump(&ctx);
-        if state.thumbnail_jobs.is_empty() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_for_thumbnail_job(&state, &key);
+    state.pump(&ctx);
 
     assert!(state.thumbnail_jobs.is_empty());
     let initial_signature = state
@@ -687,18 +696,9 @@ fn thumbnail_generation_replaces_stale_preview_after_source_changes() {
         .save(&source)
         .unwrap();
 
-    for _ in 0..50 {
-        state.pump(&ctx);
-        if state.thumbnail_jobs.is_empty()
-            && state
-                .thumbnail_previews
-                .get(&key)
-                .is_some_and(|preview| preview.signature != initial_signature)
-        {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    state.start_thumbnail_refresh_for_keys(vec![key.clone()]);
+    wait_for_thumbnail_job(&state, &key);
+    state.pump(&ctx);
 
     let preview = state
         .thumbnail_previews
@@ -706,6 +706,85 @@ fn thumbnail_generation_replaces_stale_preview_after_source_changes() {
         .expect("expected refreshed preview");
     assert_ne!(preview.signature, initial_signature);
     assert_eq!(preview.signature.asset_type, super::AssetType::Hdris);
+}
+
+#[test]
+fn thumbnail_cleanup_only_touches_the_exact_asset_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = test_state();
+    state.config.local_root = temp.path().join("local");
+    state.config.prod_root = temp.path().join("prod");
+    state.thumbnail_cache_root = temp.path().join("thumbs");
+    let key = super::RowKey {
+        asset_type: super::AssetType::Hdris,
+        slug: "foo".into(),
+    };
+    let sibling_key = super::RowKey {
+        asset_type: super::AssetType::Hdris,
+        slug: "foo-bar".into(),
+    };
+    let source = state
+        .config
+        .local_root
+        .join("HDRIs")
+        .join("foo")
+        .join("staging")
+        .join("renders")
+        .join("thumbnail.png");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]))
+        .save(&source)
+        .unwrap();
+
+    let stale_signature = super::thumbnails::ThumbnailSignature {
+        asset_type: super::AssetType::Hdris,
+        slug: "foo".into(),
+        source_mtime: 1_700_000_000,
+        source_size: 1,
+    };
+    let sibling_signature = super::thumbnails::ThumbnailSignature {
+        asset_type: super::AssetType::Hdris,
+        slug: "foo-bar".into(),
+        source_mtime: 1_700_000_000,
+        source_size: 1,
+    };
+    let stale_cache = super::thumbnails::thumbnail_cache_path(
+        &state.thumbnail_cache_root,
+        &stale_signature,
+        super::thumbnails::ThumbnailFormat::WebP,
+    );
+    let sibling_cache = super::thumbnails::thumbnail_cache_path(
+        &state.thumbnail_cache_root,
+        &sibling_signature,
+        super::thumbnails::ThumbnailFormat::WebP,
+    );
+    std::fs::create_dir_all(stale_cache.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(sibling_cache.parent().unwrap()).unwrap();
+    std::fs::write(&stale_cache, b"old").unwrap();
+    std::fs::write(&sibling_cache, b"keep").unwrap();
+
+    state.start_thumbnail_refresh_for_keys(vec![key.clone()]);
+    let ctx = egui::Context::default();
+    wait_for_thumbnail_job(&state, &key);
+    state.pump(&ctx);
+
+    assert!(sibling_cache.exists());
+    assert!(state.thumbnail_previews.contains_key(&key));
+    assert!(!state.thumbnail_previews.contains_key(&sibling_key));
+}
+
+#[test]
+fn ui_thumbnail_refresh_logic_stays_off_the_ui_thread() {
+    let mod_src =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "\\src\\ui\\mod.rs")).unwrap();
+    let table_src =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "\\src\\ui\\table.rs")).unwrap();
+
+    assert!(!table_src.contains("ensure_thumbnail_job("));
+    assert!(!mod_src.contains("thumbnail_signature_for("));
+    assert!(!mod_src.contains("metadata()"));
+    assert!(!mod_src.contains("modified()"));
+    assert!(mod_src.contains("start_thumbnail_refresh_for_keys"));
 }
 
 #[test]
