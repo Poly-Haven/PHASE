@@ -389,24 +389,52 @@ fn open_asset_file(asset_type: AssetType, local_folder: &std::path::Path, slug: 
     }
 }
 
+struct RowLayout {
+    thumbnail_rect: Option<egui::Rect>,
+    content_min: egui::Pos2,
+    content_w: f32,
+}
+
+fn row_layout(avail: egui::Rect, thumbnail_size: Option<egui::Vec2>) -> RowLayout {
+    match thumbnail_size {
+        Some(size) => {
+            let thumbnail_rect = egui::Rect::from_min_size(avail.min, size);
+            let content_min = egui::pos2(
+                avail.min.x + size.x + layout::ROW_SECTION_PADDING,
+                avail.min.y,
+            );
+            let content_w = (avail.width() - size.x - layout::ROW_SECTION_PADDING).max(0.0);
+            RowLayout {
+                thumbnail_rect: Some(thumbnail_rect),
+                content_min,
+                content_w,
+            }
+        }
+        None => RowLayout {
+            thumbnail_rect: None,
+            content_min: avail.min,
+            content_w: avail.width(),
+        },
+    }
+}
+
 fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
     let row_height = layout::ROW_HEIGHT;
     let avail = ui.available_rect_before_wrap();
     let avail_w = avail.width();
-    let thumbnail_rect = egui::Rect::from_min_size(avail.min, egui::vec2(row_height, row_height));
-    let content_min = egui::pos2(
-        avail.min.x + row_height + layout::ROW_SECTION_PADDING,
-        avail.min.y,
-    );
-    let content_w = (avail_w - row_height - layout::ROW_SECTION_PADDING).max(0.0);
+    let thumbnail_size = state
+        .thumbnail_previews
+        .get(key)
+        .map(|preview| preview.texture.size_vec2());
+    let row_layout = row_layout(avail, thumbnail_size);
     let row_rect = egui::Rect::from_min_size(avail.min, egui::vec2(avail_w, row_height));
     let row1_rect = egui::Rect::from_min_size(
-        content_min,
-        egui::vec2(content_w, layout::ROW_PRIMARY_HEIGHT),
+        row_layout.content_min,
+        egui::vec2(row_layout.content_w, layout::ROW_PRIMARY_HEIGHT),
     );
     let row2_rect = egui::Rect::from_min_size(
-        content_min + egui::vec2(0.0, layout::ROW_PRIMARY_HEIGHT),
-        egui::vec2(content_w, layout::ROW_SECONDARY_HEIGHT),
+        row_layout.content_min + egui::vec2(0.0, layout::ROW_PRIMARY_HEIGHT),
+        egui::vec2(row_layout.content_w, layout::ROW_SECONDARY_HEIGHT),
     );
 
     ui.painter()
@@ -434,10 +462,10 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     });
 
     let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-    if let Some(preview) = state.thumbnail_previews.get(key) {
+    if let (Some(preview), Some(thumbnail_rect)) = (state.thumbnail_previews.get(key), row_layout.thumbnail_rect) {
         ui.painter().image(
             preview.texture.id(),
-            thumbnail_rect.shrink(2.0),
+            thumbnail_rect,
             uv_full,
             egui::Color32::WHITE,
         );
@@ -1246,6 +1274,33 @@ mod tests {
             "other_slug",
             &in_progress
         ));
+    }
+
+    #[test]
+    fn row_layout_keeps_text_flush_left_without_thumbnail() {
+        let avail = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(400.0, 52.0));
+        let layout = super::row_layout(avail, None);
+
+        assert_eq!(layout.thumbnail_rect, None);
+        assert_eq!(layout.content_min, avail.min);
+        assert_eq!(layout.content_w, avail.width());
+    }
+
+    #[test]
+    fn row_layout_offsets_content_by_thumbnail_width_only_when_present() {
+        let avail = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(400.0, 52.0));
+        let thumbnail_size = egui::vec2(96.0, 52.0);
+        let layout = super::row_layout(avail, Some(thumbnail_size));
+
+        assert_eq!(
+            layout.thumbnail_rect,
+            Some(egui::Rect::from_min_size(avail.min, thumbnail_size))
+        );
+        assert_eq!(
+            layout.content_min,
+            egui::pos2(10.0 + 96.0 + layout::ROW_SECTION_PADDING, 20.0)
+        );
+        assert_eq!(layout.content_w, 400.0 - 96.0 - layout::ROW_SECTION_PADDING);
     }
 
     #[test]
