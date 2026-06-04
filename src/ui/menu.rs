@@ -386,15 +386,6 @@ fn author_filter_display_abbrev(
     }
 }
 
-fn author_filter_display(selected: &[String]) -> String {
-    match selected {
-        [] => "All authors".to_string(),
-        [single] => single.clone(),
-        [first, second] => format!("{first}, {second}"),
-        selected => format!("{} authors", selected.len()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::notion::{Asset, AssetStatus, StatusGroup};

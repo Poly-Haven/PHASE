@@ -16,6 +16,7 @@ pub use workers::spawn;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Severity {
+    #[allow(dead_code)]
     Info,
     Warning,
     Error,

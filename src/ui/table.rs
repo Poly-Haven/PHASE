@@ -10,6 +10,7 @@ pub enum MsgKind {
     Info,
     Warning,
     Error,
+    #[allow(dead_code)]
     Question,
 }
 
