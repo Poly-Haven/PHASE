@@ -2,6 +2,7 @@ mod asset_types;
 mod authors;
 pub mod colors;
 mod dialogs;
+mod file_watcher;
 mod focus_refresh;
 pub mod layout;
 mod group_selector;
@@ -243,6 +244,34 @@ pub struct AppState {
     pub transfer_estimates: HashMap<(RowKey, Direction), ActionPreview>,
     pub transfer_estimate_jobs: HashMap<(RowKey, Direction), TransferEstimateJob>,
     pub search_query: String,
+    /// Filesystem watcher (lazily created once an egui Context is available).
+    pub file_watcher: Option<file_watcher::FileWatcher>,
+    /// Time of the last activity in the PHASE window (mouse move, key input, or
+    /// focus change). Drives the activity-aware prod monitoring schedule.
+    pub last_activity_at: Instant,
+    /// Last observed window focus state, for detecting focus changes as activity.
+    pub watcher_was_focused: bool,
+    /// Mode selected on the previous frame, for detecting mode transitions.
+    pub last_watch_mode: file_watcher::WatchMode,
+    /// When the next poll tick is due (only meaningful in polling modes).
+    pub next_poll_at: Instant,
+    /// Set true whenever the desired watch set may have changed; reconcile only
+    /// touches the filesystem/network when this is set, then clears it.
+    pub watch_dirty: bool,
+    /// Pending debounced re-validations keyed by asset, with cache-update flags.
+    pub watch_pending: HashMap<RowKey, PendingWatch>,
+    /// Keys awaiting (re-)validation while a validation job is already running.
+    pub pending_validation_keys: HashSet<RowKey>,
+}
+
+/// A debounced re-validation request accumulated from filesystem events.
+pub struct PendingWatch {
+    /// Fire once `now >= deadline` (extended by each new event).
+    pub deadline: Instant,
+    /// Hard cap so a constant stream of writes cannot postpone validation forever.
+    pub hard_deadline: Instant,
+    pub update_local: bool,
+    pub update_prod: bool,
 }
 
 fn initial_author_filters(config: &Config, selected_types: &[AssetType]) -> Vec<String> {
@@ -355,6 +384,14 @@ impl AppState {
             transfer_estimates: HashMap::new(),
             transfer_estimate_jobs: HashMap::new(),
             search_query: String::new(),
+            file_watcher: None,
+            last_activity_at: Instant::now(),
+            watcher_was_focused: false,
+            last_watch_mode: file_watcher::WatchMode::RealTime,
+            next_poll_at: Instant::now(),
+            watch_dirty: true,
+            watch_pending: HashMap::new(),
+            pending_validation_keys: HashSet::new(),
         };
         s.token_prompt_open = !s.config.has_access_token() && !s.config.can_refresh_access_token();
         s.token_input.clear();
@@ -603,6 +640,237 @@ impl AppState {
     pub fn update_prod_folder_cache_for(&mut self, key: &RowKey) {
         let exists = self.prod_root_for(key.asset_type).join(&key.slug).is_dir();
         self.prod_folder_cache.insert(key.clone(), exists);
+        self.watch_dirty = true;
+    }
+
+    /// Create the filesystem watcher once an egui Context is available. Called
+    /// from the app update loop; tests construct `AppState` without a Context and
+    /// therefore run without a watcher.
+    pub fn ensure_file_watcher(&mut self, ctx: &egui::Context) {
+        if self.file_watcher.is_none() {
+            self.file_watcher = Some(file_watcher::FileWatcher::new(ctx.clone()));
+            self.last_activity_at = Instant::now();
+            self.watcher_was_focused = ctx.input(|i| i.focused);
+            self.watch_dirty = true;
+        }
+    }
+
+    /// Current activity-aware monitoring mode based on PHASE-window inactivity.
+    fn watch_mode(&self) -> file_watcher::WatchMode {
+        file_watcher::WatchMode::for_inactivity(self.last_activity_at.elapsed())
+    }
+
+    /// Visible asset keys that currently have a validation error and an existing
+    /// prod slug folder — the set whose prod contents we monitor.
+    fn error_keys_with_prod_folder(&self) -> Vec<RowKey> {
+        let visible: HashSet<RowKey> = self.visible_asset_keys().into_iter().collect();
+        self.validation_results
+            .iter()
+            .filter(|(key, findings)| {
+                visible.contains(key)
+                    && self.prod_folder_cache.get(*key) == Some(&true)
+                    && findings
+                        .iter()
+                        .any(|finding| finding.severity == crate::validation::Severity::Error)
+            })
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
+    /// Map a filesystem path to the asset it belongs to, by stripping the
+    /// matching (case-insensitive) type-root prefix and taking the next
+    /// component as the slug.
+    fn key_for_path(&self, path: &std::path::Path, source: file_watcher::WatchSource) -> Option<RowKey> {
+        for &asset_type in &self.selected_types {
+            let root = match source {
+                file_watcher::WatchSource::Local => self.local_root_for(asset_type),
+                file_watcher::WatchSource::Prod => self.prod_root_for(asset_type),
+            };
+            if let Some(slug) = slug_under_root(&root, path) {
+                return Some(RowKey { asset_type, slug });
+            }
+        }
+        None
+    }
+
+    /// Re-validate `keys`, coalescing with any validation already running so
+    /// watcher churn never drops an in-flight job's results.
+    fn queue_revalidation(&mut self, keys: Vec<RowKey>) {
+        if keys.is_empty() {
+            return;
+        }
+        self.pending_validation_keys.extend(keys);
+        if self.validation_job.is_none() {
+            let keys: Vec<RowKey> = self.pending_validation_keys.drain().collect();
+            self.start_validation_for_keys(keys);
+        }
+    }
+
+    /// Reconcile the watch set with the current mode and error set. Only touches
+    /// the filesystem/network when `watch_dirty` is set.
+    fn reconcile_file_watcher(&mut self) {
+        if self.file_watcher.is_none() || !self.watch_dirty {
+            return;
+        }
+        self.watch_dirty = false;
+
+        let local_roots: Vec<PathBuf> = self
+            .selected_types
+            .iter()
+            .map(|t| self.local_root_for(*t))
+            .collect();
+
+        let mode = self.watch_mode();
+        let prod_paths: Vec<(PathBuf, notify::RecursiveMode)> = if mode.is_real_time() {
+            let mut paths = Vec::new();
+            for &asset_type in &self.selected_types {
+                paths.push((self.prod_root_for(asset_type), notify::RecursiveMode::NonRecursive));
+            }
+            for key in self.error_keys_with_prod_folder() {
+                let slug = self.prod_root_for(key.asset_type).join(&key.slug);
+                let staging = slug.join("staging");
+                paths.push((slug, notify::RecursiveMode::NonRecursive));
+                if staging.is_dir() {
+                    paths.push((staging, notify::RecursiveMode::Recursive));
+                }
+            }
+            paths
+        } else {
+            Vec::new()
+        };
+
+        log::debug!(
+            "watcher reconcile: mode={mode:?} local_roots={} prod_paths={}",
+            local_roots.len(),
+            prod_paths.len()
+        );
+        if let Some(watcher) = self.file_watcher.as_mut() {
+            watcher.ensure_local(&local_roots);
+            watcher.set_prod(&prod_paths);
+        }
+    }
+
+    /// Drain watcher events, apply debounced re-validation, run poll ticks, and
+    /// reconcile the watch set. Called at the end of `pump()`.
+    fn pump_file_watcher(&mut self) {
+        if self.file_watcher.is_none() {
+            return;
+        }
+
+        // 1. Drain raw events into the debounce map.
+        let events = self
+            .file_watcher
+            .as_ref()
+            .map(|watcher| watcher.drain())
+            .unwrap_or_default();
+        let now = Instant::now();
+        for event in events {
+            for path in &event.paths {
+                let Some(key) = self.key_for_path(path, event.source) else {
+                    continue;
+                };
+                log::debug!(
+                    "watcher event: {:?} {} -> {}/{}",
+                    event.source,
+                    path.display(),
+                    key.asset_type.folder(),
+                    key.slug
+                );
+                let entry = self.watch_pending.entry(key).or_insert(PendingWatch {
+                    deadline: now,
+                    hard_deadline: now + Duration::from_secs(8),
+                    update_local: false,
+                    update_prod: false,
+                });
+                entry.deadline = now + Duration::from_millis(1500);
+                match event.source {
+                    file_watcher::WatchSource::Local => entry.update_local = true,
+                    file_watcher::WatchSource::Prod => entry.update_prod = true,
+                }
+            }
+            // A prod event may have created/removed `staging`; re-evaluate watches.
+            if event.source == file_watcher::WatchSource::Prod {
+                self.watch_dirty = true;
+            }
+        }
+
+        // 2. Fire debounced re-validations whose deadline (or hard cap) elapsed.
+        let now = Instant::now();
+        let due: Vec<RowKey> = self
+            .watch_pending
+            .iter()
+            .filter(|(_, pending)| now >= pending.deadline || now >= pending.hard_deadline)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in &due {
+            if let Some(pending) = self.watch_pending.remove(key) {
+                if pending.update_local {
+                    self.update_local_folder_cache_for(key);
+                }
+                if pending.update_prod {
+                    self.update_prod_folder_cache_for(key);
+                }
+            }
+        }
+        let due_count = due.len();
+        self.queue_revalidation(due);
+        if due_count > 0 {
+            log::debug!("watcher re-validating {due_count} asset(s) after debounce");
+        }
+
+        // 3. Handle mode transitions and poll ticks.
+        let mode = self.watch_mode();
+        if mode != self.last_watch_mode {
+            log::debug!("watcher mode change: {:?} -> {:?}", self.last_watch_mode, mode);
+            self.last_watch_mode = mode;
+            self.watch_dirty = true;
+            if let Some(interval) = mode.poll_interval() {
+                self.next_poll_at = Instant::now() + interval;
+            }
+        }
+        if let Some(interval) = mode.poll_interval() {
+            if Instant::now() >= self.next_poll_at {
+                log::debug!("watcher poll tick ({mode:?})");
+                self.poll_prod_error_assets();
+                self.next_poll_at = Instant::now() + interval;
+            }
+        }
+
+        // 4. Apply any watch-set changes.
+        self.reconcile_file_watcher();
+    }
+
+    /// One activity-aware poll tick: refresh prod folder existence for visible
+    /// assets and re-validate any assets that currently have errors, so external
+    /// prod changes are picked up while the window is unfocused.
+    fn poll_prod_error_assets(&mut self) {
+        self.rebuild_prod_folder_cache();
+        let keys = self.error_keys_with_prod_folder();
+        self.queue_revalidation(keys);
+    }
+
+    /// Schedule the next repaint needed to keep watcher debouncing, polling, and
+    /// mode transitions alive — including while the window is unfocused. Returns
+    /// the chosen delay, if any.
+    fn watcher_repaint_after(&self) -> Option<Duration> {
+        if self.file_watcher.is_none() {
+            return None;
+        }
+        let now = Instant::now();
+        let mut candidates: Vec<Duration> = Vec::new();
+        for pending in self.watch_pending.values() {
+            candidates.push(pending.deadline.saturating_duration_since(now));
+        }
+        let mode = self.watch_mode();
+        if mode.poll_interval().is_some() {
+            candidates.push(self.next_poll_at.saturating_duration_since(now));
+        }
+        if let Some(boundary) =
+            file_watcher::WatchMode::boundary_after(self.last_activity_at.elapsed())
+        {
+            candidates.push(boundary);
+        }
+        candidates.into_iter().min()
     }
 
     pub fn refresh_published_assets(&mut self) {
@@ -692,6 +960,7 @@ impl AppState {
         self.visible_validation_scope = scope.clone();
         self.rebuild_prod_folder_cache();
         self.rebuild_local_folder_cache();
+        self.watch_dirty = true;
         self.start_validation_for_keys(scope.keys.clone());
         for key in &scope.keys {
             self.start_transfer_estimate(key, Direction::Push, false);
@@ -992,6 +1261,8 @@ impl AppState {
             match msg {
                 crate::validation::Msg::RowValidated { key, findings } => {
                     self.validation_results.insert(key, findings);
+                    // The error set may have changed; re-evaluate prod watches.
+                    self.watch_dirty = true;
                 }
                 crate::validation::Msg::Finished => {
                     validation_finished = true;
@@ -1000,6 +1271,11 @@ impl AppState {
         }
         if validation_finished {
             self.validation_job = None;
+            // Start any re-validations that were coalesced while a job was running.
+            if !self.pending_validation_keys.is_empty() {
+                let keys: Vec<RowKey> = self.pending_validation_keys.drain().collect();
+                self.start_validation_for_keys(keys);
+            }
         }
 
         // Receive background prod-folder cache rebuild result.
@@ -1010,6 +1286,7 @@ impl AppState {
         {
             self.prod_folder_cache = cache;
             self.prod_cache_rx = None;
+            self.watch_dirty = true;
         }
 
         // Drain completed plan jobs and either open the conflict dialog or start copying.
@@ -1135,6 +1412,8 @@ impl AppState {
         }
         self.row_toasts
             .retain(|_, toast| toast.created_at.elapsed() < Duration::from_secs(5));
+
+        self.pump_file_watcher();
     }
 
     pub fn local_root_for(&self, t: AssetType) -> PathBuf {
@@ -1277,6 +1556,39 @@ pub(super) fn slug_matches_search(slug: &str, query: &str) -> bool {
         .all(|word| slug_lower.contains(&word.to_lowercase()))
 }
 
+/// If `path` lies under `root`, return the first path component below `root`
+/// (the asset slug). Comparison is case-insensitive to tolerate Windows path
+/// casing differences between the configured root and watcher event paths.
+fn slug_under_root(root: &std::path::Path, path: &std::path::Path) -> Option<String> {
+    let mut root_components = root.components();
+    let mut path_components = path.components();
+    loop {
+        match root_components.next() {
+            Some(root_part) => {
+                let path_part = path_components.next()?;
+                if !components_eq_ci(root_part, path_part) {
+                    return None;
+                }
+            }
+            None => break,
+        }
+    }
+    let slug = path_components.next()?;
+    let slug = slug.as_os_str().to_string_lossy().to_string();
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug)
+    }
+}
+
+fn components_eq_ci(a: std::path::Component, b: std::path::Component) -> bool {
+    a.as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy())
+}
+
+
 fn draw_status_bar_primary(state: &mut AppState, ui: &mut egui::Ui) {
     if let Some(err) = state.error_banner.clone() {
         ui.horizontal(|ui| {
@@ -1344,6 +1656,18 @@ fn draw_version_status(state: &mut AppState, ui: &mut egui::Ui) {
 
 pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     let gained_focus = ctx.input(|i| state.focus_refresh.update(i.focused, Instant::now()));
+
+    // Track PHASE-window activity for the activity-aware prod watch schedule:
+    // any mouse movement, keyboard/text input, or focus change counts as activity.
+    let (focused_now, had_input) = ctx.input(|i| {
+        let input = i.pointer.delta() != egui::Vec2::ZERO || !i.events.is_empty();
+        (i.focused, input)
+    });
+    if had_input || focused_now != state.watcher_was_focused {
+        state.last_activity_at = Instant::now();
+    }
+    state.watcher_was_focused = focused_now;
+
     // Skip the focus-triggered refresh if login is in progress — a fresh refresh
     // will be started by AuthMsg::Success once authentication completes.
     if gained_focus && !state.token_prompt_open && state.auth_rx.is_none() {
@@ -1399,6 +1723,12 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         || !state.transfer_estimate_jobs.is_empty()
     {
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
+    }
+
+    // Keep the loop alive for watcher debouncing, polling, and mode transitions
+    // (including while the window is unfocused).
+    if let Some(delay) = state.watcher_repaint_after() {
+        ctx.request_repaint_after(delay);
     }
 }
 
