@@ -70,6 +70,7 @@ fn test_state() -> super::AppState {
         transfer_estimates: HashMap::new(),
         transfer_estimate_jobs: HashMap::new(),
         script_jobs: HashMap::new(),
+        script_queue: std::collections::VecDeque::new(),
         script_results: HashMap::new(),
         script_output_dialog: None,
         search_query: String::new(),
