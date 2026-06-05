@@ -63,6 +63,7 @@ fn test_state() -> super::AppState {
         thumbnail_jobs: HashMap::new(),
         thumbnail_previews: HashMap::new(),
         thumbnail_cleanup_rx: None,
+        author_avatar_textures: HashMap::new(),
         local_folder_cache: HashMap::new(),
         dismissed_warning_keys: HashSet::new(),
         validation_results: HashMap::new(),
@@ -138,6 +139,8 @@ fn asset(slug: &str, author: &str, group: StatusGroup) -> Asset {
         page_id: slug.into(),
         slug: slug.into(),
         author: author.into(),
+        authors: Vec::new(),
+        author_profiles: Vec::new(),
         url: String::new(),
         status: Some(AssetStatus {
             id: format!("{slug}-status"),
@@ -154,6 +157,8 @@ fn needs_review_asset(slug: &str, author: &str) -> Asset {
         page_id: slug.into(),
         slug: slug.into(),
         author: author.into(),
+        authors: Vec::new(),
+        author_profiles: Vec::new(),
         url: String::new(),
         status: Some(AssetStatus {
             id: format!("{slug}-needs-review"),
