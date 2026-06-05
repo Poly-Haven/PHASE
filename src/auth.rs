@@ -178,7 +178,8 @@ pub fn refresh_access_token(refresh_token: &str) -> Result<AuthTokens> {
         ));
     }
 
-    let token: TokenResponse = serde_json::from_str(&text).context("parsing Auth0 refresh token")?;
+    let token: TokenResponse =
+        serde_json::from_str(&text).context("parsing Auth0 refresh token")?;
     let mut tokens = tokens_from_response(token, now_unix_seconds())?;
     if tokens.refresh_token.is_empty() {
         tokens.refresh_token = refresh_token.to_string();
@@ -320,10 +321,7 @@ pub fn is_auth_required_error(message: &str) -> bool {
 
 pub(crate) fn tokens_from_response(token: TokenResponse, now: u64) -> Result<AuthTokens> {
     if let Some(error) = token.error {
-        return Err(anyhow!(
-            "{}",
-            token.error_description.unwrap_or(error)
-        ));
+        return Err(anyhow!("{}", token.error_description.unwrap_or(error)));
     }
     if token.access_token.trim().is_empty() {
         return Err(anyhow!("Auth0 response did not include an access token"));
@@ -451,7 +449,9 @@ fn parse_query(query: &str) -> Result<std::collections::HashMap<String, String>>
         }
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         params.insert(
-            decode(key).context("decoding login callback query key")?.into_owned(),
+            decode(key)
+                .context("decoding login callback query key")?
+                .into_owned(),
             decode(value)
                 .context("decoding login callback query value")?
                 .into_owned(),
@@ -530,8 +530,8 @@ fn client() -> Result<reqwest::blocking::Client> {
 
 #[cfg(test)]
 mod tests {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use super::*;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
     #[test]
     fn auth0_pkce_flow_uses_public_phase_client_audience_and_localhost_callback() {
@@ -543,7 +543,10 @@ mod tests {
             authorization_url(),
             "https://polyhavenadmin.eu.auth0.com/authorize"
         );
-        assert_eq!(token_url(), "https://polyhavenadmin.eu.auth0.com/oauth/token");
+        assert_eq!(
+            token_url(),
+            "https://polyhavenadmin.eu.auth0.com/oauth/token"
+        );
         assert_eq!(callback_url(), "http://127.0.0.1:45873/callback");
     }
 
@@ -571,7 +574,8 @@ mod tests {
 
     #[test]
     fn parses_authorization_code_from_callback_request() {
-        let request = "GET /callback?code=auth-code&state=expected HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+        let request =
+            "GET /callback?code=auth-code&state=expected HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
 
         assert_eq!(
             parse_callback_request(request, "expected").unwrap(),
@@ -581,7 +585,8 @@ mod tests {
 
     #[test]
     fn rejects_callback_with_wrong_state() {
-        let request = "GET /callback?code=auth-code&state=wrong HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+        let request =
+            "GET /callback?code=auth-code&state=wrong HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
 
         assert!(parse_callback_request(request, "expected")
             .unwrap_err()

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{mpsc::channel, Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
-use egui::{epaint::ClippedShape, Pos2, RawInput, Rect, Vec2};
+use egui::{epaint::ClippedShape, Color32, Pos2, RawInput, Rect, Vec2};
 
 use crate::config::Config;
 use crate::copy::job::JobProgress;
@@ -68,8 +68,9 @@ fn test_state() -> super::AppState {
         validation_results: HashMap::new(),
         validation_job: None,
         visible_validation_scope: super::VisibleValidationScope::default(),
-        update_check_rx: None,
+        update_check: None,
         pending_update: None,
+        version_notice: None,
         update_dialog_open: false,
         update_install: None,
         transfer_estimates: HashMap::new(),
@@ -90,7 +91,7 @@ fn test_state() -> super::AppState {
     }
 }
 
-fn render_text_shapes(state: &mut super::AppState) -> Vec<(String, Pos2)> {
+fn render_text_shapes(state: &mut super::AppState) -> Vec<(String, Pos2, Option<Color32>)> {
     let ctx = egui::Context::default();
     let output = ctx.run(
         RawInput {
@@ -104,16 +105,23 @@ fn render_text_shapes(state: &mut super::AppState) -> Vec<(String, Pos2)> {
     texts
 }
 
-fn collect_text_shapes(shapes: &[ClippedShape], texts: &mut Vec<(String, Pos2)>) {
+fn collect_text_shapes(shapes: &[ClippedShape], texts: &mut Vec<(String, Pos2, Option<Color32>)>) {
     for clipped in shapes {
         collect_shape_text(&clipped.shape, texts);
     }
 }
 
-fn collect_shape_text(shape: &egui::epaint::Shape, texts: &mut Vec<(String, Pos2)>) {
+fn collect_shape_text(
+    shape: &egui::epaint::Shape,
+    texts: &mut Vec<(String, Pos2, Option<Color32>)>,
+) {
     match shape {
         egui::epaint::Shape::Text(text) => {
-            texts.push((text.galley.job.text.clone(), text.pos));
+            texts.push((
+                text.galley.job.text.clone(),
+                text.pos,
+                text.override_text_color.or(Some(text.fallback_color)),
+            ));
         }
         egui::epaint::Shape::Vec(shapes) => {
             for shape in shapes {
@@ -336,6 +344,61 @@ fn update_check_runs_only_once_per_day() {
 fn force_update_check_bypasses_the_daily_gate() {
     assert!(!super::should_force_update_check(false, Some(42), 42));
     assert!(super::should_force_update_check(true, Some(42), 42));
+}
+
+#[test]
+fn version_notice_expires_after_ten_seconds() {
+    let mut state = test_state();
+    let now = Instant::now();
+    state.version_notice = Some(super::VersionNotice {
+        message: "You already have the latest version".into(),
+        expires_at: now + std::time::Duration::from_secs(10),
+    });
+
+    state.clear_expired_version_notice(now + std::time::Duration::from_secs(9));
+    assert!(state.version_notice.is_some());
+
+    state.clear_expired_version_notice(now + std::time::Duration::from_secs(10));
+    assert!(state.version_notice.is_none());
+}
+
+#[test]
+fn manual_update_check_with_no_release_shows_latest_notice() {
+    let mut state = test_state();
+    let (tx, rx) = channel();
+    tx.send(Ok(None)).unwrap();
+    state.update_check = Some(super::UpdateCheckJob {
+        rx,
+        show_latest_notice_on_none: true,
+    });
+
+    state.pump(&egui::Context::default());
+
+    assert_eq!(
+        state
+            .version_notice
+            .as_ref()
+            .map(|notice| notice.message.as_str()),
+        Some("You already have the latest version")
+    );
+}
+
+#[test]
+fn version_label_renders_grey() {
+    let mut state = test_state();
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+
+    let texts = render_text_shapes(&mut state);
+    let color = texts
+        .into_iter()
+        .find(|(text, _, _)| text == &version)
+        .expect("expected version label in status bar");
+
+    let Some(color) = color.2 else {
+        panic!("expected version label to have a visible color");
+    };
+    assert_eq!(color.r(), color.g());
+    assert_eq!(color.g(), color.b());
 }
 
 #[test]
@@ -954,7 +1017,7 @@ fn error_message_renders_in_bottom_status_bar_area() {
     let texts = render_text_shapes(&mut state);
     let y = texts
         .iter()
-        .find_map(|(text, pos)| (text == "Cannot create Prod folder").then_some(pos.y))
+        .find_map(|(text, pos, _)| (text == "Cannot create Prod folder").then_some(pos.y))
         .expect("error text should be rendered");
 
     assert!(
@@ -976,7 +1039,7 @@ fn idle_status_bar_shows_logged_in_identity() {
 
     assert!(texts
         .iter()
-        .any(|(text, _)| text == "Logged in as Ada [admin]"));
+        .any(|(text, _, _)| text == "Logged in as Ada [admin]"));
 }
 
 #[test]
@@ -1024,10 +1087,10 @@ fn error_message_replaces_active_progress_text_while_visible() {
 
     assert!(texts
         .iter()
-        .any(|(text, _)| text == "Cannot create Prod folder"));
+        .any(|(text, _, _)| text == "Cannot create Prod folder"));
     assert!(!texts
         .iter()
-        .any(|(text, _)| { text.contains("Uploading HDRIs/foo/bar.xyz to Prod") }));
+        .any(|(text, _, _)| { text.contains("Uploading HDRIs/foo/bar.xyz to Prod") }));
 }
 
 #[test]
