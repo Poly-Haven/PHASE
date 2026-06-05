@@ -119,6 +119,16 @@ pub struct PendingVerificationFailure {
     pub error: String,
 }
 
+pub struct TransferFileListDialog {
+    pub key: RowKey,
+    pub direction: Direction,
+    pub ignore_raws_tiffs: bool,
+    pub plan: Option<Plan>,
+    pub error: Option<String>,
+    pub loading: bool,
+    pub rx: Option<Receiver<Result<Plan, String>>>,
+}
+
 pub struct RowToast {
     pub text: String,
     pub created_at: Instant,
@@ -235,10 +245,43 @@ pub struct TransferEstimateJob {
     pub rx: Receiver<Result<ActionPreview, String>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransferFileDisplayRow {
+    pub path: String,
+    pub reason: &'static str,
+    pub color: egui::Color32,
+}
+
 pub enum AuthMsg {
     Started(BrowserLogin),
     Success(AuthTokens),
     Error(String),
+}
+
+pub(super) fn transfer_file_display_rows(plan: &Plan) -> Vec<TransferFileDisplayRow> {
+    plan.files
+        .iter()
+        .filter_map(|file| {
+            let (reason, color) = match file.action {
+                crate::copy::plan::Action::New => ("New file", crate::ui::colors::STATUS_COMPLETE),
+                crate::copy::plan::Action::Overwrite => {
+                    ("File updated", crate::ui::colors::MSG_INFO)
+                }
+                crate::copy::plan::Action::Conflict { dest_newer: true } => {
+                    ("Conflict, destination newer", crate::ui::colors::MSG_ERROR)
+                }
+                crate::copy::plan::Action::Conflict { dest_newer: false } => {
+                    ("Conflict, source newer", crate::ui::colors::MSG_ERROR)
+                }
+                crate::copy::plan::Action::Identical => return None,
+            };
+            Some(TransferFileDisplayRow {
+                path: file.rel_path.display().to_string(),
+                reason,
+                color,
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -274,6 +317,7 @@ pub struct AppState {
     pub notion_rx: HashMap<AssetType, Receiver<Result<(AssetList, Option<AuthTokens>), String>>>,
     pub pending_conflict: Option<PendingConflict>,
     pub pending_verification_failure: Option<PendingVerificationFailure>,
+    pub transfer_file_list_dialog: Option<TransferFileListDialog>,
     pub pending_prod_folder_create: Option<RowKey>,
     pub pending_local_folder_delete: Option<RowKey>,
     pub row_toasts: HashMap<RowKey, RowToast>,
@@ -451,6 +495,7 @@ impl AppState {
             notion_rx: HashMap::new(),
             pending_conflict: None,
             pending_verification_failure: None,
+            transfer_file_list_dialog: None,
             pending_prod_folder_create: None,
             pending_local_folder_delete: None,
             row_toasts: HashMap::new(),
@@ -632,6 +677,66 @@ impl AppState {
         }
         build_plan_with_pull_filter(direction, &src_root, &dst_root, pull_filter)
             .map_err(|e| e.to_string())
+    }
+
+    fn transfer_file_list_roots(
+        &self,
+        key: &RowKey,
+        direction: Direction,
+        ignore_raws_tiffs: bool,
+    ) -> (PathBuf, PathBuf, PullFilterMode) {
+        match direction {
+            Direction::Push => (
+                self.local_root_for(key.asset_type).join(&key.slug),
+                self.prod_root_for(key.asset_type).join(&key.slug),
+                PullFilterMode::None,
+            ),
+            Direction::Pull => (
+                self.prod_root_for(key.asset_type).join(&key.slug),
+                self.local_root_for(key.asset_type).join(&key.slug),
+                if ignore_raws_tiffs {
+                    PullFilterMode::AlwaysSkipRawAndTif
+                } else {
+                    PullFilterMode::None
+                },
+            ),
+        }
+    }
+
+    pub(super) fn reload_transfer_file_list(&mut self) {
+        let Some(dialog) = self.transfer_file_list_dialog.as_ref() else {
+            return;
+        };
+        let key = dialog.key.clone();
+        let direction = dialog.direction;
+        let ignore_raws_tiffs = dialog.ignore_raws_tiffs;
+        let (src_root, dst_root, pull_filter) =
+            self.transfer_file_list_roots(&key, direction, ignore_raws_tiffs);
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            let result = Self::build_transfer_plan(direction, src_root, dst_root, pull_filter);
+            let _ = tx.send(result);
+        });
+        let Some(dialog) = self.transfer_file_list_dialog.as_mut() else {
+            return;
+        };
+        dialog.plan = None;
+        dialog.error = None;
+        dialog.loading = true;
+        dialog.rx = Some(rx);
+    }
+
+    pub(super) fn open_transfer_file_list(&mut self, key: &RowKey, direction: Direction) {
+        self.transfer_file_list_dialog = Some(TransferFileListDialog {
+            key: key.clone(),
+            direction,
+            ignore_raws_tiffs: matches!(direction, Direction::Pull),
+            plan: None,
+            error: None,
+            loading: false,
+            rx: None,
+        });
+        self.reload_transfer_file_list();
     }
 
     pub fn start_transfer_estimate(&mut self, key: &RowKey, action: TransferAction, force: bool) {
@@ -1348,6 +1453,23 @@ impl AppState {
                 self.transfer_estimate_jobs.remove(&key);
                 if let Ok(preview) = result {
                     self.transfer_estimates.insert(key, preview);
+                }
+            }
+        }
+
+        if let Some(dialog) = self.transfer_file_list_dialog.as_mut() {
+            if let Some(result) = dialog.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                dialog.rx = None;
+                dialog.loading = false;
+                match result {
+                    Ok(plan) => {
+                        dialog.plan = Some(plan);
+                        dialog.error = None;
+                    }
+                    Err(err) => {
+                        dialog.plan = None;
+                        dialog.error = Some(err);
+                    }
                 }
             }
         }
