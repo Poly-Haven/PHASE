@@ -267,4 +267,3 @@ mod tests {
         assert_eq!(WatchMode::boundary_after(Duration::from_secs(5000)), None);
     }
 }
-

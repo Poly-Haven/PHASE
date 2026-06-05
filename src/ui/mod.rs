@@ -163,6 +163,67 @@ pub struct PlanJob {
     pub rx: Receiver<Result<Plan, String>>,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum TransferAction {
+    PushAll,
+    PushStagingOnly,
+    PullDefault,
+    PullStagingOnly,
+    PullAll,
+}
+
+impl TransferAction {
+    pub const fn default_push() -> Self {
+        Self::PushAll
+    }
+
+    pub const fn default_pull() -> Self {
+        Self::PullDefault
+    }
+
+    pub const fn all() -> [Self; 5] {
+        [
+            Self::PushAll,
+            Self::PushStagingOnly,
+            Self::PullDefault,
+            Self::PullStagingOnly,
+            Self::PullAll,
+        ]
+    }
+
+    pub const fn direction(self) -> Direction {
+        match self {
+            Self::PushAll | Self::PushStagingOnly => Direction::Push,
+            Self::PullDefault | Self::PullStagingOnly | Self::PullAll => Direction::Pull,
+        }
+    }
+
+    pub const fn menu_label(self) -> &'static str {
+        match self {
+            Self::PushAll => "Push all files",
+            Self::PushStagingOnly => "Push staging only",
+            Self::PullDefault => "Pull without raws/tiffs",
+            Self::PullStagingOnly => "Pull staging only",
+            Self::PullAll => "Pull all files",
+        }
+    }
+
+    pub const fn default_suffix(self) -> &'static str {
+        match self {
+            Self::PushAll => " (default)",
+            Self::PullDefault => " (default)",
+            _ => "",
+        }
+    }
+
+    pub const fn nothing_label(self) -> &'static str {
+        match self.direction() {
+            Direction::Push => "nothing to push",
+            Direction::Pull => "nothing to pull",
+        }
+    }
+}
+
 /// Summary of an action plan: how many files will be copied and their total size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ActionPreview {
@@ -226,7 +287,6 @@ pub struct AppState {
     pub logged_in_identity: Option<LoggedInIdentity>,
     pub settings_open: bool,
     pub settings_local_root_input: String,
-    pub settings_skip_pull_raw_tif_if_many_work_tifs: bool,
     pub settings_open_notion_links_in_desktop_app: bool,
     /// Asset types whose background fetch is currently in flight.
     pub refreshing: HashSet<AssetType>,
@@ -257,8 +317,8 @@ pub struct AppState {
     pub pending_update: Option<crate::updater::UpdateInfo>,
     pub update_dialog_open: bool,
     pub update_install: Option<UpdateInstallJob>,
-    pub transfer_estimates: HashMap<(RowKey, Direction), ActionPreview>,
-    pub transfer_estimate_jobs: HashMap<(RowKey, Direction), TransferEstimateJob>,
+    pub transfer_estimates: HashMap<(RowKey, TransferAction), ActionPreview>,
+    pub transfer_estimate_jobs: HashMap<(RowKey, TransferAction), TransferEstimateJob>,
     pub script_jobs: HashMap<scripts::ScriptKey, scripts::ScriptJob>,
     pub script_queue: VecDeque<scripts::QueuedScript>,
     pub script_results: HashMap<scripts::ScriptKey, scripts::ScriptRun>,
@@ -405,7 +465,6 @@ impl AppState {
             logged_in_identity: None,
             settings_open: false,
             settings_local_root_input: String::new(),
-            settings_skip_pull_raw_tif_if_many_work_tifs: false,
             settings_open_notion_links_in_desktop_app: false,
             refreshing: HashSet::new(),
             pending_notion: HashMap::new(),
@@ -447,8 +506,6 @@ impl AppState {
         s.token_prompt_open = !s.config.has_access_token() && !s.config.can_refresh_access_token();
         s.token_input.clear();
         s.settings_local_root_input = s.config.local_root.display().to_string();
-        s.settings_skip_pull_raw_tif_if_many_work_tifs =
-            s.config.skip_pull_raw_tif_if_many_work_tifs;
         s.settings_open_notion_links_in_desktop_app = s.config.open_notion_links_in_desktop_app;
         s.refresh_logged_in_identity();
         // Warm the UI from cache immediately, then refresh in the background.
@@ -538,8 +595,47 @@ impl AppState {
         self.update_install = Some(UpdateInstallJob { rx });
     }
 
-    pub fn start_transfer_estimate(&mut self, key: &RowKey, direction: Direction, force: bool) {
-        let estimate_key = (key.clone(), direction);
+    pub(super) fn transfer_plan_roots(
+        &self,
+        key: &RowKey,
+        action: TransferAction,
+    ) -> (PathBuf, PathBuf, PullFilterMode) {
+        let local_root = self.local_root_for(key.asset_type).join(&key.slug);
+        let prod_root = self.prod_root_for(key.asset_type).join(&key.slug);
+        let local_staging = local_root.join("staging");
+        let prod_staging = prod_root.join("staging");
+        match action {
+            TransferAction::PushAll => (local_root, prod_root, PullFilterMode::None),
+            TransferAction::PushStagingOnly => (local_staging, prod_staging, PullFilterMode::None),
+            TransferAction::PullDefault => {
+                (prod_root, local_root, PullFilterMode::AlwaysSkipRawAndTif)
+            }
+            TransferAction::PullStagingOnly => (prod_staging, local_staging, PullFilterMode::None),
+            TransferAction::PullAll => (prod_root, local_root, PullFilterMode::None),
+        }
+    }
+
+    pub(super) fn build_transfer_plan(
+        direction: Direction,
+        src_root: PathBuf,
+        dst_root: PathBuf,
+        pull_filter: PullFilterMode,
+    ) -> Result<Plan, String> {
+        if !src_root.is_dir() {
+            return Ok(Plan {
+                direction,
+                src_root,
+                dst_root,
+                files: Vec::new(),
+                total_bytes_to_copy: 0,
+            });
+        }
+        build_plan_with_pull_filter(direction, &src_root, &dst_root, pull_filter)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn start_transfer_estimate(&mut self, key: &RowKey, action: TransferAction, force: bool) {
+        let estimate_key = (key.clone(), action);
         if (!force && self.transfer_estimates.contains_key(&estimate_key))
             || self.transfer_estimate_jobs.contains_key(&estimate_key)
             || self.plan_jobs.contains_key(key)
@@ -547,55 +643,51 @@ impl AppState {
         {
             return;
         }
-        let src_root = match direction {
-            Direction::Pull => self.prod_root_for(key.asset_type).join(&key.slug),
-            Direction::Push => self.local_root_for(key.asset_type).join(&key.slug),
-        };
-        let dst_root = match direction {
-            Direction::Pull => self.local_root_for(key.asset_type).join(&key.slug),
-            Direction::Push => self.prod_root_for(key.asset_type).join(&key.slug),
-        };
-        let pull_filter = match direction {
-            Direction::Pull if self.config.skip_pull_raw_tif_if_many_work_tifs => {
-                PullFilterMode::SkipRawAndTifWhenWorkTifsExceed { threshold: 30 }
-            }
-            Direction::Pull | Direction::Push => PullFilterMode::None,
-        };
+        let (src_root, dst_root, pull_filter) = self.transfer_plan_roots(key, action);
         let (tx, rx) = channel();
         thread::spawn(move || {
-            let result = build_plan_with_pull_filter(direction, &src_root, &dst_root, pull_filter)
-                .map(|plan| {
-                    let file_count = plan
-                        .files
-                        .iter()
-                        .filter(|f| {
-                            matches!(
-                                f.action,
-                                crate::copy::plan::Action::New
-                                    | crate::copy::plan::Action::Overwrite
-                            )
-                        })
-                        .count();
-                    ActionPreview {
-                        file_count,
-                        bytes: plan.total_bytes_to_copy,
-                    }
-                })
-                .map_err(|err| err.to_string());
+            let result =
+                Self::build_transfer_plan(action.direction(), src_root, dst_root, pull_filter).map(
+                    |plan| {
+                        let file_count = plan
+                            .files
+                            .iter()
+                            .filter(|f| {
+                                matches!(
+                                    f.action,
+                                    crate::copy::plan::Action::New
+                                        | crate::copy::plan::Action::Overwrite
+                                )
+                            })
+                            .count();
+                        ActionPreview {
+                            file_count,
+                            bytes: plan.total_bytes_to_copy,
+                        }
+                    },
+                );
             let _ = tx.send(result);
         });
         self.transfer_estimate_jobs
             .insert(estimate_key, TransferEstimateJob { rx });
     }
 
-    /// Starts transfer estimates for all currently visible assets (both directions).
+    /// Starts transfer estimates for all currently visible assets and transfer variants.
     /// Called on focus gain and when the visible scope changes.
     pub fn start_transfer_estimates_for_visible(&mut self, force: bool) {
         let keys = self.visible_asset_keys();
         for key in keys {
-            self.start_transfer_estimate(&key, Direction::Push, force);
-            self.start_transfer_estimate(&key, Direction::Pull, force);
+            for action in TransferAction::all() {
+                self.start_transfer_estimate(&key, action, force);
+            }
         }
+    }
+
+    pub fn clear_transfer_estimates_for_key(&mut self, key: &RowKey) {
+        self.transfer_estimates
+            .retain(|(estimate_key, _), _| estimate_key != key);
+        self.transfer_estimate_jobs
+            .retain(|(estimate_key, _), _| estimate_key != key);
     }
 
     pub fn refresh(&mut self, t: AssetType) {
@@ -713,7 +805,8 @@ impl AppState {
     fn prune_thumbnail_revisions_to_visible_scope(&mut self) {
         let visible: HashSet<RowKey> = self.visible_asset_keys().into_iter().collect();
         self.thumbnail_revisions.retain(|key, _| {
-            visible.contains(key) || self.thumbnail_jobs.contains_key(key)
+            visible.contains(key)
+                || self.thumbnail_jobs.contains_key(key)
                 || self.thumbnail_previews.contains_key(key)
         });
     }
@@ -1107,8 +1200,9 @@ impl AppState {
         self.start_thumbnail_refresh_for_keys(scope.keys.clone());
         self.prune_thumbnail_revisions_to_visible_scope();
         for key in &scope.keys {
-            self.start_transfer_estimate(key, Direction::Push, false);
-            self.start_transfer_estimate(key, Direction::Pull, false);
+            for action in TransferAction::all() {
+                self.start_transfer_estimate(key, action, false);
+            }
         }
     }
 
@@ -1598,12 +1692,10 @@ impl AppState {
                 // Re-run validation now that the copy is no longer in progress.
                 self.start_validation_for_keys(vec![finished_key.clone()]);
                 // Clear and restart estimates for this key (file state has changed).
-                self.transfer_estimates
-                    .remove(&(finished_key.clone(), Direction::Push));
-                self.transfer_estimates
-                    .remove(&(finished_key.clone(), Direction::Pull));
-                self.start_transfer_estimate(&finished_key, Direction::Push, true);
-                self.start_transfer_estimate(&finished_key, Direction::Pull, true);
+                self.clear_transfer_estimates_for_key(&finished_key);
+                for action in TransferAction::all() {
+                    self.start_transfer_estimate(&finished_key, action, true);
+                }
             }
         }
         let verification_keys: Vec<RowKey> = self.verifications.keys().cloned().collect();
@@ -1650,8 +1742,6 @@ impl AppState {
 
     pub fn open_settings(&mut self) {
         self.settings_local_root_input = self.config.local_root.display().to_string();
-        self.settings_skip_pull_raw_tif_if_many_work_tifs =
-            self.config.skip_pull_raw_tif_if_many_work_tifs;
         self.settings_open_notion_links_in_desktop_app =
             self.config.open_notion_links_in_desktop_app;
         self.settings_open = true;
@@ -2102,7 +2192,7 @@ fn draw_verification_failure_prompt(state: &mut AppState, ctx: &egui::Context) {
                 return;
             }
         }
-        start_job(state, &key, Direction::Push);
+        start_job(state, &key, TransferAction::default_push());
     } else if ignore {
         state.pending_verification_failure = None;
     }

@@ -60,5 +60,4 @@ mod tests {
         let selected = select(vec![AssetType::Hdris], AssetType::Hdris, true);
         assert_eq!(selected, vec![AssetType::Hdris]);
     }
-
 }

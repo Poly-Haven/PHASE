@@ -111,7 +111,12 @@ pub fn thumbnail_cache_file_name(
     signature: &ThumbnailSignature,
     format: ThumbnailFormat,
 ) -> String {
-    format!("{}-{}.{}", signature.source_mtime, signature.source_size, format.extension())
+    format!(
+        "{}-{}.{}",
+        signature.source_mtime,
+        signature.source_size,
+        format.extension()
+    )
 }
 
 pub fn thumbnail_cache_asset_root(cache_root: &Path, asset_type: AssetType) -> PathBuf {
@@ -155,7 +160,14 @@ pub fn spawn_thumbnail_job(
     #[cfg(test)]
     let completed_thread = Arc::clone(&completed);
     thread::spawn(move || {
-        let result = render_thumbnail(&cache_root, &local_root, &prod_root, &key, revision, &revision_state);
+        let result = render_thumbnail(
+            &cache_root,
+            &local_root,
+            &prod_root,
+            &key,
+            revision,
+            &revision_state,
+        );
         let _ = tx.send(result);
         #[cfg(test)]
         {

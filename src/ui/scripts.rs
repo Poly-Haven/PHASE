@@ -50,7 +50,12 @@ pub enum ScriptRunStatus {
 }
 
 impl ScriptRun {
-    fn succeeded(kind: ScriptKind, output: String, started_at: Instant, finished_at: Instant) -> Self {
+    fn succeeded(
+        kind: ScriptKind,
+        output: String,
+        started_at: Instant,
+        finished_at: Instant,
+    ) -> Self {
         Self {
             kind,
             status: ScriptRunStatus::Succeeded,
@@ -105,7 +110,13 @@ pub fn draw_context_menu(
     open_notion_in_app: bool,
 ) {
     if state.is_admin() && matches!(key.asset_type, AssetType::Hdris) {
-        draw_script_button(ui, state, key, "Normalize & Render", ScriptAction::NormalizeAndRender);
+        draw_script_button(
+            ui,
+            state,
+            key,
+            "Normalize & Render",
+            ScriptAction::NormalizeAndRender,
+        );
         draw_script_button(ui, state, key, "Normalize", ScriptAction::Normalize);
         draw_script_button(ui, state, key, "Render", ScriptAction::Render);
     }
@@ -127,7 +138,10 @@ fn draw_script_button(
         .kinds()
         .iter()
         .all(|kind| script_is_scheduled(state, key, *kind));
-    if ui.add_enabled(!scheduled, egui::Button::new(label)).clicked() {
+    if ui
+        .add_enabled(!scheduled, egui::Button::new(label))
+        .clicked()
+    {
         enqueue_action(state, key, action);
         ui.close_menu();
     }
@@ -235,9 +249,10 @@ pub fn draw_output_dialog(state: &mut AppState, ctx: &egui::Context) {
         state,
         &script_key,
         match run.status {
-            ScriptRunStatus::Succeeded => {
-                DialogState::Succeeded(run.kind, run.finished_at.saturating_duration_since(run.started_at))
-            }
+            ScriptRunStatus::Succeeded => DialogState::Succeeded(
+                run.kind,
+                run.finished_at.saturating_duration_since(run.started_at),
+            ),
             ScriptRunStatus::Failed => DialogState::Failed(run.kind),
             ScriptRunStatus::Blocked => DialogState::Blocked(run.kind),
         },
@@ -302,7 +317,9 @@ pub fn pump(state: &mut AppState) {
                                 state
                                     .script_results
                                     .get(&key)
-                                    .map(|run| run.finished_at.saturating_duration_since(run.started_at))
+                                    .map(|run| run
+                                        .finished_at
+                                        .saturating_duration_since(run.started_at))
                                     .unwrap_or_else(|| Duration::from_secs(1))
                             )
                         ),
@@ -335,7 +352,10 @@ pub fn enqueue_action(state: &mut AppState, key: &RowKey, action: ScriptAction) 
         }
 
         let Some(spec) = script_spec(state, key, kind) else {
-            state.error_banner = Some(format!("Could not resolve script path for {}", kind.label()));
+            state.error_banner = Some(format!(
+                "Could not resolve script path for {}",
+                kind.label()
+            ));
             return;
         };
         state.script_results.remove(&script_key);
@@ -354,14 +374,18 @@ fn start_next_ready_task(state: &mut AppState) {
     if !state.script_jobs.is_empty() {
         return;
     }
-    let Some(index) = state
-        .script_queue
-        .iter()
-        .position(|entry| entry.depends_on.iter().all(|dep| dependency_succeeded(state, dep)))
-    else {
+    let Some(index) = state.script_queue.iter().position(|entry| {
+        entry
+            .depends_on
+            .iter()
+            .all(|dep| dependency_succeeded(state, dep))
+    }) else {
         return;
     };
-    let entry = state.script_queue.remove(index).expect("queue entry exists");
+    let entry = state
+        .script_queue
+        .remove(index)
+        .expect("queue entry exists");
     let (tx, rx) = channel();
     let started_at = Instant::now();
     thread::spawn({
@@ -453,7 +477,11 @@ fn script_is_scheduled(state: &AppState, key: &RowKey, kind: ScriptKind) -> bool
         row: key.clone(),
         kind,
     };
-    state.script_jobs.contains_key(&script_key) || state.script_queue.iter().any(|entry| entry.key == script_key)
+    state.script_jobs.contains_key(&script_key)
+        || state
+            .script_queue
+            .iter()
+            .any(|entry| entry.key == script_key)
 }
 
 fn active_script_kind_for_row(state: &AppState, key: &RowKey) -> Option<ScriptKind> {
@@ -473,10 +501,7 @@ fn active_script_key(state: &AppState, key: &RowKey) -> Option<ScriptKey> {
 }
 
 fn script_is_queued_for_row(state: &AppState, key: &RowKey) -> bool {
-    state
-        .script_queue
-        .iter()
-        .any(|entry| entry.key.row == *key)
+    state.script_queue.iter().any(|entry| entry.key.row == *key)
         && active_script_kind_for_row(state, key).is_none()
 }
 
@@ -484,7 +509,9 @@ fn latest_alert_run_for_row<'a>(state: &'a AppState, key: &RowKey) -> Option<&'a
     state
         .script_results
         .iter()
-        .filter(|(script_key, run)| script_key.row == *key && !matches!(run.status, ScriptRunStatus::Succeeded))
+        .filter(|(script_key, run)| {
+            script_key.row == *key && !matches!(run.status, ScriptRunStatus::Succeeded)
+        })
         .max_by_key(|(_, run)| run.finished_at)
         .map(|(_, run)| run)
 }
@@ -498,36 +525,40 @@ fn draw_dialog_contents(
 ) {
     let mut close = false;
     let mut text = output;
-    egui::Window::new(format!("{} output — {}", dialog_state.kind().label(), script_key.row.slug))
-        .collapsible(false)
-        .resizable(true)
-        .default_size(egui::vec2(
-            layout::UPDATE_DIALOG_WIDTH,
-            layout::UPDATE_DIALOG_SCROLL_HEIGHT,
-        ))
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                let (icon, label) = dialog_state.banner(ui.ctx());
-                ui.add(icon);
-                ui.label(label);
-            });
-            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
-            egui::ScrollArea::vertical()
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut text)
-                            .font(egui::TextStyle::Monospace)
-                            .desired_width(f32::INFINITY)
-                            .interactive(false),
-                    );
-                });
-            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
-            if ui.button("Close").clicked() {
-                close = true;
-            }
+    egui::Window::new(format!(
+        "{} output — {}",
+        dialog_state.kind().label(),
+        script_key.row.slug
+    ))
+    .collapsible(false)
+    .resizable(true)
+    .default_size(egui::vec2(
+        layout::UPDATE_DIALOG_WIDTH,
+        layout::UPDATE_DIALOG_SCROLL_HEIGHT,
+    ))
+    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+    .show(ctx, |ui| {
+        ui.horizontal(|ui| {
+            let (icon, label) = dialog_state.banner(ui.ctx());
+            ui.add(icon);
+            ui.label(label);
         });
+        ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
+        egui::ScrollArea::vertical()
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut text)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY)
+                        .interactive(false),
+                );
+            });
+        ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
+        if ui.button("Close").clicked() {
+            close = true;
+        }
+    });
     if close {
         state.script_output_dialog = None;
     }
@@ -559,7 +590,9 @@ impl DialogState {
                         tex.id(),
                         egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
                     )),
-                    egui::WidgetText::from(egui::RichText::new(kind.label()).color(colors::TEXT_PRIMARY)),
+                    egui::WidgetText::from(
+                        egui::RichText::new(kind.label()).color(colors::TEXT_PRIMARY),
+                    ),
                 )
             }
             DialogState::Succeeded(kind, duration) => {
@@ -570,12 +603,14 @@ impl DialogState {
                         egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
                     ))
                     .tint(colors::MSG_INFO),
-                    egui::WidgetText::from(egui::RichText::new(format!(
-                        "{} in {}",
-                        kind.success_label(),
-                        format_duration(duration)
-                    ))
-                    .color(colors::MSG_INFO)),
+                    egui::WidgetText::from(
+                        egui::RichText::new(format!(
+                            "{} in {}",
+                            kind.success_label(),
+                            format_duration(duration)
+                        ))
+                        .color(colors::MSG_INFO),
+                    ),
                 )
             }
             DialogState::Failed(kind) => {
@@ -586,7 +621,9 @@ impl DialogState {
                         egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
                     ))
                     .tint(colors::MSG_WARNING),
-                    egui::WidgetText::from(egui::RichText::new(kind.failed_label()).color(colors::MSG_WARNING)),
+                    egui::WidgetText::from(
+                        egui::RichText::new(kind.failed_label()).color(colors::MSG_WARNING),
+                    ),
                 )
             }
             DialogState::Blocked(kind) => {
@@ -597,7 +634,10 @@ impl DialogState {
                         egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
                     ))
                     .tint(colors::MSG_WARNING),
-                    egui::WidgetText::from(egui::RichText::new(format!("{} blocked", kind.label())).color(colors::MSG_WARNING)),
+                    egui::WidgetText::from(
+                        egui::RichText::new(format!("{} blocked", kind.label()))
+                            .color(colors::MSG_WARNING),
+                    ),
                 )
             }
         }
@@ -649,7 +689,9 @@ fn run_script(spec: ScriptSpec, tx: Sender<ScriptEvent>) {
     for reader in readers {
         let _ = reader.join();
     }
-    let _ = tx.send(ScriptEvent::Finished { exit_status: status });
+    let _ = tx.send(ScriptEvent::Finished {
+        exit_status: status,
+    });
 }
 
 fn spawn_reader<T>(stream: T, tx: Sender<ScriptEvent>) -> thread::JoinHandle<()>
@@ -689,7 +731,10 @@ fn normalize_spec(state: &AppState, key: &RowKey) -> Option<ScriptSpec> {
     let script = script_root()?.join("normalize.py");
     Some(ScriptSpec {
         program: OsString::from("python"),
-        args: vec![script.into_os_string(), normalize_target_path(state, key).into_os_string()],
+        args: vec![
+            script.into_os_string(),
+            normalize_target_path(state, key).into_os_string(),
+        ],
     })
 }
 

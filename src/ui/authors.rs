@@ -119,7 +119,11 @@ mod tests {
 
     #[test]
     fn abbreviate_uses_full_name_when_first_names_collide() {
-        let authors = vec!["Alice Smith".into(), "Alice Brown".into(), "Bob Jones".into()];
+        let authors = vec![
+            "Alice Smith".into(),
+            "Alice Brown".into(),
+            "Bob Jones".into(),
+        ];
         let map = super::abbreviate_names(&authors);
         assert_eq!(map["Alice Smith"], "Alice Smith");
         assert_eq!(map["Alice Brown"], "Alice Brown");

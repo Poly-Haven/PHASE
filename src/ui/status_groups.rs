@@ -47,5 +47,4 @@ mod tests {
         let selected = select(vec![StatusGroup::InProgress], StatusGroup::InProgress, true);
         assert_eq!(selected, vec![StatusGroup::InProgress]);
     }
-
 }

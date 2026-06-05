@@ -36,7 +36,10 @@ const MTIME_TOLERANCE_SECS: i64 = 2;
 pub enum PullFilterMode {
     #[allow(dead_code)]
     AlwaysSkipRawAndTif,
-    SkipRawAndTifWhenWorkTifsExceed { threshold: usize },
+    #[allow(dead_code)]
+    SkipRawAndTifWhenWorkTifsExceed {
+        threshold: usize,
+    },
     None,
 }
 

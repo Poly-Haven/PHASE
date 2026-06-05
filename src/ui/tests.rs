@@ -50,7 +50,6 @@ fn test_state() -> super::AppState {
         logged_in_identity: None,
         settings_open: false,
         settings_local_root_input: String::new(),
-        settings_skip_pull_raw_tif_if_many_work_tifs: true,
         settings_open_notion_links_in_desktop_app: false,
         refreshing: HashSet::new(),
         pending_notion: HashMap::new(),
@@ -203,8 +202,12 @@ impl ConfigBackup {
             os.push(".bak");
             std::path::PathBuf::from(os)
         });
-        let config_bytes = config_path.as_ref().and_then(|path| std::fs::read(path).ok());
-        let backup_bytes = backup_path.as_ref().and_then(|path| std::fs::read(path).ok());
+        let config_bytes = config_path
+            .as_ref()
+            .and_then(|path| std::fs::read(path).ok());
+        let backup_bytes = backup_path
+            .as_ref()
+            .and_then(|path| std::fs::read(path).ok());
         Self {
             _lock: guard,
             config_path,
@@ -349,7 +352,7 @@ fn transfer_estimate_uses_copy_plan_total_bytes() {
     std::fs::create_dir_all(state.prod_root_for(key.asset_type).join(&key.slug)).unwrap();
     std::fs::write(local_asset.join("staging").join("file.bin"), [1u8, 2, 3, 4]).unwrap();
 
-    state.start_transfer_estimate(&key, Direction::Push, true);
+    state.start_transfer_estimate(&key, super::TransferAction::PushAll, true);
     for _ in 0..50 {
         state.pump(&egui::Context::default());
         if state.transfer_estimate_jobs.is_empty() {
@@ -359,10 +362,46 @@ fn transfer_estimate_uses_copy_plan_total_bytes() {
     }
 
     assert_eq!(
-        state.transfer_estimates.get(&(key, Direction::Push)),
+        state
+            .transfer_estimates
+            .get(&(key, super::TransferAction::PushAll)),
         Some(&super::ActionPreview {
             file_count: 1,
             bytes: 4
+        })
+    );
+}
+
+#[test]
+fn transfer_estimate_uses_staging_only_variant() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = test_state();
+    state.config.local_root = temp.path().join("local");
+    state.config.prod_root = temp.path().join("prod");
+    let key = super::RowKey {
+        asset_type: super::AssetType::Hdris,
+        slug: "asset".into(),
+    };
+    let prod_asset = state.prod_root_for(key.asset_type).join(&key.slug);
+    std::fs::create_dir_all(prod_asset.join("staging")).unwrap();
+    std::fs::write(prod_asset.join("staging").join("file.bin"), [9u8, 8, 7]).unwrap();
+
+    state.start_transfer_estimate(&key, super::TransferAction::PullStagingOnly, true);
+    for _ in 0..50 {
+        state.pump(&egui::Context::default());
+        if state.transfer_estimate_jobs.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    assert_eq!(
+        state
+            .transfer_estimates
+            .get(&(key, super::TransferAction::PullStagingOnly)),
+        Some(&super::ActionPreview {
+            file_count: 1,
+            bytes: 3
         })
     );
 }
@@ -843,7 +882,8 @@ fn ui_thumbnail_refresh_logic_stays_off_the_ui_thread() {
     let mod_src =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "\\src\\ui\\mod.rs")).unwrap();
     let table_src =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "\\src\\ui\\table.rs")).unwrap();
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "\\src\\ui\\table.rs"))
+            .unwrap();
 
     assert!(!table_src.contains("ensure_thumbnail_job("));
     assert!(!mod_src.contains("thumbnail_signature_for("));
