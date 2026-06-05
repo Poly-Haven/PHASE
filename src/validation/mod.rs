@@ -458,9 +458,9 @@ mod tests {
             &prod_root,
         );
 
-        assert!(!findings.iter().any(|finding| {
-            finding.text.contains("Missing /staging/")
-        }));
+        assert!(!findings
+            .iter()
+            .any(|finding| { finding.text.contains("Missing /staging/") }));
     }
 
     #[test]
@@ -498,5 +498,4 @@ mod tests {
 
         assert_eq!(loaded, keys);
     }
-
 }

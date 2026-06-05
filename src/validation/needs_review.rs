@@ -1,5 +1,8 @@
 use crate::ui::AssetType;
-use crate::validation::{is_complete_status, is_needs_review, status_has_passed_review, Finding, Severity, ValidationContext};
+use crate::validation::{
+    is_complete_status, is_needs_review, status_has_passed_review, Finding, Severity,
+    ValidationContext,
+};
 
 pub(crate) fn run(ctx: &ValidationContext) -> Vec<Finding> {
     let is_active = is_needs_review(ctx.status.as_ref())

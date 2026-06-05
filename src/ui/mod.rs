@@ -35,6 +35,18 @@ use crate::copy::job::{JobMsg, JobProgress, VerifyMsg};
 use crate::copy::plan::{build_plan_with_pull_filter, Direction, Plan, PullFilterMode};
 use crate::notion::{AssetList, AssetStatus, StatusOption};
 
+const VERSION_NOTICE_DURATION: Duration = Duration::from_secs(10);
+
+struct VersionNotice {
+    message: String,
+    expires_at: Instant,
+}
+
+struct UpdateCheckJob {
+    rx: Receiver<Result<Option<crate::updater::UpdateInfo>, String>>,
+    show_latest_notice_on_none: bool,
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum AssetType {
     Hdris,
@@ -357,8 +369,9 @@ pub struct AppState {
     pub validation_results: HashMap<RowKey, Vec<crate::validation::Finding>>,
     pub validation_job: Option<ValidationJob>,
     pub visible_validation_scope: VisibleValidationScope,
-    pub update_check_rx: Option<Receiver<Result<Option<crate::updater::UpdateInfo>, String>>>,
+    update_check: Option<UpdateCheckJob>,
     pub pending_update: Option<crate::updater::UpdateInfo>,
+    version_notice: Option<VersionNotice>,
     pub update_dialog_open: bool,
     pub update_install: Option<UpdateInstallJob>,
     pub transfer_estimates: HashMap<(RowKey, TransferAction), ActionPreview>,
@@ -528,8 +541,9 @@ impl AppState {
             validation_results: HashMap::new(),
             validation_job: None,
             visible_validation_scope: VisibleValidationScope::default(),
-            update_check_rx: None,
+            update_check: None,
             pending_update: None,
+            version_notice: None,
             update_dialog_open: false,
             update_install: None,
             transfer_estimates: HashMap::new(),
@@ -599,7 +613,10 @@ impl AppState {
     }
 
     fn start_update_check_impl(&mut self, force: bool) {
-        if self.update_check_rx.is_some() {
+        if let Some(job) = self.update_check.as_mut() {
+            if force {
+                job.show_latest_notice_on_none = true;
+            }
             return;
         }
         let today = current_update_check_day();
@@ -613,7 +630,10 @@ impl AppState {
             let res = crate::updater::check_for_update().map_err(|err| err.to_string());
             let _ = tx.send(res);
         });
-        self.update_check_rx = Some(rx);
+        self.update_check = Some(UpdateCheckJob {
+            rx,
+            show_latest_notice_on_none: force,
+        });
     }
 
     fn start_update_check(&mut self) {
@@ -638,6 +658,23 @@ impl AppState {
             let _ = tx.send(res);
         });
         self.update_install = Some(UpdateInstallJob { rx });
+    }
+
+    fn clear_expired_version_notice(&mut self, now: Instant) {
+        if self
+            .version_notice
+            .as_ref()
+            .is_some_and(|notice| notice.expires_at <= now)
+        {
+            self.version_notice = None;
+        }
+    }
+
+    fn set_version_notice(&mut self, message: impl Into<String>) {
+        self.version_notice = Some(VersionNotice {
+            message: message.into(),
+            expires_at: Instant::now() + VERSION_NOTICE_DURATION,
+        });
     }
 
     pub(super) fn transfer_plan_roots(
@@ -1414,18 +1451,25 @@ impl AppState {
             }
         }
 
-        if let Some(res) = self
-            .update_check_rx
-            .as_ref()
-            .and_then(|rx| rx.try_recv().ok())
+        if let Some((show_latest_notice_on_none, res)) =
+            self.update_check.as_ref().and_then(|job| {
+                job.rx
+                    .try_recv()
+                    .ok()
+                    .map(|res| (job.show_latest_notice_on_none, res))
+            })
         {
-            self.update_check_rx = None;
+            self.update_check = None;
             match res {
                 Ok(Some(info)) => {
                     self.update_dialog_open = info.minor_or_major_update;
                     self.pending_update = Some(info);
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    if show_latest_notice_on_none {
+                        self.set_version_notice("You already have the latest version");
+                    }
+                }
                 Err(msg) => {
                     log::warn!("Update check failed: {msg}");
                 }
@@ -2109,19 +2153,22 @@ fn draw_status_bar_primary(state: &mut AppState, ui: &mut egui::Ui) {
 }
 
 fn draw_version_status(state: &mut AppState, ui: &mut egui::Ui) {
+    state.clear_expired_version_notice(Instant::now());
     let current = format!("v{}", env!("CARGO_PKG_VERSION"));
     if state.update_install.is_some() {
         ui.label(egui::RichText::new("Installing update...").color(colors::TEXT_DISABLED));
         return;
     }
-    let label = if state.pending_update.is_some() {
+    let label = if let Some(notice) = state.version_notice.as_ref() {
+        notice.message.clone()
+    } else if state.pending_update.is_some() {
         format!("{current} - New version available")
     } else {
         current
     };
     let response = ui
         .add(
-            egui::Label::new(egui::RichText::new(label).color(colors::HOVER))
+            egui::Label::new(egui::RichText::new(label).color(colors::TEXT_DISABLED))
                 .sense(egui::Sense::click()),
         )
         .on_hover_text("Check for updates")
@@ -2196,7 +2243,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         || state.prod_cache_rx.is_some()
         || !state.verifications.is_empty()
         || state.validation_job.is_some()
-        || state.update_check_rx.is_some()
+        || state.update_check.is_some()
         || state.update_install.is_some()
         || !state.transfer_estimate_jobs.is_empty()
         || !state.thumbnail_jobs.is_empty()
