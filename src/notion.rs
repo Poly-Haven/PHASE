@@ -2,6 +2,9 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fs;
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,8 +18,20 @@ pub struct Asset {
     pub page_id: String,
     pub slug: String,
     pub author: String,
+    #[serde(default)]
+    pub authors: Vec<String>,
+    #[serde(default)]
+    pub author_profiles: Vec<AuthorProfile>,
     pub url: String,
     pub status: Option<AssetStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthorProfile {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +126,9 @@ pub fn fetch_assets(token: &str, asset_type: &str) -> Result<AssetList> {
     list.assets
         .sort_by(|a, b| a.slug.to_lowercase().cmp(&b.slug.to_lowercase()));
     list.statuses.sort_by_key(|status| status.sort_order);
+    if let Err(err) = cache_author_avatars(&list) {
+        log::warn!("Caching PHASE author avatars failed: {err}");
+    }
     Ok(list)
 }
 
@@ -173,6 +191,84 @@ fn client() -> Result<reqwest::blocking::Client> {
         .timeout(Duration::from_secs(30))
         .build()
         .context("building HTTP client")
+}
+
+pub fn author_avatar_cache_key(author: &AuthorProfile) -> String {
+    let source = format!("{}|{}", author.id, author.avatar_url.as_deref().unwrap_or(""));
+    blake3::hash(source.as_bytes()).to_hex().to_string()
+}
+
+pub fn author_avatar_cache_path(author: &AuthorProfile) -> Option<PathBuf> {
+    author.avatar_url.as_ref()?;
+    let cache_root = crate::config::cache_dir().ok()?.join("avatars");
+    Some(cache_root.join(format!("{}.webp", author_avatar_cache_key(author))))
+}
+
+pub fn cache_author_avatars(list: &AssetList) -> Result<()> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .context("building avatar HTTP client")?;
+
+    let mut seen = HashSet::new();
+    for author in list
+        .assets
+        .iter()
+        .flat_map(|asset| asset.author_profiles.iter())
+    {
+        if !seen.insert(author.id.clone()) {
+            continue;
+        }
+        if let Err(err) = cache_author_avatar(&client, author) {
+            log::warn!("Failed to cache avatar for {}: {err}", author.name);
+        }
+    }
+
+    Ok(())
+}
+
+fn cache_author_avatar(client: &reqwest::blocking::Client, author: &AuthorProfile) -> Result<()> {
+    const AVATAR_CACHE_SIZE: u32 = 48;
+
+    let Some(url) = author.avatar_url.as_deref() else {
+        return Ok(());
+    };
+    let Some(path) = author_avatar_cache_path(author) else {
+        return Ok(());
+    };
+    if path.is_file() {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).context("creating avatar cache directory")?;
+    }
+
+    let response = client
+        .get(url)
+        .send()
+        .with_context(|| format!("downloading avatar for {}", author.name))?
+        .error_for_status()
+        .with_context(|| format!("avatar response for {}", author.name))?;
+    let bytes = response
+        .bytes()
+        .with_context(|| format!("reading avatar bytes for {}", author.name))?;
+    let decoded = image::load_from_memory(&bytes)
+        .with_context(|| format!("decoding avatar for {}", author.name))?;
+    let resized = decoded.resize_to_fill(
+        AVATAR_CACHE_SIZE,
+        AVATAR_CACHE_SIZE,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    resized
+        .write_to(&mut encoded, image::ImageOutputFormat::WebP)
+        .with_context(|| format!("encoding avatar cache for {}", author.name))?;
+    let temp_path = path.with_extension("tmp");
+    fs::write(&temp_path, encoded.into_inner())
+        .with_context(|| format!("writing avatar cache for {}", author.name))?;
+    fs::rename(&temp_path, &path).with_context(|| format!("finalizing avatar cache for {}", author.name))?;
+    Ok(())
 }
 
 #[cfg(test)]

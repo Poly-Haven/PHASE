@@ -1,7 +1,7 @@
 use super::colors;
 use super::{layout, ActionPreview, AppState, AssetListState, RowKey, TransferAction};
 use crate::copy::plan::Direction;
-use crate::notion::{Asset, AssetStatus, StatusGroup, StatusOption};
+use crate::notion::{Asset, AssetStatus, AuthorProfile, StatusGroup, StatusOption};
 use crate::ui::AssetType;
 
 /// Severity of a row-level message.
@@ -150,6 +150,7 @@ struct RowView {
     asset_type: super::AssetType,
     slug: String,
     author: String,
+    author_profiles: Vec<AuthorProfile>,
     url: String,
     page_id: String,
     status: Option<AssetStatus>,
@@ -233,6 +234,7 @@ impl RowView {
             asset_type,
             slug: a.slug.clone(),
             author: a.author.clone(),
+            author_profiles: a.author_profiles.clone(),
             url: a.url.clone(),
             page_id: a.page_id.clone(),
             status: a.status.clone(),
@@ -648,37 +650,35 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
             ui.add_space(layout::ROW_SECTION_PADDING);
             draw_status_pill(state, ui, key, row);
             ui.add_space(layout::ROW_SECTION_PADDING);
-            if row.exists_on_prod {
-                let font_id = egui::TextStyle::Body.resolve(ui.style());
-                let galley =
-                    ui.fonts(|f| f.layout_no_wrap(row.slug.clone(), font_id, egui::Color32::WHITE));
-                let slug_size = galley.rect.size();
-                let slug_start =
-                    egui::pos2(ui.cursor().min.x, row1_rect.center().y - slug_size.y / 2.0);
-                let slug_rect = egui::Rect::from_min_size(slug_start, slug_size);
-                let is_hovered = ui.rect_contains_pointer(slug_rect);
-                let slug_color = if is_hovered {
-                    colors::HOVER
-                } else {
-                    colors::TEXT_PRIMARY
-                };
-                let slug_resp = ui
-                    .add(
-                        egui::Label::new(egui::RichText::new(&row.slug).strong().color(slug_color))
-                            .sense(egui::Sense::click()),
-                    )
-                    .on_hover_text("Open asset file")
-                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                if slug_resp.clicked() {
-                    open_asset_file(row.asset_type, &prod_folder, &row.slug);
-                }
+            let font_id = egui::TextStyle::Body.resolve(ui.style());
+            let galley =
+                ui.fonts(|f| f.layout_no_wrap(row.slug.clone(), font_id, egui::Color32::WHITE));
+            let slug_size = galley.rect.size();
+            let slug_start =
+                egui::pos2(ui.cursor().min.x, row1_rect.center().y - slug_size.y / 2.0);
+            let slug_rect = egui::Rect::from_min_size(slug_start, slug_size);
+            let is_hovered = ui.rect_contains_pointer(slug_rect);
+            let slug_color = if is_hovered {
+                colors::HOVER
             } else {
-                ui.add(egui::Label::new(
-                    egui::RichText::new(&row.slug)
-                        .strong()
-                        .color(colors::TEXT_DISABLED),
-                ));
+                colors::TEXT_PRIMARY
+            };
+            let slug_resp = ui
+                .add(
+                    egui::Label::new(egui::RichText::new(&row.slug).strong().color(slug_color))
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_text("Open asset file")
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if slug_resp.clicked() {
+                if row.exists_on_prod {
+                    open_asset_file(row.asset_type, &prod_folder, &row.slug);
+                } else {
+                    handle_row_message_action(state, key, &RowMsgAction::CreateProdFolder);
+                }
             }
+            ui.add_space(layout::ROW_SECTION_PADDING);
+            draw_row_authors(state, ui, row, colors::TEXT_PRIMARY);
             super::scripts::draw_row_status(state, ui, key);
         });
     });
@@ -864,7 +864,6 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                 open_notion_link(&row.url, open_notion_in_app);
             }
             ui.add_space(layout::ROW_SECTION_PADDING);
-            ui.colored_label(colors::TEXT_PRIMARY.linear_multiply(0.25), &row.author);
             draw_row_messages(state, ui, key, row);
         });
     });
@@ -1055,6 +1054,119 @@ fn draw_row_messages(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row:
             }
         });
     }
+}
+
+fn author_avatar_texture<'a>(
+    state: &'a mut AppState,
+    ctx: &egui::Context,
+    author: &AuthorProfile,
+) -> Option<&'a egui::TextureHandle> {
+    let cache_key = crate::notion::author_avatar_cache_key(author);
+    if !state.author_avatar_textures.contains_key(&cache_key) {
+        let cache_path = crate::notion::author_avatar_cache_path(author)?;
+        if !cache_path.is_file() {
+            return None;
+        }
+        let texture_name = format!("author-avatar-{cache_key}");
+        let texture = load_circular_avatar_texture(ctx, &cache_path, &texture_name).ok()?;
+        state.author_avatar_textures.insert(cache_key.clone(), texture);
+    }
+    state.author_avatar_textures.get(&cache_key)
+}
+
+fn load_circular_avatar_texture(
+    ctx: &egui::Context,
+    cache_path: &std::path::Path,
+    texture_name: &str,
+) -> Result<egui::TextureHandle, String> {
+    let bytes = std::fs::read(cache_path).map_err(|err| err.to_string())?;
+    let decoded = image::load_from_memory(&bytes).map_err(|err| err.to_string())?;
+    let mut rgba = decoded.to_rgba8();
+    mask_circle(&mut rgba);
+    let image = egui::ColorImage::from_rgba_unmultiplied(
+        [rgba.width() as usize, rgba.height() as usize],
+        rgba.as_raw(),
+    );
+    Ok(ctx.load_texture(texture_name, image, egui::TextureOptions::LINEAR))
+}
+
+fn mask_circle(image: &mut image::RgbaImage) {
+    let width = image.width() as f32;
+    let height = image.height() as f32;
+    let radius = width.min(height) / 2.0;
+    let center_x = width / 2.0;
+    let center_y = height / 2.0;
+
+    for (x, y, pixel) in image.enumerate_pixels_mut() {
+        let dx = x as f32 + 0.5 - center_x;
+        let dy = y as f32 + 0.5 - center_y;
+        if (dx * dx + dy * dy).sqrt() > radius {
+            pixel[3] = 0;
+        }
+    }
+}
+
+fn author_initials(name: &str) -> String {
+    let mut parts = name.split_whitespace().filter(|part| !part.is_empty());
+    let first = parts.next().and_then(|part| part.chars().next());
+    let second = parts.next().and_then(|part| part.chars().next());
+    match (first, second) {
+        (Some(first), Some(second)) => format!("{first}{second}"),
+        (Some(first), None) => first.to_string(),
+        _ => "?".into(),
+    }
+}
+
+fn draw_author_avatar(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    author: &AuthorProfile,
+    text_color: egui::Color32,
+) {
+    let size = egui::vec2(layout::ACTION_ICON_SIZE, layout::ACTION_ICON_SIZE);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+
+    let painter = ui.painter();
+    if let Some(texture) = author_avatar_texture(state, ui.ctx(), author) {
+        painter.image(
+            texture.id(),
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+    } else {
+        painter.circle_filled(rect.center(), rect.width() / 2.0, text_color.linear_multiply(0.12));
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            author_initials(&author.name),
+            egui::TextStyle::Small.resolve(ui.style()),
+            text_color,
+        );
+    }
+}
+
+fn draw_row_authors(state: &mut AppState, ui: &mut egui::Ui, row: &RowView, text_color: egui::Color32) {
+    if row.author_profiles.is_empty() {
+        ui.colored_label(colors::TEXT_PRIMARY.linear_multiply(0.25), &row.author);
+        return;
+    }
+
+    ui.horizontal(|ui| {
+        for (index, author) in row.author_profiles.iter().enumerate() {
+            if index > 0 {
+                ui.add_space(layout::ROW_SECTION_PADDING);
+            }
+            ui.horizontal(|ui| {
+                draw_author_avatar(ui, state, author, text_color);
+                ui.add_space(-4.0);
+                ui.colored_label(colors::TEXT_PRIMARY.linear_multiply(0.25), &author.name);
+            });
+        }
+    });
 }
 
 fn action_label(action: &RowMsgAction) -> String {
@@ -1355,7 +1467,8 @@ pub(super) fn asset_matches_filters(
     filters: &[String],
     selected: &[StatusGroup],
 ) -> bool {
-    author_matches_filter(&asset.author, filters) && status_matches_filter(&asset.status, selected)
+    author_matches_filter(&super::asset_author_source(asset), filters)
+        && status_matches_filter(&asset.status, selected)
 }
 
 fn author_matches_filter(author: &str, filters: &[String]) -> bool {
@@ -1407,6 +1520,7 @@ mod tests {
             asset_type: crate::ui::AssetType::Hdris,
             slug: slug.into(),
             author: String::new(),
+            author_profiles: Vec::new(),
             url: String::new(),
             page_id: String::new(),
             status,
@@ -1626,6 +1740,8 @@ mod tests {
             page_id: "page".into(),
             slug: "asset".into(),
             author: "Author".into(),
+            authors: Vec::new(),
+            author_profiles: Vec::new(),
             url: String::new(),
             status: Some(status("approved", "Approved")),
         };

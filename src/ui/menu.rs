@@ -348,11 +348,11 @@ fn current_authors(state: &AppState) -> Vec<String> {
                             .map(|s| status_filter.contains(&s.group))
                             .unwrap_or(false)
                     })
-                    .map(|a| a.author.as_str()),
+                    .map(super::asset_author_source),
             );
         }
     }
-    author_filter_options_with_current(authors, &state.author_filters)
+    author_filter_options_with_current(authors.iter().map(|author| author.as_str()), &state.author_filters)
 }
 
 fn author_filter_options<'a>(authors: impl IntoIterator<Item = &'a str>) -> Vec<String> {
@@ -403,6 +403,8 @@ mod tests {
             page_id: String::new(),
             slug: "test".into(),
             author: author.to_string(),
+            authors: Vec::new(),
+            author_profiles: Vec::new(),
             url: String::new(),
             status: Some(AssetStatus {
                 id: String::new(),

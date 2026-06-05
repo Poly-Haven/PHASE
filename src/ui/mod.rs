@@ -33,7 +33,7 @@ use crate::auth::{AuthTokens, BrowserLogin, LoggedInIdentity};
 use crate::config::Config;
 use crate::copy::job::{JobMsg, JobProgress, VerifyMsg};
 use crate::copy::plan::{build_plan_with_pull_filter, Direction, Plan, PullFilterMode};
-use crate::notion::{AssetList, AssetStatus, StatusOption};
+use crate::notion::{Asset, AssetList, AssetStatus, StatusOption};
 
 const VERSION_NOTICE_DURATION: Duration = Duration::from_secs(10);
 
@@ -362,6 +362,7 @@ pub struct AppState {
     pub thumbnail_jobs: HashMap<RowKey, thumbnails::ThumbnailJob>,
     pub thumbnail_previews: HashMap<RowKey, ThumbnailPreview>,
     pub thumbnail_cleanup_rx: Option<Receiver<Result<usize, String>>>,
+    pub author_avatar_textures: HashMap<String, egui::TextureHandle>,
     /// Cached result of `is_dir()` for each asset's local working folder.
     /// Rebuilt synchronously (local disk) on focus gain and after pulls.
     pub local_folder_cache: HashMap<RowKey, bool>,
@@ -441,6 +442,23 @@ fn normalize_author_filters(filters: &mut Vec<String>) {
     filters.retain(|filter| !filter.is_empty());
     filters.sort();
     filters.dedup();
+}
+
+pub(super) fn asset_author_source(asset: &Asset) -> String {
+    if !asset.author_profiles.is_empty() {
+        return asset
+            .author_profiles
+            .iter()
+            .map(|author| author.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
+
+    if !asset.authors.is_empty() {
+        return asset.authors.join(", ");
+    }
+
+    asset.author.clone()
 }
 
 fn current_update_check_day() -> u64 {
@@ -535,6 +553,7 @@ impl AppState {
             thumbnail_jobs: HashMap::new(),
             thumbnail_previews: HashMap::new(),
             thumbnail_cleanup_rx: None,
+            author_avatar_textures: HashMap::new(),
             local_folder_cache: HashMap::new(),
             dismissed_warning_keys: crate::validation::load_dismissed_warning_keys()
                 .unwrap_or_default(),
@@ -603,8 +622,8 @@ impl AppState {
         let Some(AssetListState::Loaded(list)) = self.assets_by_type.get(&asset_type) else {
             return self.author_filters.clone();
         };
-        let available =
-            authors::filter_options(list.assets.iter().map(|asset| asset.author.as_str()));
+        let available_sources: Vec<String> = list.assets.iter().map(asset_author_source).collect();
+        let available = authors::filter_options(available_sources.iter().map(|source| source.as_str()));
         self.author_filters
             .iter()
             .filter(|filter| available.iter().any(|author| author == *filter))
