@@ -194,7 +194,11 @@ fn client() -> Result<reqwest::blocking::Client> {
 }
 
 pub fn author_avatar_cache_key(author: &AuthorProfile) -> String {
-    let source = format!("{}|{}", author.id, author.avatar_url.as_deref().unwrap_or(""));
+    let source = format!(
+        "{}|{}",
+        author.id,
+        author.avatar_url.as_deref().unwrap_or("")
+    );
     blake3::hash(source.as_bytes()).to_hex().to_string()
 }
 
@@ -267,7 +271,8 @@ fn cache_author_avatar(client: &reqwest::blocking::Client, author: &AuthorProfil
     let temp_path = path.with_extension("tmp");
     fs::write(&temp_path, encoded.into_inner())
         .with_context(|| format!("writing avatar cache for {}", author.name))?;
-    fs::rename(&temp_path, &path).with_context(|| format!("finalizing avatar cache for {}", author.name))?;
+    fs::rename(&temp_path, &path)
+        .with_context(|| format!("finalizing avatar cache for {}", author.name))?;
     Ok(())
 }
 

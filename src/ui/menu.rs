@@ -352,7 +352,10 @@ fn current_authors(state: &AppState) -> Vec<String> {
             );
         }
     }
-    author_filter_options_with_current(authors.iter().map(|author| author.as_str()), &state.author_filters)
+    author_filter_options_with_current(
+        authors.iter().map(|author| author.as_str()),
+        &state.author_filters,
+    )
 }
 
 fn author_filter_options<'a>(authors: impl IntoIterator<Item = &'a str>) -> Vec<String> {

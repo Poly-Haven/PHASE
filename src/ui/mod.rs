@@ -623,7 +623,8 @@ impl AppState {
             return self.author_filters.clone();
         };
         let available_sources: Vec<String> = list.assets.iter().map(asset_author_source).collect();
-        let available = authors::filter_options(available_sources.iter().map(|source| source.as_str()));
+        let available =
+            authors::filter_options(available_sources.iter().map(|source| source.as_str()));
         self.author_filters
             .iter()
             .filter(|filter| available.iter().any(|author| author == *filter))
@@ -667,13 +668,14 @@ impl AppState {
         if self.update_install.is_some() {
             return;
         }
-        let Some(update) = self.pending_update.clone() else {
-            return;
-        };
         let (tx, rx) = channel();
         thread::spawn(move || {
-            let res = crate::updater::install_update_and_restart(&update.tag)
-                .map_err(|err| err.to_string());
+            let res = latest_update_tag_for_install(|| {
+                crate::updater::check_for_update().map_err(|err| err.to_string())
+            })
+            .and_then(|tag| {
+                crate::updater::install_update_and_restart(&tag).map_err(|err| err.to_string())
+            });
             let _ = tx.send(res);
         });
         self.update_install = Some(UpdateInstallJob { rx });
@@ -2125,6 +2127,16 @@ fn components_eq_ci(a: std::path::Component, b: std::path::Component) -> bool {
     a.as_os_str()
         .to_string_lossy()
         .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy())
+}
+
+pub(super) fn latest_update_tag_for_install<F>(lookup: F) -> Result<String, String>
+where
+    F: FnOnce() -> Result<Option<crate::updater::UpdateInfo>, String>,
+{
+    let Some(update) = lookup()? else {
+        return Err("No newer update found".into());
+    };
+    Ok(update.tag)
 }
 
 fn draw_status_bar_primary(state: &mut AppState, ui: &mut egui::Ui) {
