@@ -763,6 +763,11 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                             .get(&(key.clone(), TransferAction::PushStagingOnly))
                             .copied(),
                     );
+                    ui.separator();
+                    if ui.button("Show file list").clicked() {
+                        state.open_transfer_file_list(key, Direction::Push);
+                        ui.close_menu();
+                    }
                 });
                 if response.clicked() {
                     super::start_job(state, key, TransferAction::PushAll);
@@ -913,6 +918,11 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                             .get(&(key.clone(), TransferAction::PullAll))
                             .copied(),
                     );
+                    ui.separator();
+                    if ui.button("Show file list").clicked() {
+                        state.open_transfer_file_list(key, Direction::Pull);
+                        ui.close_menu();
+                    }
                 });
                 if response.clicked() {
                     super::start_job(state, key, TransferAction::default_pull());

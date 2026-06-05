@@ -6,7 +6,7 @@ use egui::{epaint::ClippedShape, Pos2, RawInput, Rect, Vec2};
 
 use crate::config::Config;
 use crate::copy::job::JobProgress;
-use crate::copy::plan::{Direction, Plan};
+use crate::copy::plan::{Action, Direction, Plan, PlannedFile};
 use crate::notion::{Asset, AssetList, AssetStatus, StatusGroup};
 
 fn test_state() -> super::AppState {
@@ -37,6 +37,7 @@ fn test_state() -> super::AppState {
         notion_rx: HashMap::new(),
         pending_conflict: None,
         pending_verification_failure: None,
+        transfer_file_list_dialog: None,
         pending_prod_folder_create: None,
         pending_local_folder_delete: None,
         row_toasts: HashMap::new(),
@@ -404,6 +405,59 @@ fn transfer_estimate_uses_staging_only_variant() {
             bytes: 3
         })
     );
+}
+
+#[test]
+fn transfer_file_display_rows_filter_unchanged_files_and_color_reasons() {
+    let plan = Plan {
+        direction: Direction::Pull,
+        src_root: std::path::PathBuf::from("src"),
+        dst_root: std::path::PathBuf::from("dst"),
+        files: vec![
+            PlannedFile {
+                rel_path: std::path::PathBuf::from("new.bin"),
+                src_abs: std::path::PathBuf::from("src/new.bin"),
+                dst_abs: std::path::PathBuf::from("dst/new.bin"),
+                size: 12,
+                action: Action::New,
+            },
+            PlannedFile {
+                rel_path: std::path::PathBuf::from("updated.bin"),
+                src_abs: std::path::PathBuf::from("src/updated.bin"),
+                dst_abs: std::path::PathBuf::from("dst/updated.bin"),
+                size: 12,
+                action: Action::Overwrite,
+            },
+            PlannedFile {
+                rel_path: std::path::PathBuf::from("conflict.bin"),
+                src_abs: std::path::PathBuf::from("src/conflict.bin"),
+                dst_abs: std::path::PathBuf::from("dst/conflict.bin"),
+                size: 12,
+                action: Action::Conflict { dest_newer: true },
+            },
+            PlannedFile {
+                rel_path: std::path::PathBuf::from("same.bin"),
+                src_abs: std::path::PathBuf::from("src/same.bin"),
+                dst_abs: std::path::PathBuf::from("dst/same.bin"),
+                size: 12,
+                action: Action::Identical,
+            },
+        ],
+        total_bytes_to_copy: 36,
+    };
+
+    let rows = super::transfer_file_display_rows(&plan);
+
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].path, "new.bin");
+    assert_eq!(rows[0].reason, "New file");
+    assert_eq!(rows[0].color, super::colors::STATUS_COMPLETE);
+    assert_eq!(rows[1].path, "updated.bin");
+    assert_eq!(rows[1].reason, "File updated");
+    assert_eq!(rows[1].color, super::colors::MSG_INFO);
+    assert_eq!(rows[2].path, "conflict.bin");
+    assert_eq!(rows[2].reason, "Conflict, destination newer");
+    assert_eq!(rows[2].color, super::colors::MSG_ERROR);
 }
 
 #[test]

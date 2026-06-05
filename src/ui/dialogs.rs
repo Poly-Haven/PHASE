@@ -1,5 +1,6 @@
-use super::{layout, AppState, ConflictChoice};
+use super::{colors, layout, AppState, ConflictChoice};
 use crate::copy::plan::Action;
+use crate::copy::plan::Direction;
 
 pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     if let Some(pc) = state.pending_conflict.as_ref() {
@@ -69,6 +70,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     }
 
     super::scripts::draw_output_dialog(state, ctx);
+    transfer_file_list(state, ctx);
 }
 
 pub fn token_prompt(state: &mut AppState, ctx: &egui::Context) {
@@ -198,4 +200,126 @@ pub fn settings(state: &mut AppState, ctx: &egui::Context) {
     } else if close {
         state.settings_open = false;
     }
+}
+
+pub fn transfer_file_list(state: &mut AppState, ctx: &egui::Context) {
+    let Some(dialog) = state.transfer_file_list_dialog.as_ref() else {
+        return;
+    };
+
+    let mut close = false;
+    let mut reload = false;
+    let mut ignore_raws_tiffs = dialog.ignore_raws_tiffs;
+    let plan = dialog.plan.clone();
+    let direction = dialog.direction;
+    let key_slug = dialog.key.slug.clone();
+
+    egui::Window::new(format!("File list — {key_slug}"))
+        .collapsible(false)
+        .resizable(true)
+        .default_width(layout::TRANSFER_FILE_LIST_DIALOG_WIDTH)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            match direction {
+                Direction::Push => {
+                    ui.label("This list uses the default push behavior: all files.");
+                }
+                Direction::Pull => {
+                    ui.label("This list uses the default pull behavior.");
+                    if ui
+                        .checkbox(&mut ignore_raws_tiffs, "Ignore raws/tiffs")
+                        .changed()
+                    {
+                        reload = true;
+                    }
+                }
+            }
+
+            if let Some(err) = &dialog.error {
+                ui.colored_label(colors::ERROR_BANNER, err);
+            }
+            if dialog.loading {
+                ui.label("Loading file list...");
+            }
+
+            if let Some(plan) = plan.as_ref() {
+                let rows = super::transfer_file_display_rows(plan);
+                let width = transfer_file_list_width(ui, &rows);
+                ui.set_min_width(width);
+                ui.add_space(layout::DIALOG_SECTION_SPACING_SMALL);
+
+                if rows.is_empty() {
+                    ui.label("No files will be transferred.");
+                } else {
+                    ui.label(format!("{} file(s) will be transferred:", rows.len()));
+                    ui.add_space(layout::DIALOG_SECTION_SPACING_SMALL);
+                    egui::ScrollArea::both()
+                        .max_height(layout::TRANSFER_FILE_LIST_SCROLL_HEIGHT)
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            for row in rows {
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(row.color, &row.path);
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.colored_label(row.color, row.reason);
+                                        },
+                                    );
+                                });
+                            }
+                        });
+                }
+            }
+
+            ui.add_space(layout::DIALOG_SECTION_SPACING_LARGE);
+            ui.horizontal(|ui| {
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+        });
+
+    if reload {
+        if let Some(dialog) = state.transfer_file_list_dialog.as_mut() {
+            dialog.ignore_raws_tiffs = ignore_raws_tiffs;
+        }
+        state.reload_transfer_file_list();
+    }
+    if close {
+        state.transfer_file_list_dialog = None;
+    }
+}
+
+fn transfer_file_list_width(ui: &egui::Ui, rows: &[super::TransferFileDisplayRow]) -> f32 {
+    let path_font = egui::TextStyle::Monospace.resolve(ui.style());
+    let reason_font = egui::TextStyle::Body.resolve(ui.style());
+    let max_path = rows
+        .iter()
+        .map(|row| {
+            ui.fonts(|fonts| {
+                fonts
+                    .layout_no_wrap(row.path.clone(), path_font.clone(), egui::Color32::WHITE)
+                    .rect
+                    .width()
+            })
+        })
+        .fold(0.0, f32::max);
+    let max_reason = rows
+        .iter()
+        .map(|row| {
+            ui.fonts(|fonts| {
+                fonts
+                    .layout_no_wrap(
+                        row.reason.to_string(),
+                        reason_font.clone(),
+                        egui::Color32::WHITE,
+                    )
+                    .rect
+                    .width()
+            })
+        })
+        .fold(0.0, f32::max);
+    (max_path + max_reason + layout::STATUS_OPTION_WIDTH_PADDING * 2.0)
+        .max(layout::TRANSFER_FILE_LIST_DIALOG_WIDTH)
 }
