@@ -166,10 +166,6 @@ pub fn settings(state: &mut AppState, ctx: &egui::Context) {
 
             ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
             ui.checkbox(
-                &mut state.settings_skip_pull_raw_tif_if_many_work_tifs,
-                "Skip pulling RAW and TIF files if >30 TIFs exist in /work",
-            );
-            ui.checkbox(
                 &mut state.settings_open_notion_links_in_desktop_app,
                 "Open Notion links in the desktop app",
             );
@@ -192,8 +188,6 @@ pub fn settings(state: &mut AppState, ctx: &egui::Context) {
             return;
         }
         state.config.local_root = std::path::PathBuf::from(local_root);
-        state.config.skip_pull_raw_tif_if_many_work_tifs =
-            state.settings_skip_pull_raw_tif_if_many_work_tifs;
         state.config.open_notion_links_in_desktop_app =
             state.settings_open_notion_links_in_desktop_app;
         if let Err(e) = crate::config::save(&state.config) {

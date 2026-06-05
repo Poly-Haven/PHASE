@@ -35,8 +35,6 @@ pub struct Config {
     /// Last author filter per asset-type label.
     #[serde(default)]
     pub last_filters: std::collections::HashMap<String, String>,
-    #[serde(default = "default_skip_pull_raw_tif_if_many_work_tifs")]
-    pub skip_pull_raw_tif_if_many_work_tifs: bool,
     #[serde(default)]
     pub window_size: Option<[f32; 2]>,
     #[serde(default)]
@@ -54,9 +52,6 @@ fn default_prod_root() -> PathBuf {
 }
 fn default_local_root() -> PathBuf {
     PathBuf::from(r"C:\PHASE")
-}
-fn default_skip_pull_raw_tif_if_many_work_tifs() -> bool {
-    true
 }
 fn default_open_notion_links_in_desktop_app() -> bool {
     false
@@ -77,7 +72,6 @@ impl Default for Config {
             last_author_filters: Vec::new(),
             last_author_filters_by_type: std::collections::HashMap::new(),
             last_filters: std::collections::HashMap::new(),
-            skip_pull_raw_tif_if_many_work_tifs: default_skip_pull_raw_tif_if_many_work_tifs(),
             last_selected_status_groups: Vec::new(),
             window_size: None,
             window_pos: None,
@@ -101,30 +95,11 @@ impl Config {
     pub fn has_access_token(&self) -> bool {
         !self.auth_access_token.trim().is_empty()
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-
-    #[test]
-    fn skip_pull_raw_tif_if_many_work_tifs_defaults_to_enabled() {
-        assert!(super::Config::default().skip_pull_raw_tif_if_many_work_tifs);
-    }
-
-    #[test]
-    fn missing_skip_pull_raw_tif_if_many_work_tifs_config_field_defaults_to_enabled() {
-        let cfg: super::Config = toml::from_str(
-            r#"
-notion_token = ""
-local_root = "C:\\PHASE"
-"#,
-        )
-        .unwrap();
-
-        assert!(cfg.skip_pull_raw_tif_if_many_work_tifs);
-    }
 
     #[test]
     fn auth_tokens_default_to_empty_and_legacy_notion_token_is_ignored() {
@@ -143,7 +118,10 @@ local_root = "C:\\PHASE"
         assert_eq!(cfg.auth_refresh_token, "refresh");
         assert_eq!(cfg.auth_expires_at, Some(12345));
         assert!(!cfg.open_notion_links_in_desktop_app);
-        assert_eq!(toml::to_string(&cfg).unwrap().contains("notion_token"), false);
+        assert_eq!(
+            toml::to_string(&cfg).unwrap().contains("notion_token"),
+            false
+        );
 
         let default_cfg = super::Config::default();
         assert!(default_cfg.auth_access_token.is_empty());
@@ -250,8 +228,8 @@ fn load_from_path(path: &Path) -> Result<Config> {
             if !backup.exists() {
                 return Err(primary_err).with_context(|| format!("parsing {}", path.display()));
             }
-            let backup_text =
-                fs::read_to_string(&backup).with_context(|| format!("reading {}", backup.display()))?;
+            let backup_text = fs::read_to_string(&backup)
+                .with_context(|| format!("reading {}", backup.display()))?;
             let backup_cfg: Config = toml::from_str(&backup_text)
                 .with_context(|| format!("parsing {}", backup.display()))?;
             Ok(backup_cfg)

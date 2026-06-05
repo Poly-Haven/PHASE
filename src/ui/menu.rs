@@ -17,8 +17,11 @@ fn refresh_texture(ctx: &egui::Context) -> egui::TextureHandle {
 }
 
 pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
-    ui.spacing_mut().interact_size.y =
-        ui.spacing().interact_size.y.max(layout::TOP_BAR_INTERACT_HEIGHT);
+    ui.spacing_mut().interact_size.y = ui
+        .spacing()
+        .interact_size
+        .y
+        .max(layout::TOP_BAR_INTERACT_HEIGHT);
     ui.horizontal(|ui| {
         ui.add_space(layout::TOP_BAR_EDGE_PADDING);
 
@@ -142,11 +145,10 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                 .iter()
                 .any(|t| state.refreshing.contains(t));
             if is_loading {
-                let (spinner_rect, _) =
-                    ui.allocate_exact_size(
-                        egui::vec2(layout::TOP_BAR_ICON_SIZE, layout::TOP_BAR_ICON_SIZE),
-                        egui::Sense::hover(),
-                    );
+                let (spinner_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(layout::TOP_BAR_ICON_SIZE, layout::TOP_BAR_ICON_SIZE),
+                    egui::Sense::hover(),
+                );
                 super::loading_indicator::draw_image_at(
                     ui,
                     spinner_rect,
@@ -289,7 +291,10 @@ fn author_filter_option(ui: &mut egui::Ui, selected: bool, label: &str) -> egui:
     }
 
     ui.painter().text(
-        egui::pos2(icon_rect.right() + layout::AUTHOR_FILTER_TEXT_GAP, rect.center().y),
+        egui::pos2(
+            icon_rect.right() + layout::AUTHOR_FILTER_TEXT_GAP,
+            rect.center().y,
+        ),
         egui::Align2::LEFT_CENTER,
         label,
         egui::TextStyle::Button.resolve(ui.style()),
@@ -376,7 +381,10 @@ fn author_filter_display_abbrev(
 ) -> String {
     match selected {
         [] => "All authors".to_string(),
-        [single] => abbrev.get(single).cloned().unwrap_or_else(|| single.clone()),
+        [single] => abbrev
+            .get(single)
+            .cloned()
+            .unwrap_or_else(|| single.clone()),
         [first, second] => format!(
             "{}, {}",
             abbrev.get(first).map(|s| s.as_str()).unwrap_or(first),

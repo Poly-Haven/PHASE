@@ -22,7 +22,11 @@ pub fn draw<T: Copy + PartialEq>(
     let font_id = text_style.resolve(ui.style());
     let text_color = ui.visuals().text_color();
     let padding = egui::vec2(layout::SELECTOR_PADDING_X, layout::SELECTOR_PADDING_Y);
-    let height = ui.spacing().interact_size.y.max(layout::SELECTOR_ROW_HEIGHT);
+    let height = ui
+        .spacing()
+        .interact_size
+        .y
+        .max(layout::SELECTOR_ROW_HEIGHT);
     let separator_width = layout::SELECTOR_SEPARATOR_WIDTH;
     let rounding = height / 2.0;
 

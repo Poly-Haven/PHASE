@@ -1,5 +1,5 @@
 use super::colors;
-use super::{layout, ActionPreview, AppState, AssetListState, RowKey};
+use super::{layout, ActionPreview, AppState, AssetListState, RowKey, TransferAction};
 use crate::copy::plan::Direction;
 use crate::notion::{Asset, AssetStatus, StatusGroup, StatusOption};
 use crate::ui::AssetType;
@@ -447,6 +447,51 @@ fn transfer_action_button(
     response.on_hover_text(tooltip).on_hover_cursor(cursor)
 }
 
+fn transfer_action_menu_label(action: TransferAction, preview: Option<ActionPreview>) -> String {
+    let label = format!("{}{}", action.menu_label(), action.default_suffix());
+    match preview {
+        Some(preview) if preview.file_count > 0 => format!(
+            "{label} · {} files · {}",
+            preview.file_count,
+            fmt_bytes(preview.bytes)
+        ),
+        _ => format!("{label} · {}", action.nothing_label()),
+    }
+}
+
+fn transfer_action_menu_width(ui: &egui::Ui, labels: &[String]) -> f32 {
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let max_label = labels
+        .iter()
+        .map(|label| {
+            ui.fonts(|fonts| {
+                fonts
+                    .layout_no_wrap(label.clone(), font_id.clone(), egui::Color32::WHITE)
+                    .rect
+                    .width()
+            })
+        })
+        .fold(0.0, f32::max);
+    (max_label + layout::STATUS_OPTION_WIDTH_PADDING).max(layout::ROW_CONTEXT_POPUP_WIDTH)
+}
+
+fn draw_transfer_action_menu(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    key: &RowKey,
+    action: TransferAction,
+    preview: Option<ActionPreview>,
+) {
+    let label = transfer_action_menu_label(action, preview);
+    let enabled = preview
+        .map(|preview| preview.file_count > 0)
+        .unwrap_or(false);
+    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+        super::start_job(state, key, action);
+        ui.close_menu();
+    }
+}
+
 fn open_asset_file(asset_type: AssetType, local_folder: &std::path::Path, slug: &str) {
     let staging = local_folder.join("staging");
     let file = match asset_type {
@@ -662,7 +707,7 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     } else {
         let push_preview = state
             .transfer_estimates
-            .get(&(key.clone(), Direction::Push))
+            .get(&(key.clone(), TransferAction::PushAll))
             .copied();
         let push = row_action_availability(
             RowAction::Push,
@@ -689,8 +734,38 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                 } else {
                     icon_button(ui, &push_tex, push.enabled, colors::PUSH, push.tooltip)
                 };
+                response.context_menu(|ui| {
+                    let labels = [
+                        transfer_action_menu_label(TransferAction::PushAll, push_preview),
+                        transfer_action_menu_label(
+                            TransferAction::PushStagingOnly,
+                            state
+                                .transfer_estimates
+                                .get(&(key.clone(), TransferAction::PushStagingOnly))
+                                .copied(),
+                        ),
+                    ];
+                    ui.set_min_width(transfer_action_menu_width(ui, &labels));
+                    draw_transfer_action_menu(
+                        ui,
+                        state,
+                        key,
+                        TransferAction::PushAll,
+                        push_preview,
+                    );
+                    draw_transfer_action_menu(
+                        ui,
+                        state,
+                        key,
+                        TransferAction::PushStagingOnly,
+                        state
+                            .transfer_estimates
+                            .get(&(key.clone(), TransferAction::PushStagingOnly))
+                            .copied(),
+                    );
+                });
                 if response.clicked() {
-                    super::start_job(state, key, Direction::Push);
+                    super::start_job(state, key, TransferAction::PushAll);
                 }
             });
         });
@@ -765,7 +840,7 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     if !state.plan_jobs.contains_key(key) && !state.jobs.contains_key(key) {
         let pull_preview = state
             .transfer_estimates
-            .get(&(key.clone(), Direction::Pull))
+            .get(&(key.clone(), TransferAction::default_pull()))
             .copied();
         let pull = row_action_availability(
             RowAction::Pull,
@@ -792,8 +867,55 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                 } else {
                     icon_button(ui, &pull_tex, pull.enabled, colors::PULL, pull.tooltip)
                 };
+                response.context_menu(|ui| {
+                    let labels = [
+                        transfer_action_menu_label(TransferAction::default_pull(), pull_preview),
+                        transfer_action_menu_label(
+                            TransferAction::PullStagingOnly,
+                            state
+                                .transfer_estimates
+                                .get(&(key.clone(), TransferAction::PullStagingOnly))
+                                .copied(),
+                        ),
+                        transfer_action_menu_label(
+                            TransferAction::PullAll,
+                            state
+                                .transfer_estimates
+                                .get(&(key.clone(), TransferAction::PullAll))
+                                .copied(),
+                        ),
+                    ];
+                    ui.set_min_width(transfer_action_menu_width(ui, &labels));
+                    draw_transfer_action_menu(
+                        ui,
+                        state,
+                        key,
+                        TransferAction::default_pull(),
+                        pull_preview,
+                    );
+                    draw_transfer_action_menu(
+                        ui,
+                        state,
+                        key,
+                        TransferAction::PullStagingOnly,
+                        state
+                            .transfer_estimates
+                            .get(&(key.clone(), TransferAction::PullStagingOnly))
+                            .copied(),
+                    );
+                    draw_transfer_action_menu(
+                        ui,
+                        state,
+                        key,
+                        TransferAction::PullAll,
+                        state
+                            .transfer_estimates
+                            .get(&(key.clone(), TransferAction::PullAll))
+                            .copied(),
+                    );
+                });
                 if response.clicked() {
-                    super::start_job(state, key, Direction::Pull);
+                    super::start_job(state, key, TransferAction::default_pull());
                 }
             });
         });

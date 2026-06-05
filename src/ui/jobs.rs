@@ -5,48 +5,34 @@ use std::time::Instant;
 
 use super::{
     AppState, AssetListState, AssetType, ConflictChoice, PlanJob, RowJob, RowKey, StatusUpdateJob,
-    TitleRenameJob,
+    TitleRenameJob, TransferAction,
 };
 use crate::auth::AuthTokens;
 use crate::copy::job::JobProgress;
-use crate::copy::plan::{build_plan_with_pull_filter, Action, Direction, Plan, PullFilterMode};
+use crate::copy::plan::{Action, Direction, Plan};
 use crate::notion::{AssetStatus, StatusOption};
 
-pub fn start_job(state: &mut AppState, key: &RowKey, direction: Direction) {
+pub fn start_job(state: &mut AppState, key: &RowKey, action: TransferAction) {
     // Ignore if already planning or copying.
     if state.plan_jobs.contains_key(key) || state.jobs.contains_key(key) {
         return;
     }
+    state.clear_transfer_estimates_for_key(key);
     // Clear stale validation messages and any previous toast so the row is clean
     // while the job runs. Fresh validation fires automatically after the job finishes.
     state.validation_results.remove(key);
     state.row_toasts.remove(key);
-    state.transfer_estimates.remove(&(key.clone(), Direction::Pull));
-    state.transfer_estimates.remove(&(key.clone(), Direction::Push));
-    let src_root = match direction {
-        Direction::Pull => state.prod_root_for(key.asset_type).join(&key.slug),
-        Direction::Push => state.local_root_for(key.asset_type).join(&key.slug),
-    };
-    let dst_root = match direction {
-        Direction::Pull => state.local_root_for(key.asset_type).join(&key.slug),
-        Direction::Push => state.prod_root_for(key.asset_type).join(&key.slug),
-    };
-    let pull_filter = match direction {
-        Direction::Pull if state.config.skip_pull_raw_tif_if_many_work_tifs => {
-            PullFilterMode::SkipRawAndTifWhenWorkTifsExceed { threshold: 30 }
-        }
-        Direction::Pull => PullFilterMode::None,
-        Direction::Push => PullFilterMode::None,
-    };
+    let direction = action.direction();
+    let (src_root, dst_root, pull_filter) = state.transfer_plan_roots(key, action);
 
     let (tx, rx) = channel::<Result<Plan, String>>();
     thread::spawn(move || {
-        let result =
-            build_plan_with_pull_filter(direction, &src_root, &dst_root, pull_filter)
-                .map_err(|e| e.to_string());
+        let result = AppState::build_transfer_plan(direction, src_root, dst_root, pull_filter);
         let _ = tx.send(result);
     });
-    state.plan_jobs.insert(key.clone(), PlanJob { direction, rx });
+    state
+        .plan_jobs
+        .insert(key.clone(), PlanJob { direction, rx });
 }
 
 pub(super) fn spawn_copy_job(state: &mut AppState, key: RowKey, direction: Direction, plan: Plan) {
