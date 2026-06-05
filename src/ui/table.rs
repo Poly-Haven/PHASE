@@ -545,6 +545,31 @@ fn row_layout(avail: egui::Rect, thumbnail_size: Option<egui::Vec2>) -> RowLayou
     }
 }
 
+fn transfer_progress_fill_rect(
+    row_rect: egui::Rect,
+    direction: Direction,
+    fraction: f32,
+) -> egui::Rect {
+    let width = row_rect.width() * fraction.clamp(0.0, 1.0);
+    match direction {
+        Direction::Push => egui::Rect::from_min_size(
+            row_rect.min,
+            egui::vec2(width, row_rect.height()),
+        ),
+        Direction::Pull => egui::Rect::from_min_size(
+            egui::pos2(row_rect.max.x - width, row_rect.min.y),
+            egui::vec2(width, row_rect.height()),
+        ),
+    }
+}
+
+fn transfer_progress_color(direction: Direction) -> egui::Color32 {
+    match direction {
+        Direction::Push => colors::PUSH,
+        Direction::Pull => colors::PULL,
+    }
+}
+
 fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView) {
     let row_height = layout::ROW_HEIGHT;
     let avail = ui.available_rect_before_wrap();
@@ -566,13 +591,6 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
 
     ui.painter()
         .rect_filled(row_rect, 2.0, colors::ROW_BACKGROUND);
-    if let Some(job) = state.jobs.get(key) {
-        let f = job.progress.fraction().clamp(0.0, 1.0);
-        let mut fill = row_rect;
-        fill.set_width(avail_w * f);
-        ui.painter()
-            .rect_filled(fill, 2.0, colors::colored_background(colors::PROGRESS_BAR));
-    }
 
     let prod_folder = state.prod_root_for(key.asset_type).join(&key.slug);
     let local_folder = state.local_root_for(key.asset_type).join(&key.slug);
@@ -612,6 +630,16 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
         thumbnail_response
             .on_hover_text("Open source image on Prod")
             .on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
+
+    if let Some(job) = state.jobs.get(key) {
+        let fill = transfer_progress_fill_rect(
+            row_rect,
+            job.direction,
+            job.progress.fraction(),
+        );
+        ui.painter()
+            .rect_filled(fill, 2.0, colors::colored_background(transfer_progress_color(job.direction)));
     }
 
     // Row 1 LTR: status pill + bold slug
@@ -1499,6 +1527,32 @@ mod tests {
             egui::pos2(10.0 + 96.0 + layout::ROW_SECTION_PADDING, 20.0)
         );
         assert_eq!(layout.content_w, 400.0 - 96.0 - layout::ROW_SECTION_PADDING);
+    }
+
+    #[test]
+    fn push_progress_fills_left_to_right() {
+        let row_rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(400.0, 52.0));
+
+        let fill = super::transfer_progress_fill_rect(row_rect, Direction::Push, 0.25);
+
+        assert_eq!(fill.min, egui::pos2(10.0, 20.0));
+        assert_eq!(fill.max, egui::pos2(110.0, 72.0));
+    }
+
+    #[test]
+    fn pull_progress_fills_right_to_left() {
+        let row_rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(400.0, 52.0));
+
+        let fill = super::transfer_progress_fill_rect(row_rect, Direction::Pull, 0.25);
+
+        assert_eq!(fill.min, egui::pos2(310.0, 20.0));
+        assert_eq!(fill.max, egui::pos2(410.0, 72.0));
+    }
+
+    #[test]
+    fn transfer_progress_color_matches_direction() {
+        assert_eq!(super::transfer_progress_color(Direction::Push), colors::PUSH);
+        assert_eq!(super::transfer_progress_color(Direction::Pull), colors::PULL);
     }
 
     #[test]
