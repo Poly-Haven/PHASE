@@ -1,6 +1,6 @@
 # PHASE
 
-![PHASE screenshot](https://u.polyhaven.org/c14/2026-06-02_06-45-03.png)
+![PHASE screenshot](https://u.polyhaven.org/6kE/2026-06-05_12-14-04.png)
 
 PHASE is a Windows desktop tool for managing Poly Haven asset folders between the production NAS and local working folders, while keeping the asset list and workflow status in sync with the admin system.
 
