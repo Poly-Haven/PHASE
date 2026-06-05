@@ -554,10 +554,9 @@ fn transfer_progress_fill_rect(
 ) -> egui::Rect {
     let width = row_rect.width() * fraction.clamp(0.0, 1.0);
     match direction {
-        Direction::Push => egui::Rect::from_min_size(
-            row_rect.min,
-            egui::vec2(width, row_rect.height()),
-        ),
+        Direction::Push => {
+            egui::Rect::from_min_size(row_rect.min, egui::vec2(width, row_rect.height()))
+        }
         Direction::Pull => egui::Rect::from_min_size(
             egui::pos2(row_rect.max.x - width, row_rect.min.y),
             egui::vec2(width, row_rect.height()),
@@ -635,13 +634,12 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     }
 
     if let Some(job) = state.jobs.get(key) {
-        let fill = transfer_progress_fill_rect(
-            row_rect,
-            job.direction,
-            job.progress.fraction(),
+        let fill = transfer_progress_fill_rect(row_rect, job.direction, job.progress.fraction());
+        ui.painter().rect_filled(
+            fill,
+            2.0,
+            colors::colored_background(transfer_progress_color(job.direction)),
         );
-        ui.painter()
-            .rect_filled(fill, 2.0, colors::colored_background(transfer_progress_color(job.direction)));
     }
 
     // Row 1 LTR: status pill + bold slug
@@ -1069,7 +1067,9 @@ fn author_avatar_texture<'a>(
         }
         let texture_name = format!("author-avatar-{cache_key}");
         let texture = load_circular_avatar_texture(ctx, &cache_path, &texture_name).ok()?;
-        state.author_avatar_textures.insert(cache_key.clone(), texture);
+        state
+            .author_avatar_textures
+            .insert(cache_key.clone(), texture);
     }
     state.author_avatar_textures.get(&cache_key)
 }
@@ -1138,7 +1138,11 @@ fn draw_author_avatar(
             egui::Color32::WHITE,
         );
     } else {
-        painter.circle_filled(rect.center(), rect.width() / 2.0, text_color.linear_multiply(0.12));
+        painter.circle_filled(
+            rect.center(),
+            rect.width() / 2.0,
+            text_color.linear_multiply(0.12),
+        );
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -1149,7 +1153,12 @@ fn draw_author_avatar(
     }
 }
 
-fn draw_row_authors(state: &mut AppState, ui: &mut egui::Ui, row: &RowView, text_color: egui::Color32) {
+fn draw_row_authors(
+    state: &mut AppState,
+    ui: &mut egui::Ui,
+    row: &RowView,
+    text_color: egui::Color32,
+) {
     if row.author_profiles.is_empty() {
         ui.colored_label(colors::TEXT_PRIMARY.linear_multiply(0.25), &row.author);
         return;
@@ -1665,8 +1674,14 @@ mod tests {
 
     #[test]
     fn transfer_progress_color_matches_direction() {
-        assert_eq!(super::transfer_progress_color(Direction::Push), colors::PUSH);
-        assert_eq!(super::transfer_progress_color(Direction::Pull), colors::PULL);
+        assert_eq!(
+            super::transfer_progress_color(Direction::Push),
+            colors::PUSH
+        );
+        assert_eq!(
+            super::transfer_progress_color(Direction::Pull),
+            colors::PULL
+        );
     }
 
     #[test]

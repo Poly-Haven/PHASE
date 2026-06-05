@@ -368,6 +368,28 @@ fn version_notice_expires_after_ten_seconds() {
 }
 
 #[test]
+fn latest_update_tag_for_install_uses_the_fresh_lookup_result() {
+    let tag = super::latest_update_tag_for_install(|| {
+        Ok(Some(crate::updater::UpdateInfo {
+            version: "1.2.4".into(),
+            tag: "v1.2.4".into(),
+            notes: String::new(),
+            minor_or_major_update: false,
+        }))
+    })
+    .unwrap();
+
+    assert_eq!(tag, "v1.2.4");
+}
+
+#[test]
+fn latest_update_tag_for_install_errors_when_no_update_exists() {
+    let err = super::latest_update_tag_for_install(|| Ok(None)).unwrap_err();
+
+    assert_eq!(err, "No newer update found");
+}
+
+#[test]
 fn manual_update_check_with_no_release_shows_latest_notice() {
     let mut state = test_state();
     let (tx, rx) = channel();

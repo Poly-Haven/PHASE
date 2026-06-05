@@ -7,6 +7,12 @@ const BIN_NAME: &str = "phase";
 const TARGET: &str = "x86_64-pc-windows-msvc";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct ReleaseInfo {
+    version: Version,
+    notes: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateInfo {
     pub version: String,
     pub tag: String,
@@ -25,26 +31,30 @@ pub fn check_for_update() -> Result<Option<UpdateInfo>> {
         .fetch()
         .context("fetch GitHub releases")?;
 
-    let mut newer = releases
+    let newer = releases
         .into_iter()
         .filter_map(|release| {
             let version = parse_version(&release.version).ok()?;
-            (version > current).then_some((version, release))
+            (version > current).then_some(ReleaseInfo {
+                version,
+                notes: release.body,
+            })
         })
         .collect::<Vec<_>>();
-    newer.sort_by(|(a, _), (b, _)| b.cmp(a));
+    let newer = newer_releases(&current, newer);
 
-    let Some((version, release)) = newer.into_iter().next() else {
+    let Some(latest) = newer.last() else {
         return Ok(None);
     };
 
     Ok(Some(UpdateInfo {
-        version: version.to_string(),
-        tag: format!("v{version}"),
-        notes: release
-            .body
-            .unwrap_or_else(|| "No release notes provided.".into()),
-        minor_or_major_update: is_minor_or_major_ahead(&current.to_string(), &version.to_string())?,
+        version: latest.version.to_string(),
+        tag: format!("v{}", latest.version),
+        notes: format_release_notes(&current, &newer),
+        minor_or_major_update: is_minor_or_major_ahead(
+            &current.to_string(),
+            &latest.version.to_string(),
+        )?,
     }))
 }
 
@@ -83,8 +93,39 @@ fn parse_version(version: &str) -> Result<Version> {
         .map_err(|err| anyhow!("invalid version {version}: {err}"))
 }
 
+fn newer_releases(current: &Version, mut releases: Vec<ReleaseInfo>) -> Vec<ReleaseInfo> {
+    releases.retain(|release| release.version > *current);
+    releases.sort_by(|a, b| a.version.cmp(&b.version));
+    releases
+}
+
+fn format_release_notes(current: &Version, releases: &[ReleaseInfo]) -> String {
+    releases
+        .iter()
+        .filter(|release| release.version > *current)
+        .map(|release| {
+            let body = release
+                .notes
+                .clone()
+                .unwrap_or_else(|| "No release notes provided.".into());
+            format!("## v{}\n\n{}", release.version, body)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{format_release_notes, newer_releases, ReleaseInfo};
+    use semver::Version;
+
+    fn release(version: &str, notes: Option<&str>) -> ReleaseInfo {
+        ReleaseInfo {
+            version: Version::parse(version).unwrap(),
+            notes: notes.map(|notes| notes.to_string()),
+        }
+    }
+
     #[test]
     fn patch_update_is_not_minor_or_major_ahead() {
         assert!(!super::is_minor_or_major_ahead("0.1.0", "0.1.1").unwrap());
@@ -98,5 +139,41 @@ mod tests {
     #[test]
     fn major_update_is_minor_or_major_ahead() {
         assert!(super::is_minor_or_major_ahead("0.9.9", "1.0.0").unwrap());
+    }
+
+    #[test]
+    fn newer_releases_keeps_only_versions_ahead_of_current_and_sorts_them() {
+        let current = Version::parse("1.2.1").unwrap();
+        let releases = vec![
+            release("1.2.3", Some("Three")),
+            release("1.2.2", Some("Two")),
+            release("1.2.1", Some("Current")),
+        ];
+
+        let newer = newer_releases(&current, releases);
+
+        assert_eq!(
+            newer
+                .iter()
+                .map(|release| release.version.to_string())
+                .collect::<Vec<_>>(),
+            vec!["1.2.2", "1.2.3"]
+        );
+    }
+
+    #[test]
+    fn release_notes_include_every_newer_version() {
+        let current = Version::parse("1.2.1").unwrap();
+        let releases = vec![
+            release("1.2.3", Some("Notes for 1.2.3")),
+            release("1.2.2", Some("Notes for 1.2.2")),
+        ];
+
+        let notes = format_release_notes(&current, &releases);
+
+        assert!(notes.contains("## v1.2.2"));
+        assert!(notes.contains("Notes for 1.2.2"));
+        assert!(notes.contains("## v1.2.3"));
+        assert!(notes.contains("Notes for 1.2.3"));
     }
 }
