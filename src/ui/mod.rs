@@ -354,6 +354,10 @@ fn should_check_for_update(last_check_day: Option<u64>, current_day: u64) -> boo
     last_check_day != Some(current_day)
 }
 
+fn should_force_update_check(force: bool, last_check_day: Option<u64>, current_day: u64) -> bool {
+    force || should_check_for_update(last_check_day, current_day)
+}
+
 impl AppState {
     pub fn new(config: Config) -> Self {
         let selected_types = if config.last_asset_types.is_empty() {
@@ -492,12 +496,12 @@ impl AppState {
             .collect()
     }
 
-    fn start_update_check(&mut self) {
+    fn start_update_check_impl(&mut self, force: bool) {
         if self.update_check_rx.is_some() {
             return;
         }
         let today = current_update_check_day();
-        if !should_check_for_update(self.config.last_update_check_day, today) {
+        if !should_force_update_check(force, self.config.last_update_check_day, today) {
             return;
         }
         self.config.last_update_check_day = Some(today);
@@ -508,6 +512,14 @@ impl AppState {
             let _ = tx.send(res);
         });
         self.update_check_rx = Some(rx);
+    }
+
+    fn start_update_check(&mut self) {
+        self.start_update_check_impl(false);
+    }
+
+    pub fn start_update_check_force(&mut self) {
+        self.start_update_check_impl(true);
     }
 
     pub fn start_update_install(&mut self) {
@@ -1890,23 +1902,20 @@ fn draw_version_status(state: &mut AppState, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("Installing update...").color(colors::TEXT_DISABLED));
         return;
     }
-    if state.pending_update.is_some() {
-        let response = ui
-            .add(
-                egui::Label::new(
-                    egui::RichText::new(format!(
-                        "{current} - New version available! Click to update"
-                    ))
-                    .color(colors::HOVER),
-                )
-                .sense(egui::Sense::click()),
-            )
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
-        if response.clicked() {
-            state.start_update_install();
-        }
+    let label = if state.pending_update.is_some() {
+        format!("{current} - New version available")
     } else {
-        ui.label(egui::RichText::new(current).color(colors::TEXT_DISABLED));
+        current
+    };
+    let response = ui
+        .add(
+            egui::Label::new(egui::RichText::new(label).color(colors::HOVER))
+                .sense(egui::Sense::click()),
+        )
+        .on_hover_text("Check for updates")
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if response.clicked() {
+        state.start_update_check_force();
     }
 }
 
