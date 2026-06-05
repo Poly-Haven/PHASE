@@ -329,6 +329,12 @@ fn update_check_runs_only_once_per_day() {
 }
 
 #[test]
+fn force_update_check_bypasses_the_daily_gate() {
+    assert!(!super::should_force_update_check(false, Some(42), 42));
+    assert!(super::should_force_update_check(true, Some(42), 42));
+}
+
+#[test]
 fn transfer_estimate_uses_copy_plan_total_bytes() {
     let temp = tempfile::tempdir().unwrap();
     let mut state = test_state();
