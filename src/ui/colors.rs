@@ -17,8 +17,6 @@ pub const PILL_OPTION_BG_HOVER: Color32 = Color32::from_rgba_premultiplied(36, 3
 
 // ── Row chrome ────────────────────────────────────────────────────────────────
 pub const ROW_BACKGROUND: Color32 = Color32::from_black_alpha(60);
-/// Progress bar fill while a copy job is active.
-pub const PROGRESS_BAR: Color32 = Color32::from_rgb(50, 110, 200);
 
 // ── Banners ───────────────────────────────────────────────────────────────────
 /// Error banner text.
