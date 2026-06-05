@@ -283,6 +283,8 @@ enum RowAction {
     Pull,
 }
 
+const TRANSFER_ACTION_HOVER: egui::Color32 = egui::Color32::from_rgb(255, 214, 64);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ActionAvailability {
     enabled: bool,
@@ -372,6 +374,77 @@ fn icon_button(
         egui::CursorIcon::NotAllowed
     };
     resp.on_hover_text(tooltip).on_hover_cursor(cursor)
+}
+
+fn transfer_action_button(
+    ui: &mut egui::Ui,
+    tex: &egui::TextureHandle,
+    enabled: bool,
+    tint_color: egui::Color32,
+    tooltip: &str,
+    label: Option<&str>,
+) -> egui::Response {
+    let icon_size = egui::vec2(layout::ACTION_ICON_SIZE, layout::ACTION_ICON_SIZE);
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let label_size = label
+        .map(|label| {
+            ui.fonts(|fonts| {
+                fonts
+                    .layout_no_wrap(label.to_owned(), font_id.clone(), egui::Color32::WHITE)
+                    .rect
+                    .size()
+            })
+        })
+        .unwrap_or(egui::Vec2::ZERO);
+    let label_gap = if label.is_some() {
+        layout::ROW_INTRA_ICON_GAP
+    } else {
+        0.0
+    };
+    let total_size = egui::vec2(
+        icon_size.x + label_gap + label_size.x,
+        layout::ROW_SECONDARY_HEIGHT,
+    );
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(total_size, sense);
+    if ui.is_rect_visible(rect) {
+        let tint = if !enabled {
+            colors::TEXT_DISABLED
+        } else if response.hovered() {
+            TRANSFER_ACTION_HOVER
+        } else {
+            tint_color
+        };
+        let icon_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.right() - icon_size.x / 2.0, rect.center().y),
+            icon_size,
+        );
+        ui.painter().image(
+            tex.id(),
+            icon_rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            tint,
+        );
+        if let Some(label) = label {
+            ui.painter().text(
+                egui::pos2(rect.left(), rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                label,
+                font_id,
+                tint,
+            );
+        }
+    }
+    let cursor = if enabled {
+        egui::CursorIcon::PointingHand
+    } else {
+        egui::CursorIcon::NotAllowed
+    };
+    response.on_hover_text(tooltip).on_hover_cursor(cursor)
 }
 
 fn open_asset_file(asset_type: AssetType, local_folder: &std::path::Path, slug: &str) {
@@ -471,13 +544,20 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     });
 
     let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-    if let (Some(preview), Some(thumbnail_rect)) = (state.thumbnail_previews.get(key), row_layout.thumbnail_rect) {
+    if let (Some(preview), Some(thumbnail_rect)) =
+        (state.thumbnail_previews.get(key), row_layout.thumbnail_rect)
+    {
         let thumbnail_response = ui.interact(
             thumbnail_rect,
             ui.id().with(("thumbnail", key.asset_type, &key.slug)),
             egui::Sense::click(),
         );
-        ui.painter().image(preview.texture.id(), thumbnail_rect, uv_full, egui::Color32::WHITE);
+        ui.painter().image(
+            preview.texture.id(),
+            thumbnail_rect,
+            uv_full,
+            egui::Color32::WHITE,
+        );
         if thumbnail_response.clicked() {
             let source_path = thumbnail_source_path(&state.config.prod_root, key);
             if source_path.is_file() {
@@ -594,39 +674,23 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
         ui.allocate_ui_at_rect(row1_rect, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(layout::ROW_SECTION_PADDING);
-                if icon_button(ui, &push_tex, push.enabled, colors::PUSH, push.tooltip).clicked() {
+                let push_label = push_preview
+                    .filter(|preview| preview.file_count > 0)
+                    .map(|preview| fmt_action_preview(Direction::Push, preview));
+                let response = if let Some(label) = push_label.as_deref() {
+                    transfer_action_button(
+                        ui,
+                        &push_tex,
+                        push.enabled,
+                        colors::PUSH,
+                        push.tooltip,
+                        Some(label),
+                    )
+                } else {
+                    icon_button(ui, &push_tex, push.enabled, colors::PUSH, push.tooltip)
+                };
+                if response.clicked() {
                     super::start_job(state, key, Direction::Push);
-                }
-                if let Some(p) = push_preview {
-                    if p.file_count > 0 {
-                        let preview_color = if push.enabled {
-                            colors::PUSH
-                        } else {
-                            colors::TEXT_DISABLED
-                        };
-                        let sense = if push.enabled {
-                            egui::Sense::click()
-                        } else {
-                            egui::Sense::hover()
-                        };
-                        let cursor = if push.enabled {
-                            egui::CursorIcon::PointingHand
-                        } else {
-                            egui::CursorIcon::Default
-                        };
-                        let resp = ui
-                            .add(
-                                egui::Label::new(
-                                    egui::RichText::new(fmt_action_preview(Direction::Push, p))
-                                        .color(preview_color),
-                                )
-                                .sense(sense),
-                            )
-                            .on_hover_cursor(cursor);
-                        if resp.clicked() {
-                            super::start_job(state, key, Direction::Push);
-                        }
-                    }
                 }
             });
         });
@@ -713,39 +777,23 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
         ui.allocate_ui_at_rect(row2_rect, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(layout::ROW_SECTION_PADDING);
-                if icon_button(ui, &pull_tex, pull.enabled, colors::PULL, pull.tooltip).clicked() {
+                let pull_label = pull_preview
+                    .filter(|preview| preview.file_count > 0)
+                    .map(|preview| fmt_action_preview(Direction::Pull, preview));
+                let response = if let Some(label) = pull_label.as_deref() {
+                    transfer_action_button(
+                        ui,
+                        &pull_tex,
+                        pull.enabled,
+                        colors::PULL,
+                        pull.tooltip,
+                        Some(label),
+                    )
+                } else {
+                    icon_button(ui, &pull_tex, pull.enabled, colors::PULL, pull.tooltip)
+                };
+                if response.clicked() {
                     super::start_job(state, key, Direction::Pull);
-                }
-                if let Some(p) = pull_preview {
-                    if p.file_count > 0 {
-                        let preview_color = if pull.enabled {
-                            colors::PULL
-                        } else {
-                            colors::TEXT_DISABLED
-                        };
-                        let sense = if pull.enabled {
-                            egui::Sense::click()
-                        } else {
-                            egui::Sense::hover()
-                        };
-                        let cursor = if pull.enabled {
-                            egui::CursorIcon::PointingHand
-                        } else {
-                            egui::CursorIcon::Default
-                        };
-                        let resp = ui
-                            .add(
-                                egui::Label::new(
-                                    egui::RichText::new(fmt_action_preview(Direction::Pull, p))
-                                        .color(preview_color),
-                                )
-                                .sense(sense),
-                            )
-                            .on_hover_cursor(cursor);
-                        if resp.clicked() {
-                            super::start_job(state, key, Direction::Pull);
-                        }
-                    }
                 }
             });
         });
