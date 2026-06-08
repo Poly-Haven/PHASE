@@ -28,7 +28,7 @@ pub enum Direction {
 }
 
 const PULL_EXCLUDED_EXT: &[&str] = &[
-    "tif", "tiff", "nef", "cr2", "cr3", "arw", "rw2", "orf", "raf", "dng",
+    "tif", "tiff", "nef", "cr2", "cr3", "arw", "rw2", "orf", "raf", "dng", "pp3",
 ];
 const MTIME_TOLERANCE_SECS: i64 = 2;
 
