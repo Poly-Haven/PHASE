@@ -30,6 +30,7 @@ pub enum Direction {
 const PULL_EXCLUDED_EXT: &[&str] = &[
     "tif", "tiff", "nef", "cr2", "cr3", "arw", "rw2", "orf", "raf", "dng", "pp3",
 ];
+const PULL_EXCLUDED_NAMES: &[&str] = &["thumbs.db", "desktop.ini", ".ds_store", "ehthumbs.db"];
 const MTIME_TOLERANCE_SECS: i64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +45,11 @@ pub enum PullFilterMode {
 }
 
 pub fn is_excluded_for_pull(file_name: &str) -> bool {
+    let name_lower = file_name.to_ascii_lowercase();
+    if PULL_EXCLUDED_NAMES.iter().any(|name| *name == name_lower) {
+        return true;
+    }
+
     let Some(ext) = Path::new(file_name).extension().and_then(|e| e.to_str()) else {
         return false;
     };

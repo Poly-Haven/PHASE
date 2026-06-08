@@ -18,6 +18,10 @@ fn pull_excludes_tif_tiff_nef_case_insensitive() {
     assert!(is_excluded_for_pull("foo.tiff"));
     assert!(is_excluded_for_pull("foo.NEF"));
     assert!(is_excluded_for_pull("a.b.nef"));
+    assert!(is_excluded_for_pull("Thumbs.db"));
+    assert!(is_excluded_for_pull("desktop.ini"));
+    assert!(is_excluded_for_pull(".DS_Store"));
+    assert!(is_excluded_for_pull("ehthumbs.db"));
     assert!(!is_excluded_for_pull("foo.exr"));
     assert!(!is_excluded_for_pull("foo.png"));
     assert!(!is_excluded_for_pull("NEF"));
@@ -187,6 +191,26 @@ fn plan_ignores_partial_files() {
     let plan = build_plan(Direction::Push, src.path(), dst.path()).unwrap();
     assert_eq!(plan.files.len(), 1);
     assert_eq!(plan.files[0].rel_path.to_string_lossy(), "a.exr");
+}
+
+#[test]
+fn plan_ignores_system_sidecar_files() {
+    let src = tempdir().unwrap();
+    let dst = tempdir().unwrap();
+    write(&src.path().join("Thumbs.db"), b"thumbs");
+    write(&src.path().join("desktop.ini"), b"desktop");
+    write(&src.path().join(".DS_Store"), b"store");
+    write(&src.path().join("ehthumbs.db"), b"ehthumbs");
+    write(&src.path().join("photo.jpg"), b"photo");
+
+    let plan = build_plan(Direction::Pull, src.path(), dst.path()).unwrap();
+    let names: Vec<_> = plan
+        .files
+        .iter()
+        .map(|f| f.rel_path.to_string_lossy().replace('\\', "/"))
+        .collect();
+
+    assert_eq!(names, vec!["photo.jpg".to_string()]);
 }
 
 use super::engine::{
