@@ -347,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn needs_review_hdris_require_exr_and_warn_about_colorchart() {
+    fn needs_review_hdris_require_exr_or_hdr_and_warn_about_colorchart() {
         let temp = tempdir().unwrap();
         let local_root = temp.path().join("local");
         let prod_root = temp.path().join("prod");
@@ -364,12 +364,35 @@ mod tests {
 
         assert!(findings.iter().any(|finding| {
             finding.severity == Severity::Error
-                && finding.text == "Missing /staging/sunny_field.exr in Prod"
+                && finding.text == "Missing /staging/sunny_field.exr or .hdr in Prod"
         }));
         assert!(findings.iter().any(|finding| {
             finding.severity == Severity::Warning
                 && finding.text == "Missing /staging/colorchart.zip in Prod"
         }));
+    }
+
+    #[test]
+    fn needs_review_hdris_accept_hdr_fallback() {
+        let temp = tempdir().unwrap();
+        let local_root = temp.path().join("local");
+        let prod_root = temp.path().join("prod");
+        let staging = prod_root.join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("sunny_field.hdr"), b"ok").unwrap();
+
+        let findings = validate_asset(
+            AssetType::Hdris,
+            "sunny_field",
+            Some(&needs_review_status()),
+            &[],
+            &local_root,
+            &prod_root,
+        );
+
+        assert!(!findings
+            .iter()
+            .any(|finding| finding.text == "Missing /staging/sunny_field.exr or .hdr in Prod"));
     }
 
     #[test]
@@ -438,8 +461,31 @@ mod tests {
 
         assert!(findings.iter().any(|finding| {
             finding.severity == Severity::Error
-                && finding.text == "Missing /staging/sunny_field.exr in Prod"
+                && finding.text == "Missing /staging/sunny_field.exr or .hdr in Prod"
         }));
+    }
+
+    #[test]
+    fn passed_review_hdris_accept_hdr_fallback() {
+        let temp = tempdir().unwrap();
+        let local_root = temp.path().join("local");
+        let prod_root = temp.path().join("prod");
+        let staging = prod_root.join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("sunny_field.hdr"), b"ok").unwrap();
+
+        let findings = validate_asset(
+            AssetType::Hdris,
+            "sunny_field",
+            Some(&post_review_status()),
+            &review_status_options(),
+            &local_root,
+            &prod_root,
+        );
+
+        assert!(!findings
+            .iter()
+            .any(|finding| finding.text == "Missing /staging/sunny_field.exr or .hdr in Prod"));
     }
 
     #[test]

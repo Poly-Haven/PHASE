@@ -497,7 +497,14 @@ fn draw_transfer_action_menu(
 fn open_asset_file(asset_type: AssetType, local_folder: &std::path::Path, slug: &str) {
     let staging = local_folder.join("staging");
     let file = match asset_type {
-        AssetType::Hdris => staging.join(format!("{slug}.exr")),
+        AssetType::Hdris => {
+            let exr = staging.join(format!("{slug}.exr"));
+            if exr.is_file() {
+                exr
+            } else {
+                staging.join(format!("{slug}.hdr"))
+            }
+        }
         AssetType::Textures => staging.join(format!("{slug}.blend")),
     };
     if file.exists() {
@@ -1916,7 +1923,7 @@ mod tests {
             },
             RowMsg {
                 kind: MsgKind::Error,
-                text: "Missing /staging/sunny_field.exr in Prod".into(),
+                text: "Missing /staging/sunny_field.exr or .hdr in Prod".into(),
                 link: None,
                 action: None,
                 dismiss_key: None,
@@ -1935,6 +1942,6 @@ mod tests {
         assert_eq!(visible.len(), 2);
         assert!(visible.iter().all(|msg| matches!(msg.kind, MsgKind::Error)));
         assert_eq!(visible[0].text, "Unexpected root entries: renders");
-        assert_eq!(visible[1].text, "Missing /staging/sunny_field.exr in Prod");
+        assert_eq!(visible[1].text, "Missing /staging/sunny_field.exr or .hdr in Prod");
     }
 }

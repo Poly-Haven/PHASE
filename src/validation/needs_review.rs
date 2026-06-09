@@ -16,10 +16,10 @@ pub(crate) fn run(ctx: &ValidationContext) -> Vec<Finding> {
     let mut findings = Vec::new();
     match ctx.key.asset_type {
         AssetType::Hdris => {
-            if !staging.join(format!("{slug}.exr")).is_file() {
+            if !hdri_staging_file_exists(&staging, slug) {
                 findings.push(Finding {
                     severity: Severity::Error,
-                    text: format!("Missing /staging/{slug}.exr in Prod"),
+                    text: format!("Missing /staging/{slug}.exr or .hdr in Prod"),
                     dismiss_id: None,
                 });
             }
@@ -49,4 +49,8 @@ pub(crate) fn run(ctx: &ValidationContext) -> Vec<Finding> {
         }
     }
     findings
+}
+
+fn hdri_staging_file_exists(staging: &std::path::Path, slug: &str) -> bool {
+    staging.join(format!("{slug}.exr")).is_file() || staging.join(format!("{slug}.hdr")).is_file()
 }

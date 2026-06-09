@@ -735,7 +735,7 @@ fn periodic_validation_refresh_picks_up_external_prod_changes() {
     let errored = state.validation_results.get(&key).unwrap();
     assert!(errored
         .iter()
-        .any(|finding| finding.text == format!("Missing /staging/{slug}.exr in Prod")));
+        .any(|finding| finding.text == format!("Missing /staging/{slug}.exr or .hdr in Prod")));
     assert!(state.error_keys_with_prod_folder().contains(&key));
 
     // Fix prod externally, then run a poll tick: the error should resolve.
