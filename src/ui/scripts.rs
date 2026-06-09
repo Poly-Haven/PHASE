@@ -766,11 +766,55 @@ fn script_root() -> Option<std::path::PathBuf> {
 }
 
 fn normalize_target_path(state: &AppState, key: &RowKey) -> std::path::PathBuf {
-    state
+    let staging = state
         .prod_root_for(key.asset_type)
         .join(&key.slug)
-        .join("staging")
-        .join(format!("{}.exr", key.slug))
+        .join("staging");
+    hdri_staging_target_path(&staging, &key.slug)
+}
+
+fn hdri_staging_target_path(staging: &std::path::Path, slug: &str) -> std::path::PathBuf {
+    let exr = staging.join(format!("{}.exr", slug));
+    if exr.is_file() {
+        return exr;
+    }
+
+    let hdr = staging.join(format!("{}.hdr", slug));
+    if hdr.is_file() {
+        return hdr;
+    }
+
+    exr
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hdri_staging_target_path;
+
+    #[test]
+    fn hdri_staging_target_path_prefers_exr() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path();
+        let slug = "sunny_field";
+        std::fs::write(staging.join(format!("{slug}.exr")), b"exr").unwrap();
+        std::fs::write(staging.join(format!("{slug}.hdr")), b"hdr").unwrap();
+
+        let path = hdri_staging_target_path(staging, slug);
+
+        assert_eq!(path, staging.join(format!("{slug}.exr")));
+    }
+
+    #[test]
+    fn hdri_staging_target_path_falls_back_to_hdr() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path();
+        let slug = "sunny_field";
+        std::fs::write(staging.join(format!("{slug}.hdr")), b"hdr").unwrap();
+
+        let path = hdri_staging_target_path(staging, slug);
+
+        assert_eq!(path, staging.join(format!("{slug}.hdr")));
+    }
 }
 
 #[derive(Clone, Copy)]
