@@ -116,8 +116,6 @@ pub fn build_plan_with_pull_filter(
     dst_root: &Path,
     pull_filter: PullFilterMode,
 ) -> Result<Plan> {
-    let mut files = Vec::new();
-    let mut total = 0u64;
     let skip_pull_excluded = direction == Direction::Pull
         && match pull_filter {
             PullFilterMode::AlwaysSkipRawAndTif => true,
@@ -126,6 +124,57 @@ pub fn build_plan_with_pull_filter(
                 work_tif_count_exceeds(src_root, threshold)?
             }
         };
+
+    build_plan_filtered(direction, src_root, dst_root, |_rel, file_name| {
+        skip_pull_excluded && is_excluded_for_pull(file_name)
+    })
+}
+
+/// Build a plan for archiving an asset's prod folder: copy everything except
+/// `.tif`/`.tiff` files found anywhere under the top-level `work` folder.
+///
+/// The archive copy is dispatched via `job::spawn_immediate_verify`, so each
+/// file is BLAKE3-verified inline as it is written. The `Push` direction here is
+/// only descriptive (prod -> archive); it does not affect verification timing.
+pub fn build_archive_plan(src_root: &Path, dst_root: &Path) -> Result<Plan> {
+    build_plan_filtered(Direction::Push, src_root, dst_root, |rel, file_name| {
+        is_work_tif(rel, file_name)
+    })
+}
+
+/// Returns true when `rel` lives under a top-level `work` folder and the file
+/// is a `.tif`/`.tiff`. Matching is case-insensitive.
+pub fn is_work_tif(rel: &Path, file_name: &str) -> bool {
+    let under_work = rel
+        .components()
+        .next()
+        .and_then(|c| c.as_os_str().to_str())
+        .map(|first| first.eq_ignore_ascii_case("work"))
+        .unwrap_or(false);
+    if !under_work {
+        return false;
+    }
+    Path::new(file_name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            let ext = ext.to_ascii_lowercase();
+            ext == "tif" || ext == "tiff"
+        })
+        .unwrap_or(false)
+}
+
+/// Walk `src_root`, classify each file against `dst_root`, skipping files for
+/// which `skip(rel_path, file_name)` returns true. `.partial` files are always
+/// skipped.
+fn build_plan_filtered(
+    direction: Direction,
+    src_root: &Path,
+    dst_root: &Path,
+    skip: impl Fn(&Path, &str) -> bool,
+) -> Result<Plan> {
+    let mut files = Vec::new();
+    let mut total = 0u64;
 
     for entry in WalkDir::new(src_root).follow_links(false) {
         let entry = entry.with_context(|| format!("walking {}", src_root.display()))?;
@@ -137,12 +186,12 @@ pub fn build_plan_with_pull_filter(
         if file_name.ends_with(".partial") {
             continue;
         }
-        if skip_pull_excluded && is_excluded_for_pull(&file_name) {
-            continue;
-        }
 
         let src_abs = entry.path().to_path_buf();
         let rel = src_abs.strip_prefix(src_root).unwrap().to_path_buf();
+        if skip(&rel, &file_name) {
+            continue;
+        }
         let dst_abs = dst_root.join(&rel);
 
         let src_md =

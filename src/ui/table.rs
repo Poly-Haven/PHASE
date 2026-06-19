@@ -1,5 +1,5 @@
 use super::colors;
-use super::{layout, ActionPreview, AppState, AssetListState, RowKey, TransferAction};
+use super::{layout, ActionPreview, AppState, AssetListState, RowKey, TransferAction, TransferKind};
 use crate::copy::plan::Direction;
 use crate::notion::{Asset, AssetStatus, AuthorProfile, StatusGroup, StatusOption};
 use crate::ui::AssetType;
@@ -20,6 +20,8 @@ pub enum RowMsgAction {
     DeleteLocalFiles,
     /// Rename the Notion page title to this fixed slug.
     RenameTitle(String),
+    /// Copy this asset's Prod files to the archive drive, then delete Prod.
+    Archive,
 }
 
 /// A single message attached to an asset row.
@@ -69,6 +71,8 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                             let exists = *state.prod_folder_cache.get(&key).unwrap_or(&false);
                             let local_exists =
                                 *state.local_folder_cache.get(&key).unwrap_or(&false);
+                            let archive_exists =
+                                *state.archive_folder_cache.get(&key).unwrap_or(&false);
                             let validation_findings = state
                                 .validation_results
                                 .get(&key)
@@ -79,6 +83,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                                 a,
                                 exists,
                                 local_exists,
+                                archive_exists,
                                 &list.statuses,
                                 &state.published_assets,
                                 &validation_findings,
@@ -155,15 +160,18 @@ struct RowView {
     page_id: String,
     status: Option<AssetStatus>,
     exists_on_prod: bool,
+    exists_on_archive: bool,
     messages: Vec<RowMsg>,
 }
 
 impl RowView {
+    #[allow(clippy::too_many_arguments)]
     fn from_asset(
         asset_type: super::AssetType,
         a: &Asset,
         exists_on_prod: bool,
         exists_local: bool,
+        exists_on_archive: bool,
         status_options: &[StatusOption],
         published_assets: &crate::polyhaven::PublishedAssets,
         validation_findings: &[crate::validation::Finding],
@@ -174,6 +182,11 @@ impl RowView {
             asset_type,
             slug: a.slug.clone(),
         };
+        let is_complete = a
+            .status
+            .as_ref()
+            .map(|s| s.group == StatusGroup::Complete)
+            .unwrap_or(false);
         if let Some(text) = crate::slug::message(&a.slug) {
             let fixed = crate::slug::fix(&a.slug);
             let (action, display_text) = if !fixed.is_empty() && fixed != a.slug {
@@ -189,12 +202,27 @@ impl RowView {
                 dismiss_key: None,
             });
         }
-        if !exists_on_prod {
+        // "No prod folder" is suppressed once an asset has been archived (its
+        // Prod files were intentionally moved to the archive drive).
+        if !exists_on_prod && !exists_on_archive {
             messages.push(RowMsg {
                 kind: MsgKind::Warning,
                 text: "No prod folder.".into(),
                 link: None,
                 action: Some(RowMsgAction::CreateProdFolder),
+                dismiss_key: None,
+            });
+        }
+        // A finished asset that still has Prod files: offer to archive them
+        // inline (same action as the context-menu item). Shown even when an
+        // archive folder already exists — re-archiving skips unchanged files
+        // and adds/updates the rest.
+        if is_complete && exists_on_prod {
+            messages.push(RowMsg {
+                kind: MsgKind::Info,
+                text: "Published.".into(),
+                link: None,
+                action: Some(RowMsgAction::Archive),
                 dismiss_key: None,
             });
         }
@@ -239,6 +267,7 @@ impl RowView {
             page_id: a.page_id.clone(),
             status: a.status.clone(),
             exists_on_prod,
+            exists_on_archive,
             messages,
         }
     }
@@ -268,6 +297,14 @@ impl RowView {
         } else {
             filtered
         }
+    }
+
+    /// True when the asset's status is in the Complete group ("Done", etc.).
+    fn is_complete(&self) -> bool {
+        self.status
+            .as_ref()
+            .map(|s| s.group == StatusGroup::Complete)
+            .unwrap_or(false)
     }
 
     fn msg_kind_from_validation_severity(severity: crate::validation::Severity) -> MsgKind {
@@ -556,25 +593,28 @@ fn row_layout(avail: egui::Rect, thumbnail_size: Option<egui::Vec2>) -> RowLayou
 
 fn transfer_progress_fill_rect(
     row_rect: egui::Rect,
-    direction: Direction,
+    kind: TransferKind,
     fraction: f32,
 ) -> egui::Rect {
     let width = row_rect.width() * fraction.clamp(0.0, 1.0);
-    match direction {
-        Direction::Push => {
+    // Push/Archive fill left-to-right (sending out); Pull/Unarchive fill
+    // right-to-left (bringing in).
+    match kind {
+        TransferKind::Push | TransferKind::Archive => {
             egui::Rect::from_min_size(row_rect.min, egui::vec2(width, row_rect.height()))
         }
-        Direction::Pull => egui::Rect::from_min_size(
+        TransferKind::Pull | TransferKind::Unarchive => egui::Rect::from_min_size(
             egui::pos2(row_rect.max.x - width, row_rect.min.y),
             egui::vec2(width, row_rect.height()),
         ),
     }
 }
 
-fn transfer_progress_color(direction: Direction) -> egui::Color32 {
-    match direction {
-        Direction::Push => colors::PUSH,
-        Direction::Pull => colors::PULL,
+fn transfer_progress_color(kind: TransferKind) -> egui::Color32 {
+    match kind {
+        TransferKind::Push => colors::PUSH,
+        TransferKind::Pull => colors::PULL,
+        TransferKind::Archive | TransferKind::Unarchive => colors::STATUS_COMPLETE,
     }
 }
 
@@ -602,7 +642,12 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
 
     let prod_folder = state.prod_root_for(key.asset_type).join(&key.slug);
     let local_folder = state.local_root_for(key.asset_type).join(&key.slug);
+    let archive_folder = state.archive_root_for(key.asset_type).join(&key.slug);
     let local_exists = state.local_folder_cache.get(key).copied().unwrap_or(false);
+    // A finished asset that lives only in the archive (its Prod files were moved
+    // away). Such rows offer "Unarchive" instead of "Pull" and open the archive
+    // folder instead of Prod.
+    let is_archived_only = row.is_complete() && row.exists_on_archive && !row.exists_on_prod;
 
     let open_notion_in_app = state.config.open_notion_links_in_desktop_app;
     let row_response = ui.interact(
@@ -610,8 +655,17 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
         ui.id().with(("row-context", key.asset_type, &key.slug)),
         egui::Sense::hover(),
     );
+    let is_complete = row.is_complete();
     row_response.context_menu(|ui| {
-        super::scripts::draw_context_menu(ui, state, key, &row.url, open_notion_in_app);
+        super::scripts::draw_context_menu(
+            ui,
+            state,
+            key,
+            &row.url,
+            open_notion_in_app,
+            is_complete,
+            row.exists_on_prod,
+        );
     });
 
     let uv_full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -641,11 +695,11 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     }
 
     if let Some(job) = state.jobs.get(key) {
-        let fill = transfer_progress_fill_rect(row_rect, job.direction, job.progress.fraction());
+        let fill = transfer_progress_fill_rect(row_rect, job.kind, job.progress.fraction());
         ui.painter().rect_filled(
             fill,
             2.0,
-            colors::colored_background(transfer_progress_color(job.direction)),
+            colors::colored_background(transfer_progress_color(job.kind)),
         );
     }
 
@@ -688,7 +742,7 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
         });
     });
 
-    // Row 1 RTL: push section (or planning/job progress)
+    // Row 1 RTL: push section (or planning / copy progress / archive-delete)
     if state.plan_jobs.contains_key(key) {
         ui.allocate_ui_at_rect(row1_rect, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -696,14 +750,18 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                 ui.colored_label(colors::TEXT_DISABLED, "Planning…");
             });
         });
+    } else if state.archive_deletes.contains_key(key) {
+        ui.allocate_ui_at_rect(row1_rect, |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(layout::ROW_SECTION_PADDING);
+                ui.colored_label(colors::TEXT_DISABLED, "Removing Prod files…");
+            });
+        });
     } else if state.jobs.contains_key(key) {
         let label = state
             .jobs
             .get(key)
-            .map(|j| match j.direction {
-                Direction::Pull => "Pulling",
-                Direction::Push => "Pushing",
-            })
+            .map(|j| j.kind.progressive())
             .unwrap_or("");
         let done = state
             .jobs
@@ -835,7 +893,20 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                 let _ = open::that(&local_folder);
             }
             ui.add_space(layout::ROW_INTRA_ICON_GAP);
-            if icon_button(
+            if is_archived_only {
+                let zip_tex = super::file_earmark_zip_texture(ui.ctx());
+                if icon_button(
+                    ui,
+                    &zip_tex,
+                    true,
+                    colors::TEXT_PRIMARY,
+                    "Open archive folder",
+                )
+                .clicked()
+                {
+                    let _ = open::that(&archive_folder);
+                }
+            } else if icon_button(
                 ui,
                 &hdd_tex,
                 row.exists_on_prod,
@@ -873,8 +944,30 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
         });
     });
 
-    // Row 2 RTL: pull section (hidden during active plan/job)
-    if !state.plan_jobs.contains_key(key) && !state.jobs.contains_key(key) {
+    // Row 2 RTL: unarchive button (for archived-only assets) or pull section.
+    // Hidden while any plan/copy/archive-delete job is running for this row.
+    let row_busy = state.plan_jobs.contains_key(key)
+        || state.jobs.contains_key(key)
+        || state.archive_deletes.contains_key(key);
+    if !row_busy && is_archived_only {
+        let unarchive_tex = super::unarchive_icon_texture(ui.ctx());
+        ui.allocate_ui_at_rect(row2_rect, |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(layout::ROW_SECTION_PADDING);
+                if icon_button(
+                    ui,
+                    &unarchive_tex,
+                    true,
+                    colors::PULL,
+                    "Unarchive (copy from archive back to Prod)",
+                )
+                .clicked()
+                {
+                    super::start_unarchive(state, key);
+                }
+            });
+        });
+    } else if !row_busy {
         let pull_preview = state
             .transfer_estimates
             .get(&(key.clone(), TransferAction::default_pull()))
@@ -961,6 +1054,26 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                 }
             });
         });
+    }
+
+    // A slim progress bar along the row's bottom edge during a *separate* verify
+    // step (today only a Push's post-copy verification). The main copy progress
+    // uses the full-row wash above; this small bar is reserved for verification.
+    if let Some(verify) = state.verifications.get(key) {
+        let color = transfer_progress_color(verify.kind);
+        let h = layout::ROW_PROGRESS_BAR_HEIGHT;
+        let track = egui::Rect::from_min_max(
+            egui::pos2(row_rect.min.x, row_rect.max.y - h),
+            row_rect.max,
+        );
+        ui.painter()
+            .rect_filled(track, 0.0, colors::colored_background(color));
+        let fill_w = row_rect.width() * verify.progress.fraction().clamp(0.0, 1.0);
+        let fill = egui::Rect::from_min_size(
+            egui::pos2(row_rect.min.x, row_rect.max.y - h),
+            egui::vec2(fill_w, h),
+        );
+        ui.painter().rect_filled(fill, 0.0, color);
     }
 
     ui.advance_cursor_after_rect(row_rect);
@@ -1190,6 +1303,7 @@ fn action_label(action: &RowMsgAction) -> String {
         RowMsgAction::CreateProdFolder => "Create?".to_string(),
         RowMsgAction::DeleteLocalFiles => "Delete local files?".to_string(),
         RowMsgAction::RenameTitle(slug) => format!("Rename to {slug}"),
+        RowMsgAction::Archive => "Archive files?".to_string(),
     }
 }
 
@@ -1200,6 +1314,9 @@ fn handle_row_message_action(state: &mut AppState, key: &RowKey, action: &RowMsg
         }
         RowMsgAction::DeleteLocalFiles => {
             state.pending_local_folder_delete = Some(key.clone());
+        }
+        RowMsgAction::Archive => {
+            state.request_archive(key);
         }
         RowMsgAction::RenameTitle(new_title) => {
             if let Some(page_id) = state.assets_by_type.get(&key.asset_type).and_then(|s| {
@@ -1287,6 +1404,8 @@ fn draw_row_context_button(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey
     if response.clicked() {
         ui.memory_mut(|mem| mem.toggle_popup(popup_id));
     }
+    let is_complete = row.is_complete();
+    let exists_on_prod = row.exists_on_prod;
     egui::popup::popup_below_widget(ui, popup_id, &response, |ui| {
         ui.set_min_width(layout::ROW_CONTEXT_POPUP_WIDTH);
         super::scripts::draw_context_menu(
@@ -1295,6 +1414,8 @@ fn draw_row_context_button(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey
             key,
             &row.url,
             state.config.open_notion_links_in_desktop_app,
+            is_complete,
+            exists_on_prod,
         );
     });
 }
@@ -1541,6 +1662,7 @@ mod tests {
             page_id: String::new(),
             status,
             exists_on_prod: true,
+            exists_on_archive: false,
             messages: Vec::new(),
         }
     }
@@ -1663,7 +1785,7 @@ mod tests {
     fn push_progress_fills_left_to_right() {
         let row_rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(400.0, 52.0));
 
-        let fill = super::transfer_progress_fill_rect(row_rect, Direction::Push, 0.25);
+        let fill = super::transfer_progress_fill_rect(row_rect, TransferKind::Push, 0.25);
 
         assert_eq!(fill.min, egui::pos2(10.0, 20.0));
         assert_eq!(fill.max, egui::pos2(110.0, 72.0));
@@ -1673,21 +1795,39 @@ mod tests {
     fn pull_progress_fills_right_to_left() {
         let row_rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(400.0, 52.0));
 
-        let fill = super::transfer_progress_fill_rect(row_rect, Direction::Pull, 0.25);
+        let fill = super::transfer_progress_fill_rect(row_rect, TransferKind::Pull, 0.25);
 
         assert_eq!(fill.min, egui::pos2(310.0, 20.0));
         assert_eq!(fill.max, egui::pos2(410.0, 72.0));
     }
 
     #[test]
-    fn transfer_progress_color_matches_direction() {
+    fn archive_progress_fills_left_to_right_like_push() {
+        let row_rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(400.0, 52.0));
+        let fill = super::transfer_progress_fill_rect(row_rect, TransferKind::Archive, 0.25);
+        assert_eq!(fill.min, egui::pos2(10.0, 20.0));
+        assert_eq!(fill.max, egui::pos2(110.0, 72.0));
+    }
+
+    #[test]
+    fn unarchive_progress_fills_right_to_left_like_pull() {
+        let row_rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(400.0, 52.0));
+        let fill = super::transfer_progress_fill_rect(row_rect, TransferKind::Unarchive, 0.25);
+        assert_eq!(fill.min, egui::pos2(310.0, 20.0));
+        assert_eq!(fill.max, egui::pos2(410.0, 72.0));
+    }
+
+    #[test]
+    fn transfer_progress_color_matches_kind() {
+        assert_eq!(super::transfer_progress_color(TransferKind::Push), colors::PUSH);
+        assert_eq!(super::transfer_progress_color(TransferKind::Pull), colors::PULL);
         assert_eq!(
-            super::transfer_progress_color(Direction::Push),
-            colors::PUSH
+            super::transfer_progress_color(TransferKind::Archive),
+            colors::STATUS_COMPLETE
         );
         assert_eq!(
-            super::transfer_progress_color(Direction::Pull),
-            colors::PULL
+            super::transfer_progress_color(TransferKind::Unarchive),
+            colors::STATUS_COMPLETE
         );
     }
 
@@ -1772,6 +1912,7 @@ mod tests {
             &asset,
             true,
             true,
+            false,
             &statuses,
             &crate::polyhaven::PublishedAssets::default(),
             &[],

@@ -18,7 +18,8 @@ mod thumbnails;
 pub use textures::*;
 
 pub use jobs::{
-    create_prod_folder, execute_after_conflict, start_job, start_status_update, start_title_rename,
+    create_prod_folder, execute_after_conflict, start_archive, start_job, start_status_update,
+    start_title_rename, start_unarchive,
 };
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -32,7 +33,7 @@ use std::time::{Duration, Instant};
 use crate::auth::{AuthTokens, BrowserLogin, LoggedInIdentity};
 use crate::config::Config;
 use crate::copy::job::{JobMsg, JobProgress, VerifyMsg};
-use crate::copy::plan::{build_plan_with_pull_filter, Direction, Plan, PullFilterMode};
+use crate::copy::plan::{build_plan_with_pull_filter, Action, Direction, Plan, PullFilterMode};
 use crate::notion::{Asset, AssetList, AssetStatus, StatusOption};
 
 const VERSION_NOTICE_DURATION: Duration = Duration::from_secs(10);
@@ -110,8 +111,46 @@ pub struct RowKey {
     pub slug: String,
 }
 
+/// What kind of transfer a copy job is. Archive (Prod -> archive) and Unarchive
+/// (archive -> Prod) flow through the same plan/copy/verify pipeline as Push and
+/// Pull; they differ only in their roots, progress colour/direction, and
+/// post-copy steps (Archive deletes Prod afterwards).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum TransferKind {
+    Push,
+    Pull,
+    Archive,
+    Unarchive,
+}
+
+impl TransferKind {
+    /// Present-progressive verb for the in-flight row label / status bar.
+    pub fn progressive(self) -> &'static str {
+        match self {
+            TransferKind::Push => "Pushing",
+            TransferKind::Pull => "Pulling",
+            TransferKind::Archive => "Archiving",
+            TransferKind::Unarchive => "Unarchiving",
+        }
+    }
+
+    /// Past-tense label for the success toast.
+    pub fn done_label(self) -> &'static str {
+        match self {
+            TransferKind::Push => "Pushed to prod",
+            TransferKind::Pull => "Pulled from prod",
+            TransferKind::Archive => "Archived",
+            TransferKind::Unarchive => "Unarchived",
+        }
+    }
+
+    pub fn touches_archive(self) -> bool {
+        matches!(self, TransferKind::Archive | TransferKind::Unarchive)
+    }
+}
+
 pub struct RowJob {
-    pub direction: Direction,
+    pub kind: TransferKind,
     pub plan: crate::copy::plan::Plan,
     pub progress: Arc<JobProgress>,
     pub rx: Receiver<JobMsg>,
@@ -121,8 +160,19 @@ pub struct RowJob {
 }
 
 pub struct VerificationJob {
+    /// The kind whose copy produced this verification (drives the small
+    /// verify-bar colour). Today only `Push` runs a separate verify pass.
+    pub kind: TransferKind,
     pub progress: Arc<JobProgress>,
     pub rx: Receiver<VerifyMsg>,
+}
+
+/// After an Archive copy fully verifies (inline), the asset's Prod folder is
+/// deleted on a background thread (guarded by a re-scan). This tracks that final
+/// step so the success toast reflects the whole archive duration.
+pub struct ArchiveDelete {
+    pub started_at: Instant,
+    pub rx: Receiver<Result<(), String>>,
 }
 
 pub struct PendingVerificationFailure {
@@ -154,7 +204,7 @@ pub struct ThumbnailPreview {
 
 pub struct PendingConflict {
     pub key: RowKey,
-    pub direction: Direction,
+    pub kind: TransferKind,
     pub plan: crate::copy::plan::Plan,
 }
 
@@ -181,7 +231,7 @@ pub struct ValidationJob {
 
 /// A background thread is building the copy plan for this asset.
 pub struct PlanJob {
-    pub direction: Direction,
+    pub kind: TransferKind,
     pub rx: Receiver<Result<Plan, String>>,
 }
 
@@ -217,6 +267,13 @@ impl TransferAction {
         match self {
             Self::PushAll | Self::PushStagingOnly => Direction::Push,
             Self::PullDefault | Self::PullStagingOnly | Self::PullAll => Direction::Pull,
+        }
+    }
+
+    pub const fn kind(self) -> TransferKind {
+        match self {
+            Self::PushAll | Self::PushStagingOnly => TransferKind::Push,
+            Self::PullDefault | Self::PullStagingOnly | Self::PullAll => TransferKind::Pull,
         }
     }
 
@@ -324,6 +381,8 @@ pub struct AppState {
     pub jobs: HashMap<RowKey, RowJob>,
     pub plan_jobs: HashMap<RowKey, PlanJob>,
     pub verifications: HashMap<RowKey, VerificationJob>,
+    /// In-flight post-archive Prod deletions (keyed by asset).
+    pub archive_deletes: HashMap<RowKey, ArchiveDelete>,
     pub status_updates: HashMap<RowKey, StatusUpdateJob>,
     pub title_renames: HashMap<RowKey, TitleRenameJob>,
     pub notion_rx: HashMap<AssetType, Receiver<Result<(AssetList, Option<AuthTokens>), String>>>,
@@ -332,6 +391,8 @@ pub struct AppState {
     pub transfer_file_list_dialog: Option<TransferFileListDialog>,
     pub pending_prod_folder_create: Option<RowKey>,
     pub pending_local_folder_delete: Option<RowKey>,
+    /// Asset awaiting archive confirmation (set by the menu item / info message).
+    pub pending_archive: Option<RowKey>,
     pub row_toasts: HashMap<RowKey, RowToast>,
     pub published_assets: crate::polyhaven::PublishedAssets,
     pub published_rx: Option<Receiver<Result<crate::polyhaven::PublishedAssets, String>>>,
@@ -355,8 +416,14 @@ pub struct AppState {
     /// Rebuilt when asset API data loads, window gains focus, a job finishes,
     /// or a prod folder is created — never on every frame.
     pub prod_folder_cache: HashMap<RowKey, bool>,
-    /// Receiver for an in-flight background rebuild of `prod_folder_cache`.
-    pub prod_cache_rx: Option<Receiver<HashMap<RowKey, bool>>>,
+    /// Cached result of `is_dir()` for each asset's archive folder. Rebuilt
+    /// alongside `prod_folder_cache`. Used to suppress the "No prod folder"
+    /// warning and to drive the "Published. Archive files?" message.
+    pub archive_folder_cache: HashMap<RowKey, bool>,
+    /// Receiver for an in-flight background rebuild of the prod + archive folder
+    /// existence caches (both checked on the same thread to avoid duplicate
+    /// network round-trips).
+    pub prod_cache_rx: Option<Receiver<(HashMap<RowKey, bool>, HashMap<RowKey, bool>)>>,
     pub thumbnail_cache_root: PathBuf,
     pub thumbnail_revisions: HashMap<RowKey, Arc<AtomicU64>>,
     pub thumbnail_jobs: HashMap<RowKey, thumbnails::ThumbnailJob>,
@@ -521,6 +588,7 @@ impl AppState {
             jobs: HashMap::new(),
             plan_jobs: HashMap::new(),
             verifications: HashMap::new(),
+            archive_deletes: HashMap::new(),
             status_updates: HashMap::new(),
             title_renames: HashMap::new(),
             notion_rx: HashMap::new(),
@@ -529,6 +597,7 @@ impl AppState {
             transfer_file_list_dialog: None,
             pending_prod_folder_create: None,
             pending_local_folder_delete: None,
+            pending_archive: None,
             row_toasts: HashMap::new(),
             published_assets: crate::cache::load(crate::polyhaven::cache_name())
                 .unwrap_or_default(),
@@ -547,6 +616,7 @@ impl AppState {
             cursor_moved_in_table_at: None,
             focus_refresh: focus_refresh::State::default(),
             prod_folder_cache: HashMap::new(),
+            archive_folder_cache: HashMap::new(),
             prod_cache_rx: None,
             thumbnail_cache_root: thumbnail_cache_root(),
             thumbnail_revisions: HashMap::new(),
@@ -912,26 +982,32 @@ impl AppState {
         }
     }
 
-    /// Kick off a background rebuild of the prod-folder existence cache.
-    /// When the thread finishes, `pump()` will receive the result and swap it in.
+    /// Kick off a background rebuild of the prod-folder and archive-folder
+    /// existence caches. When the thread finishes, `pump()` swaps both in.
     pub fn rebuild_prod_folder_cache(&mut self) {
-        let to_check: Vec<(RowKey, std::path::PathBuf)> = self
+        let to_check: Vec<(RowKey, std::path::PathBuf, std::path::PathBuf)> = self
             .visible_asset_keys()
             .into_iter()
             .map(|key| {
-                let path = self.prod_root_for(key.asset_type).join(&key.slug);
-                (key, path)
+                let prod = self.prod_root_for(key.asset_type).join(&key.slug);
+                let archive = self.archive_root_for(key.asset_type).join(&key.slug);
+                (key, prod, archive)
             })
             .collect();
         if to_check.is_empty() {
             self.prod_folder_cache.clear();
+            self.archive_folder_cache.clear();
             return;
         }
         let (tx, rx) = channel();
         thread::spawn(move || {
-            let cache: HashMap<RowKey, bool> =
-                to_check.into_iter().map(|(k, p)| (k, p.is_dir())).collect();
-            let _ = tx.send(cache);
+            let mut prod = HashMap::with_capacity(to_check.len());
+            let mut archive = HashMap::with_capacity(to_check.len());
+            for (key, prod_path, archive_path) in to_check {
+                prod.insert(key.clone(), prod_path.is_dir());
+                archive.insert(key, archive_path.is_dir());
+            }
+            let _ = tx.send((prod, archive));
         });
         self.prod_cache_rx = Some(rx);
     }
@@ -983,11 +1059,14 @@ impl AppState {
         if revision == 0 {
             return;
         }
+        let check_archive = self.asset_is_complete(key);
         let job = thumbnails::spawn_thumbnail_job(
             self.thumbnail_cache_root.clone(),
             self.config.local_root.clone(),
             self.config.prod_root.clone(),
+            self.config.archive_root.clone(),
             key.clone(),
+            check_archive,
             revision,
             revision_state,
         );
@@ -1720,13 +1799,14 @@ impl AppState {
             }
         }
 
-        // Receive background prod-folder cache rebuild result.
-        if let Some(cache) = self
+        // Receive background prod/archive-folder cache rebuild result.
+        if let Some((prod, archive)) = self
             .prod_cache_rx
             .as_ref()
             .and_then(|rx| rx.try_recv().ok())
         {
-            self.prod_folder_cache = cache;
+            self.prod_folder_cache = prod;
+            self.archive_folder_cache = archive;
             self.prod_cache_rx = None;
             self.watch_dirty = true;
         }
@@ -1803,20 +1883,27 @@ impl AppState {
                 .get(&k)
                 .and_then(|job| job.rx.try_recv().ok());
             if let Some(result) = result_opt {
-                let direction = self.plan_jobs.remove(&k).unwrap().direction;
+                let kind = self.plan_jobs.remove(&k).unwrap().kind;
                 match result {
                     Err(e) => {
                         self.error_banner = Some(format!("Plan failed for {}: {e}", k.slug));
                     }
-                    Ok(plan) => {
-                        if !plan.conflicts().is_empty() {
-                            self.pending_conflict = Some(PendingConflict {
-                                key: k,
-                                direction,
-                                plan,
-                            });
+                    Ok(mut plan) => {
+                        if kind.touches_archive() {
+                            // Archive/Unarchive: the source (Prod / archive) is
+                            // authoritative — auto-resolve conflicts to overwrite
+                            // and never show the conflict dialog.
+                            for f in plan.files.iter_mut() {
+                                if matches!(f.action, Action::Conflict { .. }) {
+                                    f.action = Action::Overwrite;
+                                    plan.total_bytes_to_copy += f.size;
+                                }
+                            }
+                            jobs::spawn_copy_job(self, k, kind, plan);
+                        } else if !plan.conflicts().is_empty() {
+                            self.pending_conflict = Some(PendingConflict { key: k, kind, plan });
                         } else {
-                            jobs::spawn_copy_job(self, k, direction, plan);
+                            jobs::spawn_copy_job(self, k, kind, plan);
                         }
                     }
                 }
@@ -1853,27 +1940,44 @@ impl AppState {
                 let finished_key = k.clone();
                 if let Some(job) = self.jobs.remove(&k) {
                     if finished_successfully {
+                        match job.kind {
+                            TransferKind::Pull => {
+                                self.update_prod_folder_cache_for(&k);
+                                self.update_local_folder_cache_for(&k);
+                            }
+                            TransferKind::Push => {
+                                self.update_prod_folder_cache_for(&k);
+                                self.start_push_verification(k.clone(), job.plan.clone());
+                            }
+                            TransferKind::Unarchive => {
+                                self.update_prod_folder_cache_for(&k);
+                                self.update_archive_folder_cache_for(&k);
+                            }
+                            TransferKind::Archive => {
+                                // Archive copy verified inline — now delete Prod.
+                                self.update_archive_folder_cache_for(&k);
+                                self.start_archive_delete(k.clone(), job.started_at, &job.plan);
+                            }
+                        }
+                        // Archive toasts after its delete step completes.
+                        if !matches!(job.kind, TransferKind::Archive) {
+                            self.row_toasts.insert(
+                                k.clone(),
+                                RowToast {
+                                    text: format!(
+                                        "{} in {}",
+                                        job.kind.done_label(),
+                                        fmt_duration(job.started_at.elapsed())
+                                    ),
+                                    created_at: Instant::now(),
+                                },
+                            );
+                        }
+                    } else if job.kind.touches_archive() {
+                        // Cancelled/failed archive or unarchive: a partial
+                        // archive/Prod folder may exist — refresh both caches.
                         self.update_prod_folder_cache_for(&k);
-                        if job.direction == Direction::Pull {
-                            self.update_local_folder_cache_for(&k);
-                        }
-                        if job.direction == Direction::Push {
-                            self.start_push_verification(k.clone(), job.plan.clone());
-                        }
-                        let action = match job.direction {
-                            Direction::Pull => "Pulled from prod",
-                            Direction::Push => "Pushed to prod",
-                        };
-                        self.row_toasts.insert(
-                            k,
-                            RowToast {
-                                text: format!(
-                                    "{action} in {}",
-                                    fmt_duration(job.started_at.elapsed())
-                                ),
-                                created_at: Instant::now(),
-                            },
-                        );
+                        self.update_archive_folder_cache_for(&k);
                     }
                 }
                 // Re-run validation now that the copy is no longer in progress.
@@ -1914,6 +2018,7 @@ impl AppState {
                 self.pending_verification_failure = failure;
             }
         }
+        self.pump_archive_deletes();
         self.row_toasts
             .retain(|_, toast| toast.created_at.elapsed() < Duration::from_secs(5));
 
@@ -1925,6 +2030,41 @@ impl AppState {
     }
     pub fn prod_root_for(&self, t: AssetType) -> PathBuf {
         self.config.prod_root.join(t.folder())
+    }
+    /// Root for an asset type's archived files, e.g. `A:\Textures`.
+    pub fn archive_root_for(&self, t: AssetType) -> PathBuf {
+        self.config.archive_root.join(t.folder())
+    }
+
+    /// Re-check whether the archive folder exists for a single asset.
+    pub fn update_archive_folder_cache_for(&mut self, key: &RowKey) {
+        let exists = self.archive_root_for(key.asset_type).join(&key.slug).is_dir();
+        self.archive_folder_cache.insert(key.clone(), exists);
+    }
+
+    /// True when the asset's loaded status is in the Complete group ("Done").
+    pub fn asset_is_complete(&self, key: &RowKey) -> bool {
+        matches!(
+            self.assets_by_type.get(&key.asset_type),
+            Some(AssetListState::Loaded(list))
+                if list.assets.iter().any(|a| a.slug == key.slug
+                    && a.status
+                        .as_ref()
+                        .map(|s| s.group == crate::notion::StatusGroup::Complete)
+                        .unwrap_or(false))
+        )
+    }
+
+    /// Request archiving an asset: opens the confirmation prompt. The actual
+    /// copy/verify/delete only starts once the user confirms.
+    pub fn request_archive(&mut self, key: &RowKey) {
+        if self.plan_jobs.contains_key(key)
+            || self.jobs.contains_key(key)
+            || self.archive_deletes.contains_key(key)
+        {
+            return;
+        }
+        self.pending_archive = Some(key.clone());
     }
 
     pub fn open_settings(&mut self) {
@@ -1964,8 +2104,70 @@ impl AppState {
         let (tx, rx) = std::sync::mpsc::channel();
         let progress = Arc::new(JobProgress::default());
         crate::copy::job::spawn_verification(plan.files, progress.clone(), tx);
-        self.verifications
-            .insert(key, VerificationJob { progress, rx });
+        self.verifications.insert(
+            key,
+            VerificationJob {
+                kind: TransferKind::Push,
+                progress,
+                rx,
+            },
+        );
+    }
+
+    /// After an Archive copy fully succeeds (verified inline), delete the asset's
+    /// Prod folder on a background thread, guarded by `delete_prod_after_archive`.
+    fn start_archive_delete(&mut self, key: RowKey, started_at: Instant, plan: &Plan) {
+        let src_root = self.prod_root_for(key.asset_type).join(&key.slug);
+        // Every file accounted for in the archive: copied+verified this run, or
+        // already present and unchanged (skipped during copy). The delete thread
+        // refuses to delete Prod if it has gained any *other* (un-archived) file.
+        let verified: std::collections::HashSet<PathBuf> =
+            plan.files.iter().map(|f| f.rel_path.clone()).collect();
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            let _ = tx.send(delete_prod_after_archive(&src_root, &verified));
+        });
+        self.archive_deletes
+            .insert(key, ArchiveDelete { started_at, rx });
+    }
+
+    /// Drain completed post-archive Prod deletions.
+    fn pump_archive_deletes(&mut self) {
+        let keys: Vec<RowKey> = self.archive_deletes.keys().cloned().collect();
+        for k in keys {
+            let Some(result) = self
+                .archive_deletes
+                .get(&k)
+                .and_then(|d| d.rx.try_recv().ok())
+            else {
+                continue;
+            };
+            let started_at = self.archive_deletes.remove(&k).map(|d| d.started_at);
+            self.update_prod_folder_cache_for(&k);
+            self.update_archive_folder_cache_for(&k);
+            match result {
+                Ok(()) => {
+                    self.row_toasts.insert(
+                        k.clone(),
+                        RowToast {
+                            text: format!(
+                                "Archived in {}",
+                                fmt_duration(started_at.map(|s| s.elapsed()).unwrap_or_default())
+                            ),
+                            created_at: Instant::now(),
+                        },
+                    );
+                }
+                Err(e) => {
+                    self.error_banner = Some(format!(
+                        "Archived {} but could not delete all Prod files: {e}",
+                        k.slug
+                    ));
+                }
+            }
+            self.start_validation_for_keys(vec![k.clone()]);
+            self.start_thumbnail_refresh_for_keys(vec![k]);
+        }
     }
 }
 
@@ -1978,24 +2180,65 @@ fn fmt_duration(duration: Duration) -> String {
     }
 }
 
+/// Delete an asset's Prod slug folder after its archive copy has been verified.
+///
+/// As a final safety gate against concurrent modification, this re-walks Prod
+/// and refuses to delete if it contains any file that was neither archived (and
+/// thus present in `verified`) nor an intentionally-discarded `work/*.tif`. Such
+/// a file would have appeared after the archive plan was built and is therefore
+/// not in the verified archive — deleting it would be silent data loss.
+fn delete_prod_after_archive(
+    src_root: &std::path::Path,
+    verified: &std::collections::HashSet<PathBuf>,
+) -> Result<(), String> {
+    for entry in walkdir::WalkDir::new(src_root).follow_links(false) {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        if file_name.ends_with(".partial") {
+            continue;
+        }
+        let abs = entry.path();
+        let Ok(rel) = abs.strip_prefix(src_root) else {
+            continue;
+        };
+        // Skipped during archiving (discarded) — safe to delete.
+        if crate::copy::plan::is_work_tif(rel, &file_name) {
+            continue;
+        }
+        // Archived and verified — safe to delete.
+        if verified.contains(rel) {
+            continue;
+        }
+        return Err(format!(
+            "Prod gained an un-archived file since archiving started ({}); Prod was NOT deleted",
+            rel.display()
+        ));
+    }
+    match std::fs::remove_dir_all(src_root) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 fn format_active_file_action(
     key: &RowKey,
-    direction: Direction,
+    kind: TransferKind,
     current_file: Option<&str>,
 ) -> String {
-    let verb = match direction {
-        Direction::Pull => "Downloading",
-        Direction::Push => "Uploading",
-    };
     let target = match current_file {
         Some(file) if !file.is_empty() => abbreviate_status_path(file),
         _ => format!("{}/{}", key.asset_type.folder(), key.slug),
     };
-    let suffix = match direction {
-        Direction::Pull => "from Prod",
-        Direction::Push => "to Prod",
-    };
-    format!("{verb} {target} {suffix}")
+    match kind {
+        TransferKind::Push => format!("Uploading {target} to Prod"),
+        TransferKind::Pull => format!("Downloading {target} from Prod"),
+        TransferKind::Archive => format!("Archiving {target}"),
+        TransferKind::Unarchive => format!("Unarchiving {target}"),
+    }
 }
 
 fn abbreviate_status_path(path: &str) -> String {
@@ -2026,7 +2269,7 @@ fn active_file_action_status(state: &AppState) -> Option<String> {
                 .lock()
                 .ok()
                 .and_then(|file| file.clone());
-            format_active_file_action(key, job.direction, current_file.as_deref())
+            format_active_file_action(key, job.kind, current_file.as_deref())
         })
     {
         return Some(status);
@@ -2053,6 +2296,20 @@ fn active_file_action_status(state: &AppState) -> Option<String> {
                 _ => format!("{}/{}", key.asset_type.folder(), key.slug),
             };
             format!("Verifying {target}")
+        })
+        .or_else(|| {
+            state
+                .archive_deletes
+                .keys()
+                .min_by(|a, b| {
+                    a.asset_type
+                        .order()
+                        .cmp(&b.asset_type.order())
+                        .then_with(|| a.slug.cmp(&b.slug))
+                })
+                .map(|key| {
+                    format!("Removing Prod files {}/{}", key.asset_type.folder(), key.slug)
+                })
         })
 }
 
@@ -2252,6 +2509,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     draw_update_prompt(state, ctx);
     draw_create_prod_folder_prompt(state, ctx);
     draw_delete_local_folder_prompt(state, ctx);
+    draw_archive_prompt(state, ctx);
     draw_verification_failure_prompt(state, ctx);
     draw_status_bar(state, ctx);
     let table_resp = egui::CentralPanel::default().show(ctx, |ui| table::draw(state, ui));
@@ -2273,6 +2531,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         || !state.plan_jobs.is_empty()
         || state.prod_cache_rx.is_some()
         || !state.verifications.is_empty()
+        || !state.archive_deletes.is_empty()
         || state.validation_job.is_some()
         || state.update_check.is_some()
         || state.update_install.is_some()
@@ -2446,6 +2705,44 @@ fn delete_local_folder(state: &mut AppState, key: &RowKey) {
     }
     state.rebuild_local_folder_cache();
     state.start_validation_for_visible_assets();
+}
+
+fn draw_archive_prompt(state: &mut AppState, ctx: &egui::Context) {
+    let Some(key) = state.pending_archive.clone() else {
+        return;
+    };
+    let mut confirm = false;
+    let mut cancel = false;
+    egui::Window::new("Archive asset?")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label(format!(
+                "Copy the Prod files for {} to the archive drive, then delete them from Prod?",
+                key.slug
+            ));
+            ui.add_space(layout::DIALOG_SECTION_SPACING_SMALL);
+            ui.colored_label(
+                colors::MSG_WARNING,
+                ".tif files in the work folder will be discarded, not archived.",
+            );
+            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
+            ui.horizontal(|ui| {
+                if ui.button("Archive").clicked() {
+                    confirm = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+    if confirm {
+        state.pending_archive = None;
+        start_archive(state, &key);
+    } else if cancel {
+        state.pending_archive = None;
+    }
 }
 
 fn draw_delete_local_folder_prompt(state: &mut AppState, ctx: &egui::Context) {

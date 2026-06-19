@@ -17,6 +17,11 @@ pub struct Config {
     pub prod_root: PathBuf,
     #[serde(default = "default_local_root")]
     pub local_root: PathBuf,
+    /// Root of the archive drive. An asset's archived files live at
+    /// `archive_root\{HDRIs|Textures}\{slug}` (note: no `Assets` segment,
+    /// unlike `prod_root`).
+    #[serde(default = "default_archive_root")]
+    pub archive_root: PathBuf,
     /// Last selected asset-type tab ("HDRIs" or "Textures").
     #[serde(default)]
     pub last_tab: String,
@@ -53,6 +58,9 @@ fn default_prod_root() -> PathBuf {
 fn default_local_root() -> PathBuf {
     PathBuf::from(r"C:\PHASE")
 }
+fn default_archive_root() -> PathBuf {
+    PathBuf::from(r"A:\")
+}
 fn default_open_notion_links_in_desktop_app() -> bool {
     false
 }
@@ -66,6 +74,7 @@ impl Default for Config {
             open_notion_links_in_desktop_app: default_open_notion_links_in_desktop_app(),
             prod_root: default_prod_root(),
             local_root: default_local_root(),
+            archive_root: default_archive_root(),
             last_tab: String::new(),
             last_asset_types: Vec::new(),
             last_author_filter: String::new(),
