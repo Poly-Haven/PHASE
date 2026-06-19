@@ -20,6 +20,8 @@ pub const AUTHOR_FILTER_COMBO_EXTRA_WIDTH: f32 = 36.0;
 pub const ROW_HEIGHT: f32 = 52.0;
 pub const ROW_PRIMARY_HEIGHT: f32 = 26.0;
 pub const ROW_SECONDARY_HEIGHT: f32 = 24.0;
+/// Height of the slim archive/unarchive progress bar on a row's bottom edge.
+pub const ROW_PROGRESS_BAR_HEIGHT: f32 = 3.0;
 pub const ROW_SECTION_PADDING: f32 = 6.0;
 pub const ROW_INTRA_ICON_GAP: f32 = 2.0;
 pub const ACTION_ICON_SIZE: f32 = 18.0;

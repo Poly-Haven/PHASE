@@ -58,13 +58,24 @@ pub struct ThumbnailJobResult {
 
 #[cfg(test)]
 pub fn thumbnail_source_path(config: &Config, key: &RowKey) -> Option<PathBuf> {
-    thumbnail_source_path_from_roots(&config.local_root, &config.prod_root, key)
+    thumbnail_source_path_from_roots(
+        &config.local_root,
+        &config.prod_root,
+        &config.archive_root,
+        key,
+        false,
+    )
 }
 
+/// Resolve the thumbnail source image, checking local then prod. When
+/// `check_archive` is set (the asset is Done and its prod/staging may have been
+/// moved), the archive folder is used as a final fallback.
 pub fn thumbnail_source_path_from_roots(
     local_root: &Path,
     prod_root: &Path,
+    archive_root: &Path,
     key: &RowKey,
+    check_archive: bool,
 ) -> Option<PathBuf> {
     let local_source = source_path(local_root, key.asset_type.folder(), &key.slug);
     if local_source.is_file() {
@@ -73,6 +84,12 @@ pub fn thumbnail_source_path_from_roots(
     let prod_source = source_path(prod_root, key.asset_type.folder(), &key.slug);
     if prod_source.is_file() {
         return Some(prod_source);
+    }
+    if check_archive {
+        let archive_source = source_path(archive_root, key.asset_type.folder(), &key.slug);
+        if archive_source.is_file() {
+            return Some(archive_source);
+        }
     }
     None
 }
@@ -146,11 +163,14 @@ pub fn prune_thumbnail_cache_older_than(
     Ok(removed)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_thumbnail_job(
     cache_root: PathBuf,
     local_root: PathBuf,
     prod_root: PathBuf,
+    archive_root: PathBuf,
     key: RowKey,
+    check_archive: bool,
     revision: u64,
     revision_state: Arc<AtomicU64>,
 ) -> ThumbnailJob {
@@ -164,6 +184,8 @@ pub fn spawn_thumbnail_job(
             &cache_root,
             &local_root,
             &prod_root,
+            &archive_root,
+            check_archive,
             &key,
             revision,
             &revision_state,
@@ -201,10 +223,13 @@ pub fn load_thumbnail_texture(
     Ok(ctx.load_texture(texture_name, image, egui::TextureOptions::LINEAR))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_thumbnail(
     cache_root: &Path,
     local_root: &Path,
     prod_root: &Path,
+    archive_root: &Path,
+    check_archive: bool,
     key: &RowKey,
     revision: u64,
     revision_state: &AtomicU64,
@@ -212,7 +237,9 @@ fn render_thumbnail(
     if revision_state.load(Ordering::Acquire) != revision {
         return Err("thumbnail refresh superseded".into());
     }
-    let Some(source_path) = thumbnail_source_path_from_roots(local_root, prod_root, key) else {
+    let Some(source_path) =
+        thumbnail_source_path_from_roots(local_root, prod_root, archive_root, key, check_archive)
+    else {
         return Err(format!(
             "Missing thumbnail source for {}/{}",
             key.asset_type.folder(),

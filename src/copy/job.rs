@@ -48,9 +48,22 @@ pub fn copy_worker_count(copyable_files: usize) -> usize {
     copyable_files.clamp(1, 4)
 }
 
-/// Spawn worker threads that copy all `New`/`Overwrite` files.
+/// Spawn worker threads that copy all `New`/`Overwrite` files. Verification
+/// timing follows the plan direction (Pull verifies each file immediately;
+/// Push defers verification to a later pass).
 pub fn spawn(plan: Plan, progress: Arc<JobProgress>, tx: Sender<JobMsg>) -> thread::JoinHandle<()> {
     spawn_with_worker_count(plan, progress, tx, None)
+}
+
+/// Like [`spawn`], but every copied file is BLAKE3-verified immediately after it
+/// is written, regardless of plan direction. Used by archive/restore copies that
+/// must be verified inline (so no separate, slower verification pass is needed).
+pub fn spawn_immediate_verify(
+    plan: Plan,
+    progress: Arc<JobProgress>,
+    tx: Sender<JobMsg>,
+) -> thread::JoinHandle<()> {
+    spawn_inner(plan, progress, tx, None, true)
 }
 
 pub(crate) fn spawn_with_worker_count(
@@ -58,6 +71,17 @@ pub(crate) fn spawn_with_worker_count(
     progress: Arc<JobProgress>,
     tx: Sender<JobMsg>,
     worker_count: Option<usize>,
+) -> thread::JoinHandle<()> {
+    let immediate_verify = plan.direction == Direction::Pull;
+    spawn_inner(plan, progress, tx, worker_count, immediate_verify)
+}
+
+fn spawn_inner(
+    plan: Plan,
+    progress: Arc<JobProgress>,
+    tx: Sender<JobMsg>,
+    worker_count: Option<usize>,
+    immediate_verify: bool,
 ) -> thread::JoinHandle<()> {
     let direction = plan.direction;
     progress
@@ -109,19 +133,20 @@ pub(crate) fn spawn_with_worker_count(
                 if let Ok(mut current_file) = progress.current_file.lock() {
                     *current_file = Some(file.rel_path.to_string_lossy().to_string());
                 }
-                let res = match direction {
-                    Direction::Pull => copy_one_file(
+                let res = if immediate_verify {
+                    copy_one_file(
                         &file.src_abs,
                         &file.dst_abs,
                         &progress.bytes_done,
                         &progress.cancel,
-                    ),
-                    Direction::Push => copy_one_file_deferred_verify(
+                    )
+                } else {
+                    copy_one_file_deferred_verify(
                         &file.src_abs,
                         &file.dst_abs,
                         &progress.bytes_done,
                         &progress.cancel,
-                    ),
+                    )
                 };
                 match res {
                     Ok(()) => {

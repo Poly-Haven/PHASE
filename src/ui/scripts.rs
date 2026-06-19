@@ -108,6 +108,8 @@ pub fn draw_context_menu(
     key: &RowKey,
     notion_url: &str,
     open_notion_in_app: bool,
+    is_complete: bool,
+    exists_on_prod: bool,
 ) {
     if state.is_admin() && matches!(key.asset_type, AssetType::Hdris) {
         draw_script_button(
@@ -119,6 +121,21 @@ pub fn draw_context_menu(
         );
         draw_script_button(ui, state, key, "Normalize", ScriptAction::Normalize);
         draw_script_button(ui, state, key, "Render", ScriptAction::Render);
+    }
+
+    // Archive is offered for finished (Complete) assets. It needs Prod files to
+    // copy, and is hidden while a transfer/archive for this asset is running.
+    let row_busy = state.plan_jobs.contains_key(key)
+        || state.jobs.contains_key(key)
+        || state.archive_deletes.contains_key(key);
+    if is_complete && !row_busy {
+        let response = ui
+            .add_enabled(exists_on_prod, egui::Button::new("Archive"))
+            .on_disabled_hover_text("No Prod files to archive");
+        if response.clicked() {
+            state.request_archive(key);
+            ui.close_menu();
+        }
     }
 
     if ui.button("Open on Notion").clicked() {

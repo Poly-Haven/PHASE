@@ -9,6 +9,8 @@ use crate::copy::job::JobProgress;
 use crate::copy::plan::{Action, Direction, Plan, PlannedFile};
 use crate::notion::{Asset, AssetList, AssetStatus, StatusGroup};
 
+use super::TransferKind;
+
 fn test_state() -> super::AppState {
     let current_type = super::AssetType::Hdris;
     let mut assets_by_type = HashMap::new();
@@ -32,6 +34,7 @@ fn test_state() -> super::AppState {
         jobs: HashMap::new(),
         plan_jobs: HashMap::new(),
         verifications: HashMap::new(),
+        archive_deletes: HashMap::new(),
         status_updates: HashMap::new(),
         title_renames: HashMap::new(),
         notion_rx: HashMap::new(),
@@ -40,6 +43,7 @@ fn test_state() -> super::AppState {
         transfer_file_list_dialog: None,
         pending_prod_folder_create: None,
         pending_local_folder_delete: None,
+        pending_archive: None,
         row_toasts: HashMap::new(),
         published_assets: crate::polyhaven::PublishedAssets::default(),
         published_rx: None,
@@ -57,6 +61,7 @@ fn test_state() -> super::AppState {
         cursor_moved_in_table_at: None,
         focus_refresh: super::focus_refresh::State::default(),
         prod_folder_cache: HashMap::new(),
+        archive_folder_cache: HashMap::new(),
         prod_cache_rx: None,
         thumbnail_cache_root: std::path::PathBuf::from("thumbnail-cache-test"),
         thumbnail_revisions: HashMap::new(),
@@ -558,12 +563,20 @@ fn active_file_action_status_includes_direction_asset_and_file() {
     };
 
     assert_eq!(
-        super::format_active_file_action(&key, Direction::Pull, Some("bar.xyz")),
+        super::format_active_file_action(&key, TransferKind::Pull, Some("bar.xyz")),
         "Downloading bar.xyz from Prod"
     );
     assert_eq!(
-        super::format_active_file_action(&key, Direction::Push, Some("bar.xyz")),
+        super::format_active_file_action(&key, TransferKind::Push, Some("bar.xyz")),
         "Uploading bar.xyz to Prod"
+    );
+    assert_eq!(
+        super::format_active_file_action(&key, TransferKind::Archive, Some("bar.xyz")),
+        "Archiving bar.xyz"
+    );
+    assert_eq!(
+        super::format_active_file_action(&key, TransferKind::Unarchive, Some("bar.xyz")),
+        "Unarchiving bar.xyz"
     );
 }
 
@@ -577,7 +590,7 @@ fn active_file_action_abbreviates_paths_to_two_parents_with_windows_separators()
     assert_eq!(
         super::format_active_file_action(
             &key,
-            Direction::Pull,
+            TransferKind::Pull,
             Some("staging/textures/foobar.exr")
         ),
         "Downloading staging\\textures\\foobar.exr from Prod"
@@ -585,7 +598,7 @@ fn active_file_action_abbreviates_paths_to_two_parents_with_windows_separators()
     assert_eq!(
         super::format_active_file_action(
             &key,
-            Direction::Pull,
+            TransferKind::Pull,
             Some("staging/textures/foo/bar.exr")
         ),
         "Downloading ...textures\\foo\\bar.exr from Prod"
@@ -1095,7 +1108,7 @@ fn error_message_replaces_active_progress_text_while_visible() {
     state.jobs.insert(
         key.clone(),
         super::RowJob {
-            direction: Direction::Push,
+            kind: TransferKind::Push,
             plan: Plan {
                 direction: Direction::Push,
                 src_root: std::path::PathBuf::from(r"C:\src"),
@@ -1242,4 +1255,43 @@ fn queue_revalidation_coalesces_while_a_job_is_running() {
     // Nothing started a new job; both keys are queued for when the job finishes.
     assert!(state.pending_validation_keys.contains(&key_a));
     assert!(state.pending_validation_keys.contains(&key_b));
+}
+
+#[test]
+fn delete_prod_after_archive_removes_folder_when_all_files_accounted_for() {
+    let temp = tempfile::tempdir().unwrap();
+    let prod = temp.path().join("slug");
+    std::fs::create_dir_all(prod.join("staging/renders")).unwrap();
+    std::fs::create_dir_all(prod.join("raw")).unwrap();
+    std::fs::write(prod.join("staging/renders/primary.png"), b"thumb").unwrap();
+    std::fs::write(prod.join("raw/wood.exr"), b"raw").unwrap();
+    std::fs::create_dir_all(prod.join("work")).unwrap();
+    // A discarded work tif that is NOT in the verified set — must still be deletable.
+    std::fs::write(prod.join("work/frame.tif"), b"tif").unwrap();
+
+    let mut verified = HashSet::new();
+    verified.insert(std::path::PathBuf::from("staging/renders/primary.png"));
+    verified.insert(std::path::PathBuf::from("raw/wood.exr"));
+
+    let result = super::delete_prod_after_archive(&prod, &verified);
+    assert!(result.is_ok(), "expected delete to succeed: {result:?}");
+    assert!(!prod.exists(), "prod folder should have been removed");
+}
+
+#[test]
+fn delete_prod_after_archive_refuses_when_prod_gained_an_unarchived_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let prod = temp.path().join("slug");
+    std::fs::create_dir_all(prod.join("raw")).unwrap();
+    std::fs::write(prod.join("raw/wood.exr"), b"raw").unwrap();
+    // Appeared after planning: a real file that was never archived/verified.
+    std::fs::write(prod.join("raw/added_later.exr"), b"new").unwrap();
+
+    let mut verified = HashSet::new();
+    verified.insert(std::path::PathBuf::from("raw/wood.exr"));
+
+    let result = super::delete_prod_after_archive(&prod, &verified);
+    assert!(result.is_err(), "expected delete to be refused");
+    assert!(prod.join("raw/added_later.exr").exists(), "prod must be left intact");
+    assert!(prod.join("raw/wood.exr").exists());
 }

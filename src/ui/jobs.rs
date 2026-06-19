@@ -5,16 +5,94 @@ use std::time::Instant;
 
 use super::{
     AppState, AssetListState, AssetType, ConflictChoice, PlanJob, RowJob, RowKey, StatusUpdateJob,
-    TitleRenameJob, TransferAction,
+    TitleRenameJob, TransferAction, TransferKind,
 };
 use crate::auth::AuthTokens;
 use crate::copy::job::JobProgress;
-use crate::copy::plan::{Action, Direction, Plan};
+use crate::copy::plan::{build_archive_plan, Action, Direction, Plan, PullFilterMode};
 use crate::notion::{AssetStatus, StatusOption};
 
 pub fn start_job(state: &mut AppState, key: &RowKey, action: TransferAction) {
-    // Ignore if already planning or copying.
-    if state.plan_jobs.contains_key(key) || state.jobs.contains_key(key) {
+    let direction = action.direction();
+    let (src_root, dst_root, pull_filter) = state.transfer_plan_roots(key, action);
+    start_planned_transfer(state, key, action.kind(), direction, src_root, dst_root, pull_filter);
+}
+
+/// Begin archiving an asset: copy its Prod files to the archive drive (skipping
+/// `.tif`s under `work/`); once the copy is verified (inline), the Prod files are
+/// deleted. The caller is responsible for confirming the action first. Archive
+/// is an ordinary transfer job, so it shares the queue/concurrency and cancel UI.
+pub fn start_archive(state: &mut AppState, key: &RowKey) {
+    if state.plan_jobs.contains_key(key)
+        || state.jobs.contains_key(key)
+        || state.archive_deletes.contains_key(key)
+    {
+        return;
+    }
+    let src_root = state.prod_root_for(key.asset_type).join(&key.slug);
+    let dst_root = state.archive_root_for(key.asset_type).join(&key.slug);
+    if !src_root.is_dir() {
+        state.error_banner = Some(format!("Cannot archive {}: no Prod folder", key.slug));
+        return;
+    }
+    state.clear_transfer_estimates_for_key(key);
+    state.validation_results.remove(key);
+    state.row_toasts.remove(key);
+    let (tx, rx) = channel::<Result<Plan, String>>();
+    thread::spawn(move || {
+        // Archive plan skips `.tif`/`.tiff` under the top-level `work` folder.
+        let result = build_archive_plan(&src_root, &dst_root).map_err(|e| e.to_string());
+        let _ = tx.send(result);
+    });
+    state.plan_jobs.insert(
+        key.clone(),
+        PlanJob {
+            kind: TransferKind::Archive,
+            rx,
+        },
+    );
+}
+
+/// Begin unarchiving an asset: copy its files from the archive drive back to
+/// Prod (verified inline). Non-destructive — the archive copy is left in place,
+/// so the asset can be re-archived later (which then skips unchanged files).
+pub fn start_unarchive(state: &mut AppState, key: &RowKey) {
+    let src_root = state.archive_root_for(key.asset_type).join(&key.slug);
+    let dst_root = state.prod_root_for(key.asset_type).join(&key.slug);
+    if !src_root.is_dir() {
+        state.error_banner = Some(format!("Cannot unarchive {}: no archive folder", key.slug));
+        return;
+    }
+    // Pull direction → per-file BLAKE3 verification during the copy; `None`
+    // filter restores everything that is in the archive.
+    start_planned_transfer(
+        state,
+        key,
+        TransferKind::Unarchive,
+        Direction::Pull,
+        src_root,
+        dst_root,
+        PullFilterMode::None,
+    );
+}
+
+/// Shared entry point for transfers built from a `build_transfer_plan` (Push,
+/// Pull, Unarchive). Spawns the planning thread and records a `PlanJob`.
+#[allow(clippy::too_many_arguments)]
+fn start_planned_transfer(
+    state: &mut AppState,
+    key: &RowKey,
+    kind: TransferKind,
+    direction: Direction,
+    src_root: std::path::PathBuf,
+    dst_root: std::path::PathBuf,
+    pull_filter: PullFilterMode,
+) {
+    // Ignore if already planning, copying, or finalising an archive delete.
+    if state.plan_jobs.contains_key(key)
+        || state.jobs.contains_key(key)
+        || state.archive_deletes.contains_key(key)
+    {
         return;
     }
     state.clear_transfer_estimates_for_key(key);
@@ -22,27 +100,32 @@ pub fn start_job(state: &mut AppState, key: &RowKey, action: TransferAction) {
     // while the job runs. Fresh validation fires automatically after the job finishes.
     state.validation_results.remove(key);
     state.row_toasts.remove(key);
-    let direction = action.direction();
-    let (src_root, dst_root, pull_filter) = state.transfer_plan_roots(key, action);
-
     let (tx, rx) = channel::<Result<Plan, String>>();
     thread::spawn(move || {
         let result = AppState::build_transfer_plan(direction, src_root, dst_root, pull_filter);
         let _ = tx.send(result);
     });
-    state
-        .plan_jobs
-        .insert(key.clone(), PlanJob { direction, rx });
+    state.plan_jobs.insert(key.clone(), PlanJob { kind, rx });
 }
 
-pub(super) fn spawn_copy_job(state: &mut AppState, key: RowKey, direction: Direction, plan: Plan) {
+pub(super) fn spawn_copy_job(state: &mut AppState, key: RowKey, kind: TransferKind, plan: Plan) {
     let (tx, rx) = channel();
     let progress = Arc::new(JobProgress::default());
-    crate::copy::job::spawn(plan.clone(), progress.clone(), tx);
+    match kind {
+        // Archive/Unarchive verify each file inline as it's written, so no
+        // separate verify pass is needed afterwards.
+        TransferKind::Archive | TransferKind::Unarchive => {
+            crate::copy::job::spawn_immediate_verify(plan.clone(), progress.clone(), tx);
+        }
+        // Push (deferred verify) / Pull (inline) follow the plan direction.
+        TransferKind::Push | TransferKind::Pull => {
+            crate::copy::job::spawn(plan.clone(), progress.clone(), tx);
+        }
+    }
     state.jobs.insert(
         key,
         RowJob {
-            direction,
+            kind,
             plan,
             progress,
             rx,
@@ -197,7 +280,7 @@ pub fn execute_after_conflict(state: &mut AppState, choice: ConflictChoice) {
                 .retain(|f| !matches!(f.action, Action::Conflict { .. }));
         }
     }
-    spawn_copy_job(state, pc.key, pc.direction, plan);
+    spawn_copy_job(state, pc.key, pc.kind, plan);
 }
 
 pub fn create_prod_folder(state: &mut AppState, key: &RowKey) {

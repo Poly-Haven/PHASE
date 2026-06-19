@@ -182,6 +182,52 @@ fn disabled_conditional_pull_filter_includes_raw_and_tif_even_with_many_work_tif
 }
 
 #[test]
+fn is_work_tif_only_matches_tif_under_top_level_work_folder() {
+    use std::path::Path;
+    assert!(is_work_tif(Path::new("work/frame_001.tif"), "frame_001.tif"));
+    assert!(is_work_tif(Path::new("work/sub/deep.TIFF"), "deep.TIFF"));
+    assert!(is_work_tif(Path::new("Work/frame.tif"), "frame.tif"));
+    // Not under work/, or not a tif:
+    assert!(!is_work_tif(Path::new("staging/scan.tif"), "scan.tif"));
+    assert!(!is_work_tif(Path::new("work/notes.txt"), "notes.txt"));
+    assert!(!is_work_tif(Path::new("artwork/x.tif"), "x.tif"));
+    assert!(!is_work_tif(Path::new("scan.tif"), "scan.tif"));
+}
+
+#[test]
+fn archive_plan_copies_everything_except_work_tifs() {
+    let src = tempdir().unwrap();
+    let dst = tempdir().unwrap();
+    // Kept:
+    write(&src.path().join("staging/renders/primary.png"), b"thumb");
+    write(&src.path().join("staging/wood.blend"), b"blend");
+    write(&src.path().join("raw/wood.exr"), b"raw");
+    write(&src.path().join("work/wood.kra"), b"krita");
+    write(&src.path().join("staging/scan.tif"), b"staging-tif");
+    // Skipped (tif/tiff anywhere under work/):
+    write(&src.path().join("work/frame_001.tif"), b"work-tif");
+    write(&src.path().join("work/deep/frame_002.TIFF"), b"work-tiff");
+
+    let plan = build_archive_plan(src.path(), dst.path()).unwrap();
+    let names: Vec<_> = plan
+        .files
+        .iter()
+        .map(|f| f.rel_path.to_string_lossy().replace('\\', "/"))
+        .collect();
+
+    assert!(names.contains(&"staging/renders/primary.png".to_string()));
+    assert!(names.contains(&"staging/wood.blend".to_string()));
+    assert!(names.contains(&"raw/wood.exr".to_string()));
+    assert!(names.contains(&"work/wood.kra".to_string()));
+    // A tif outside the work folder is still archived.
+    assert!(names.contains(&"staging/scan.tif".to_string()));
+    // tif/tiff under work/ are excluded.
+    assert!(!names.iter().any(|n| n == "work/frame_001.tif"));
+    assert!(!names.iter().any(|n| n == "work/deep/frame_002.TIFF"));
+    assert_eq!(plan.direction, Direction::Push);
+}
+
+#[test]
 fn plan_ignores_partial_files() {
     let src = tempdir().unwrap();
     let dst = tempdir().unwrap();

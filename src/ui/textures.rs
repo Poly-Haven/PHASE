@@ -129,6 +129,24 @@ pub fn hdd_network_texture(ctx: &egui::Context) -> egui::TextureHandle {
         .clone()
 }
 
+pub fn unarchive_icon_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/box-arrow-in-down-left.svg");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| {
+        load_svg_texture(ctx, BYTES, "unarchive_icon", "box-arrow-in-down-left.svg")
+    })
+    .clone()
+}
+
+pub fn file_earmark_zip_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    use std::sync::OnceLock;
+    static BYTES: &[u8] = include_bytes!("../assets/file-earmark-zip.svg");
+    static TEX: OnceLock<egui::TextureHandle> = OnceLock::new();
+    TEX.get_or_init(|| load_svg_texture(ctx, BYTES, "file_earmark_zip_icon", "file-earmark-zip.svg"))
+        .clone()
+}
+
 pub fn load_svg_texture(
     ctx: &egui::Context,
     bytes: &[u8],
