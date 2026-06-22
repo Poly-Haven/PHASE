@@ -102,6 +102,7 @@ struct ScriptSpec {
     args: Vec<OsString>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_context_menu(
     ui: &mut egui::Ui,
     state: &mut AppState,
@@ -110,6 +111,7 @@ pub fn draw_context_menu(
     open_notion_in_app: bool,
     is_complete: bool,
     exists_on_prod: bool,
+    is_orphan: bool,
 ) {
     // The asset's primary file in Prod (same file the slug click opens).
     let asset_folder = state.prod_root_for(key.asset_type).join(&key.slug);
@@ -172,7 +174,9 @@ pub fn draw_context_menu(
         }
     }
 
-    if ui.button("Open on Notion").clicked() {
+    // Orphans have no Notion card; the row's "No notion card" message links to
+    // the database instead.
+    if !is_orphan && ui.button("Open on Notion").clicked() {
         open_notion_link(notion_url, open_notion_in_app);
         ui.close_menu();
     }
