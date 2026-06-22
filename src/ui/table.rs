@@ -750,7 +750,56 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                     handle_row_message_action(state, key, &RowMsgAction::CreateProdFolder);
                 }
             }
-            ui.add_space(layout::ROW_SECTION_PADDING);
+
+            // Tiny grey copy button, superscript-style: snug against the slug's
+            // top-right corner. Positioned manually (not as a flow item) so it
+            // sits flush with the text instead of a gap away.
+            let icon = layout::TINY_ICON_SIZE;
+            let (copy_tex, copy_px) = super::copy_icon_texture(ui.ctx(), icon);
+            // Blit 1:1 onto the physical pixel grid: snap the top-left to a whole
+            // pixel and size the rect to exactly the rasterized texture, so the GPU
+            // does no resampling (which is what caused the shimmer/aliasing).
+            let ppp = ui.ctx().pixels_per_point();
+            let logical = copy_px as f32 / ppp;
+            let desired = egui::pos2(slug_resp.rect.right() + 4.0, slug_resp.rect.top() - 1.0);
+            let snapped = egui::pos2(
+                (desired.x * ppp).round() / ppp,
+                (desired.y * ppp).round() / ppp,
+            );
+            let icon_rect = egui::Rect::from_min_size(snapped, egui::vec2(logical, logical));
+            let copy_resp = ui
+                .interact(
+                    icon_rect,
+                    ui.id().with(("copy-slug", key.asset_type, &key.slug)),
+                    egui::Sense::click(),
+                )
+                .on_hover_text("Copy slug")
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if ui.is_rect_visible(icon_rect) {
+                let tint = if copy_resp.hovered() {
+                    colors::HOVER
+                } else {
+                    colors::TEXT_DISABLED
+                };
+                ui.painter().image(
+                    copy_tex.id(),
+                    icon_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    tint,
+                );
+            }
+            if copy_resp.clicked() {
+                ui.output_mut(|o| o.copied_text = row.slug.clone());
+                state.row_toasts.insert(
+                    key.clone(),
+                    super::RowToast {
+                        text: "Copied slug to clipboard".into(),
+                        created_at: std::time::Instant::now(),
+                    },
+                );
+            }
+
+            ui.add_space(layout::ROW_SECTION_PADDING + 12.0);
             draw_row_authors(state, ui, row, colors::TEXT_PRIMARY);
             super::scripts::draw_row_status(state, ui, key);
         });
