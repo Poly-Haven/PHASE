@@ -1,4 +1,3 @@
-use crate::ui::AssetType;
 use crate::validation::{
     is_complete_status, is_harmless_root_file, Finding, Severity, ValidationContext,
 };
@@ -8,9 +7,7 @@ pub(crate) fn run(ctx: &ValidationContext) -> Vec<Finding> {
         return Vec::new();
     }
 
-    let primary = match ctx.key.asset_type {
-        AssetType::Hdris | AssetType::Textures => "raw",
-    };
+    let primary = ctx.key.asset_type.primary_subfolder();
     let mut unexpected = Vec::new();
     let Ok(read_dir) = std::fs::read_dir(&ctx.local_root) else {
         return Vec::new();

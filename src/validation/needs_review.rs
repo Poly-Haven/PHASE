@@ -31,7 +31,7 @@ pub(crate) fn run(ctx: &ValidationContext) -> Vec<Finding> {
                 });
             }
         }
-        AssetType::Textures => {
+        AssetType::Textures | AssetType::Models => {
             if !staging.join(format!("{slug}.blend")).is_file() {
                 findings.push(Finding {
                     severity: Severity::Error,
