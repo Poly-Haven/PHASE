@@ -55,6 +55,7 @@ fn test_state() -> super::AppState {
         logged_in_identity: None,
         settings_open: false,
         settings_local_root_input: String::new(),
+        settings_affinity_path_input: String::new(),
         settings_open_notion_links_in_desktop_app: false,
         refreshing: HashSet::new(),
         pending_notion: HashMap::new(),

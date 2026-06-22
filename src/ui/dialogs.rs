@@ -167,6 +167,30 @@ pub fn settings(state: &mut AppState, ctx: &egui::Context) {
             });
 
             ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
+            ui.label("Affinity Photo path");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.settings_affinity_path_input)
+                        .desired_width(layout::SETTINGS_LOCAL_ROOT_WIDTH),
+                );
+                if ui
+                    .button("Select...")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    let mut dialog = rfd::FileDialog::new().add_filter("Programs", &["exe"]);
+                    if let Some(parent) = state.config.affinity_path.parent() {
+                        if parent.is_dir() {
+                            dialog = dialog.set_directory(parent);
+                        }
+                    }
+                    if let Some(path) = dialog.pick_file() {
+                        state.settings_affinity_path_input = path.display().to_string();
+                    }
+                }
+            });
+
+            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
             ui.checkbox(
                 &mut state.settings_open_notion_links_in_desktop_app,
                 "Open Notion links in the desktop app",
@@ -190,6 +214,8 @@ pub fn settings(state: &mut AppState, ctx: &egui::Context) {
             return;
         }
         state.config.local_root = std::path::PathBuf::from(local_root);
+        state.config.affinity_path =
+            std::path::PathBuf::from(state.settings_affinity_path_input.trim());
         state.config.open_notion_links_in_desktop_app =
             state.settings_open_notion_links_in_desktop_app;
         if let Err(e) = crate::config::save(&state.config) {

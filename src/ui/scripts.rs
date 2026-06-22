@@ -111,6 +111,40 @@ pub fn draw_context_menu(
     is_complete: bool,
     exists_on_prod: bool,
 ) {
+    // The asset's primary file in Prod (same file the slug click opens).
+    let asset_folder = state.prod_root_for(key.asset_type).join(&key.slug);
+    let asset_file = super::table::asset_file_path(key.asset_type, &asset_folder, &key.slug);
+
+    if ui
+        .add_enabled(asset_file.is_some(), egui::Button::new("Open Asset file"))
+        .on_disabled_hover_text("Asset file not found")
+        .clicked()
+    {
+        if let Some(file) = &asset_file {
+            let _ = open::that(file);
+        }
+        ui.close_menu();
+    }
+
+    // Affinity is an image editor, so it's only meaningful for HDRIs (whose
+    // asset file is an .exr/.hdr image); Textures' asset file is a .blend.
+    if matches!(key.asset_type, AssetType::Hdris)
+        && ui
+            .add_enabled(
+                asset_file.is_some(),
+                egui::Button::new("Open Asset with Affinity"),
+            )
+            .on_disabled_hover_text("Asset file not found")
+            .clicked()
+    {
+        if let Some(file) = asset_file.clone() {
+            open_with_affinity(state, &file);
+        }
+        ui.close_menu();
+    }
+
+    ui.separator();
+
     if state.is_admin() && matches!(key.asset_type, AssetType::Hdris) {
         draw_script_button(
             ui,
@@ -871,6 +905,18 @@ impl ScriptKind {
             ScriptKind::Normalize => "Normalize failed",
             ScriptKind::Render => "Render failed",
         }
+    }
+}
+
+/// Launch the configured Affinity Photo executable with `file` as its argument.
+/// Surfaces an error banner if the program can't be started (e.g. wrong path).
+fn open_with_affinity(state: &mut AppState, file: &std::path::Path) {
+    let affinity = state.config.affinity_path.clone();
+    if let Err(err) = Command::new(&affinity).arg(file).spawn() {
+        state.error_banner = Some(format!(
+            "Could not open Affinity ({}): {err}",
+            affinity.display()
+        ));
     }
 }
 
