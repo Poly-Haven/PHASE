@@ -196,6 +196,33 @@ pub struct RowToast {
     pub created_at: Instant,
 }
 
+/// An asset folder discovered on disk (Local/Prod/Archive) that has no matching
+/// Notion card. We can still act on its files like any asset; it just carries no
+/// Notion data. Its status group is derived from where it lives.
+#[derive(Clone, Debug)]
+pub struct OrphanAsset {
+    pub slug: String,
+    pub exists_local: bool,
+    pub exists_prod: bool,
+    pub exists_archive: bool,
+}
+
+impl OrphanAsset {
+    /// Location-derived status group (checked in priority order: a folder that
+    /// exists in several places takes the first match): Local → In progress,
+    /// Prod → To do, Archive → Done.
+    pub fn group(&self) -> crate::notion::StatusGroup {
+        use crate::notion::StatusGroup;
+        if self.exists_local {
+            StatusGroup::InProgress
+        } else if self.exists_prod {
+            StatusGroup::ToDo
+        } else {
+            StatusGroup::Complete
+        }
+    }
+}
+
 pub struct ThumbnailPreview {
     #[cfg(test)]
     pub signature: thumbnails::ThumbnailSignature,
@@ -369,6 +396,14 @@ pub enum ConflictChoice {
     Cancel,
 }
 
+/// Result of the background scan that refreshes the prod/archive existence
+/// caches and discovers orphan folders, sent back over `prod_cache_rx`.
+type ProdCacheScan = (
+    HashMap<RowKey, bool>,
+    HashMap<RowKey, bool>,
+    HashMap<AssetType, Vec<OrphanAsset>>,
+);
+
 pub struct AppState {
     pub config: Config,
     pub current_type: AssetType,
@@ -421,10 +456,14 @@ pub struct AppState {
     /// alongside `prod_folder_cache`. Used to suppress the "No prod folder"
     /// warning and to drive the "Published. Archive files?" message.
     pub archive_folder_cache: HashMap<RowKey, bool>,
+    /// Discovered on-disk asset folders (per type) that have no Notion card.
+    /// Rebuilt by the same background scan that refreshes the prod/archive
+    /// caches. Not persisted (kept out of the Notion JSON cache).
+    pub orphans_by_type: HashMap<AssetType, Vec<OrphanAsset>>,
     /// Receiver for an in-flight background rebuild of the prod + archive folder
-    /// existence caches (both checked on the same thread to avoid duplicate
-    /// network round-trips).
-    pub prod_cache_rx: Option<Receiver<(HashMap<RowKey, bool>, HashMap<RowKey, bool>)>>,
+    /// existence caches and the orphan scan (all on the same thread to avoid
+    /// duplicate network round-trips).
+    pub prod_cache_rx: Option<Receiver<ProdCacheScan>>,
     pub thumbnail_cache_root: PathBuf,
     pub thumbnail_revisions: HashMap<RowKey, Arc<AtomicU64>>,
     pub thumbnail_jobs: HashMap<RowKey, thumbnails::ThumbnailJob>,
@@ -529,6 +568,65 @@ pub(super) fn asset_author_source(asset: &Asset) -> String {
     asset.author.clone()
 }
 
+/// Browser URL for the "Open Notion" link shown on orphan rows: a public
+/// admin-server endpoint that 302-redirects to the correct Notion database for
+/// the asset type (debug → localhost dev server, release → admin.polyhaven.com).
+pub(super) fn notion_redirect_url(asset_type: AssetType) -> String {
+    format!(
+        "{}api/public/notion-redirect?type={}",
+        crate::auth::phase_api_base_url(),
+        asset_type.api_type()
+    )
+}
+
+/// Enumerate asset folders under the three roots that aren't backed by a Notion
+/// card. `known_lower` holds the type's Notion slugs, lowercased; folder names
+/// are matched case-insensitively (Windows). Hidden/system dirs (`.`/`$`) and
+/// non-directories are skipped, and unreadable/missing roots contribute nothing.
+/// The result is sorted by lowercased slug for stable ordering.
+fn discover_orphans(
+    local_root: &std::path::Path,
+    prod_root: &std::path::Path,
+    archive_root: &std::path::Path,
+    known_lower: &HashSet<String>,
+) -> Vec<OrphanAsset> {
+    use std::collections::BTreeMap;
+    // Keyed by lowercased slug so a folder present in several roots (possibly with
+    // different casing) collapses to a single orphan. Display slug comes from the
+    // first root scanned that contains it (Local → Prod → Archive priority).
+    let mut found: BTreeMap<String, OrphanAsset> = BTreeMap::new();
+    for (root, location) in [(local_root, 0u8), (prod_root, 1u8), (archive_root, 2u8)] {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name.starts_with('$') {
+                continue;
+            }
+            let lower = name.to_lowercase();
+            if known_lower.contains(&lower) {
+                continue;
+            }
+            let orphan = found.entry(lower).or_insert_with(|| OrphanAsset {
+                slug: name.clone(),
+                exists_local: false,
+                exists_prod: false,
+                exists_archive: false,
+            });
+            match location {
+                0 => orphan.exists_local = true,
+                1 => orphan.exists_prod = true,
+                _ => orphan.exists_archive = true,
+            }
+        }
+    }
+    found.into_values().collect()
+}
+
 fn current_update_check_day() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -619,6 +717,7 @@ impl AppState {
             focus_refresh: focus_refresh::State::default(),
             prod_folder_cache: HashMap::new(),
             archive_folder_cache: HashMap::new(),
+            orphans_by_type: HashMap::new(),
             prod_cache_rx: None,
             thumbnail_cache_root: thumbnail_cache_root(),
             thumbnail_revisions: HashMap::new(),
@@ -986,8 +1085,18 @@ impl AppState {
     }
 
     /// Kick off a background rebuild of the prod-folder and archive-folder
-    /// existence caches. When the thread finishes, `pump()` swaps both in.
+    /// existence caches, plus a scan for orphan folders (on disk but with no
+    /// Notion card). All run on one thread to avoid duplicate network round-trips
+    /// to Prod/Archive. When it finishes, `pump()` swaps the results in.
     pub fn rebuild_prod_folder_cache(&mut self) {
+        let selected_types = self.selected_types.clone();
+        if selected_types.is_empty() {
+            self.prod_folder_cache.clear();
+            self.archive_folder_cache.clear();
+            self.orphans_by_type.clear();
+            return;
+        }
+        // Existence checks for the known (Notion-backed) visible assets.
         let to_check: Vec<(RowKey, std::path::PathBuf, std::path::PathBuf)> = self
             .visible_asset_keys()
             .into_iter()
@@ -997,11 +1106,34 @@ impl AppState {
                 (key, prod, archive)
             })
             .collect();
-        if to_check.is_empty() {
-            self.prod_folder_cache.clear();
-            self.archive_folder_cache.clear();
-            return;
-        }
+        // Per-type roots + the lowercased Notion slugs to exclude from the orphan
+        // scan (Windows paths are case-insensitive, so compare case-insensitively).
+        let scan: Vec<(
+            AssetType,
+            std::path::PathBuf,
+            std::path::PathBuf,
+            std::path::PathBuf,
+            HashSet<String>,
+        )> = selected_types
+            .iter()
+            .map(|&t| {
+                let known = match self.assets_by_type.get(&t) {
+                    Some(AssetListState::Loaded(list)) => list
+                        .assets
+                        .iter()
+                        .map(|a| a.slug.to_lowercase())
+                        .collect(),
+                    _ => HashSet::new(),
+                };
+                (
+                    t,
+                    self.local_root_for(t),
+                    self.prod_root_for(t),
+                    self.archive_root_for(t),
+                    known,
+                )
+            })
+            .collect();
         let (tx, rx) = channel();
         thread::spawn(move || {
             let mut prod = HashMap::with_capacity(to_check.len());
@@ -1010,7 +1142,14 @@ impl AppState {
                 prod.insert(key.clone(), prod_path.is_dir());
                 archive.insert(key, archive_path.is_dir());
             }
-            let _ = tx.send((prod, archive));
+            let mut orphans: HashMap<AssetType, Vec<OrphanAsset>> = HashMap::new();
+            for (t, local_root, prod_root, archive_root, known) in scan {
+                let found = discover_orphans(&local_root, &prod_root, &archive_root, &known);
+                if !found.is_empty() {
+                    orphans.insert(t, found);
+                }
+            }
+            let _ = tx.send((prod, archive, orphans));
         });
         self.prod_cache_rx = Some(rx);
     }
@@ -1422,6 +1561,24 @@ impl AppState {
                         }),
                 );
             }
+            if let Some(orphans) = self.orphans_by_type.get(&asset_type) {
+                keys.extend(
+                    orphans
+                        .iter()
+                        .filter(|orphan| {
+                            table::orphan_matches_filters(
+                                orphan,
+                                &self.author_filters,
+                                &self.selected_status_groups,
+                                &self.search_query,
+                            )
+                        })
+                        .map(|orphan| RowKey {
+                            asset_type,
+                            slug: orphan.slug.clone(),
+                        }),
+                );
+            }
         }
         keys
     }
@@ -1802,14 +1959,15 @@ impl AppState {
             }
         }
 
-        // Receive background prod/archive-folder cache rebuild result.
-        if let Some((prod, archive)) = self
+        // Receive background prod/archive-folder cache rebuild + orphan scan.
+        if let Some((prod, archive, orphans)) = self
             .prod_cache_rx
             .as_ref()
             .and_then(|rx| rx.try_recv().ok())
         {
             self.prod_folder_cache = prod;
             self.archive_folder_cache = archive;
+            self.orphans_by_type = orphans;
             self.prod_cache_rx = None;
             self.watch_dirty = true;
         }
@@ -2047,7 +2205,7 @@ impl AppState {
 
     /// True when the asset's loaded status is in the Complete group ("Done").
     pub fn asset_is_complete(&self, key: &RowKey) -> bool {
-        matches!(
+        if matches!(
             self.assets_by_type.get(&key.asset_type),
             Some(AssetListState::Loaded(list))
                 if list.assets.iter().any(|a| a.slug == key.slug
@@ -2055,7 +2213,19 @@ impl AppState {
                         .as_ref()
                         .map(|s| s.group == crate::notion::StatusGroup::Complete)
                         .unwrap_or(false))
-        )
+        ) {
+            return true;
+        }
+        // An archive-only orphan (Done by location) counts as complete so its
+        // thumbnail can be sourced from the Archive drive.
+        self.orphans_by_type
+            .get(&key.asset_type)
+            .is_some_and(|orphans| {
+                orphans.iter().any(|orphan| {
+                    orphan.slug == key.slug
+                        && orphan.group() == crate::notion::StatusGroup::Complete
+                })
+            })
     }
 
     /// Request archiving an asset: opens the confirmation prompt. The actual

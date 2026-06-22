@@ -22,6 +22,9 @@ pub enum RowMsgAction {
     RenameTitle(String),
     /// Copy this asset's Prod files to the archive drive, then delete Prod.
     Archive,
+    /// Open the Notion database for this asset type in a browser (shown on
+    /// orphan rows, which have no card yet).
+    OpenNotion,
 }
 
 /// A single message attached to an asset row.
@@ -45,7 +48,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
     let mut loading_count = 0;
     let mut errors = Vec::new();
 
-    for t in selected_types {
+    for t in selected_types.iter().copied() {
         match state.assets_by_type.get(&t) {
             None | Some(AssetListState::Loading) => {
                 loading_count += 1;
@@ -91,6 +94,17 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                             )
                         }),
                 );
+            }
+        }
+    }
+
+    // Orphan rows: folders on disk (Local/Prod/Archive) with no Notion card.
+    for t in selected_types.iter().copied() {
+        if let Some(orphans) = state.orphans_by_type.get(&t) {
+            for orphan in orphans {
+                if orphan_matches_filters(orphan, &filters, &status_groups, &search_query) {
+                    rows.push(RowView::from_orphan(t, orphan));
+                }
             }
         }
     }
@@ -161,7 +175,11 @@ struct RowView {
     status: Option<AssetStatus>,
     exists_on_prod: bool,
     exists_on_archive: bool,
+    exists_local: bool,
     messages: Vec<RowMsg>,
+    /// True for folders discovered on disk with no Notion card. Notion-dependent
+    /// UI (status pill, authors, Notion link) is hidden for these rows.
+    is_orphan: bool,
 }
 
 impl RowView {
@@ -268,7 +286,56 @@ impl RowView {
             status: a.status.clone(),
             exists_on_prod,
             exists_on_archive,
+            exists_local,
             messages,
+            is_orphan: false,
+        }
+    }
+
+    /// Build a row for an orphan folder (no Notion card). Carries a synthetic
+    /// location-derived status (so it sorts/filters by group) but no Notion
+    /// identity; the renderer hides Notion-dependent UI for `is_orphan` rows.
+    fn from_orphan(asset_type: super::AssetType, orphan: &super::OrphanAsset) -> Self {
+        let mut messages = Vec::new();
+        // Surface an obviously-broken folder name, but without the rename action
+        // (there's no Notion title to rename).
+        if let Some(text) = crate::slug::message(&orphan.slug) {
+            messages.push(RowMsg {
+                kind: MsgKind::Error,
+                text,
+                link: None,
+                action: None,
+                dismiss_key: None,
+            });
+        }
+        messages.push(RowMsg {
+            kind: MsgKind::Error,
+            text: "No notion card.".into(),
+            link: None,
+            action: Some(RowMsgAction::OpenNotion),
+            dismiss_key: None,
+        });
+        Self {
+            asset_type,
+            slug: orphan.slug.clone(),
+            author: String::new(),
+            author_profiles: Vec::new(),
+            url: String::new(),
+            page_id: String::new(),
+            status: Some(AssetStatus {
+                id: String::new(),
+                name: String::new(),
+                color: String::new(),
+                group: orphan.group(),
+                // Sorts orphans to the end of their asset type (after real
+                // statuses, which have concrete sort orders).
+                sort_order: usize::MAX,
+            }),
+            exists_on_prod: orphan.exists_prod,
+            exists_on_archive: orphan.exists_archive,
+            exists_local: orphan.exists_local,
+            messages,
+            is_orphan: true,
         }
     }
 
@@ -657,7 +724,7 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     let prod_folder = state.prod_root_for(key.asset_type).join(&key.slug);
     let local_folder = state.local_root_for(key.asset_type).join(&key.slug);
     let archive_folder = state.archive_root_for(key.asset_type).join(&key.slug);
-    let local_exists = state.local_folder_cache.get(key).copied().unwrap_or(false);
+    let local_exists = row.exists_local;
     // A finished asset that lives only in the archive (its Prod files were moved
     // away). Such rows offer "Unarchive" instead of "Pull" and open the archive
     // folder instead of Prod.
@@ -679,6 +746,7 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
             open_notion_in_app,
             is_complete,
             row.exists_on_prod,
+            row.is_orphan,
         );
     });
 
@@ -721,8 +789,11 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
     ui.allocate_ui_at_rect(row1_rect, |ui| {
         ui.horizontal_centered(|ui| {
             ui.add_space(layout::ROW_SECTION_PADDING);
-            draw_status_pill(state, ui, key, row);
-            ui.add_space(layout::ROW_SECTION_PADDING);
+            // Orphans have no Notion status to show or change.
+            if !row.is_orphan {
+                draw_status_pill(state, ui, key, row);
+                ui.add_space(layout::ROW_SECTION_PADDING);
+            }
             let font_id = egui::TextStyle::Body.resolve(ui.style());
             let galley =
                 ui.fonts(|f| f.layout_no_wrap(row.slug.clone(), font_id, egui::Color32::WHITE));
@@ -799,8 +870,11 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                 );
             }
 
-            ui.add_space(layout::ROW_SECTION_PADDING + 12.0);
-            draw_row_authors(state, ui, row, colors::TEXT_PRIMARY);
+            // Orphans have no author data.
+            if !row.is_orphan {
+                ui.add_space(layout::ROW_SECTION_PADDING + 12.0);
+                draw_row_authors(state, ui, row, colors::TEXT_PRIMARY);
+            }
             super::scripts::draw_row_status(state, ui, key);
         });
     });
@@ -980,27 +1054,31 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
             {
                 let _ = open::that(&prod_folder);
             }
-            ui.add_space(layout::ROW_INTRA_ICON_GAP);
-            let (notion_rect, notion_resp) = ui.allocate_exact_size(
-                egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
-                egui::Sense::click(),
-            );
-            if ui.is_rect_visible(notion_rect) {
-                let base_tint = text_color.linear_multiply(0.6);
-                let tint = if notion_resp.hovered() {
-                    colors::HOVER
-                } else {
-                    base_tint
-                };
-                ui.painter()
-                    .image(notion_tex.id(), notion_rect, uv_full, tint);
-            }
-            if notion_resp
-                .on_hover_text("Open on Notion")
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .clicked()
-            {
-                open_notion_link(&row.url, open_notion_in_app);
+            // The Notion link is meaningless for orphans (no card). The inline
+            // "No notion card. Open Notion" message handles them instead.
+            if !row.is_orphan {
+                ui.add_space(layout::ROW_INTRA_ICON_GAP);
+                let (notion_rect, notion_resp) = ui.allocate_exact_size(
+                    egui::vec2(layout::INLINE_ICON_SIZE, layout::INLINE_ICON_SIZE),
+                    egui::Sense::click(),
+                );
+                if ui.is_rect_visible(notion_rect) {
+                    let base_tint = text_color.linear_multiply(0.6);
+                    let tint = if notion_resp.hovered() {
+                        colors::HOVER
+                    } else {
+                        base_tint
+                    };
+                    ui.painter()
+                        .image(notion_tex.id(), notion_rect, uv_full, tint);
+                }
+                if notion_resp
+                    .on_hover_text("Open on Notion")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    open_notion_link(&row.url, open_notion_in_app);
+                }
             }
             ui.add_space(layout::ROW_SECTION_PADDING);
             draw_row_messages(state, ui, key, row);
@@ -1367,6 +1445,7 @@ fn action_label(action: &RowMsgAction) -> String {
         RowMsgAction::DeleteLocalFiles => "Delete local files?".to_string(),
         RowMsgAction::RenameTitle(slug) => format!("Rename to {slug}"),
         RowMsgAction::Archive => "Archive files?".to_string(),
+        RowMsgAction::OpenNotion => "Open Notion".to_string(),
     }
 }
 
@@ -1394,6 +1473,9 @@ fn handle_row_message_action(state: &mut AppState, key: &RowKey, action: &RowMsg
             }) {
                 super::start_title_rename(state, key, &page_id, new_title);
             }
+        }
+        RowMsgAction::OpenNotion => {
+            let _ = open::that(super::notion_redirect_url(key.asset_type));
         }
     }
 }
@@ -1479,6 +1561,7 @@ fn draw_row_context_button(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey
             state.config.open_notion_links_in_desktop_app,
             is_complete,
             exists_on_prod,
+            row.is_orphan,
         );
     });
 }
@@ -1671,6 +1754,21 @@ pub(super) fn asset_matches_filters(
         && status_matches_filter(&asset.status, selected)
 }
 
+/// Whether an orphan row should be shown. Status-group and search filters always
+/// apply (via the location-derived group). Orphans have no author, so the author
+/// filter is bypassed for *local* orphans (always shown) but hides Prod/Archive
+/// orphans whenever an author filter is active.
+pub(super) fn orphan_matches_filters(
+    orphan: &super::OrphanAsset,
+    filters: &[String],
+    selected: &[StatusGroup],
+    search: &str,
+) -> bool {
+    selected.contains(&orphan.group())
+        && super::slug_matches_search(&orphan.slug, search)
+        && (orphan.exists_local || filters.is_empty())
+}
+
 fn author_matches_filter(author: &str, filters: &[String]) -> bool {
     super::authors::contains_any(author, filters)
 }
@@ -1726,7 +1824,9 @@ mod tests {
             status,
             exists_on_prod: true,
             exists_on_archive: false,
+            exists_local: true,
             messages: Vec::new(),
+            is_orphan: false,
         }
     }
 
@@ -1738,6 +1838,94 @@ mod tests {
             group: StatusGroup::InProgress,
             sort_order: 10,
         }
+    }
+
+    fn orphan(slug: &str, local: bool, prod: bool, archive: bool) -> crate::ui::OrphanAsset {
+        crate::ui::OrphanAsset {
+            slug: slug.into(),
+            exists_local: local,
+            exists_prod: prod,
+            exists_archive: archive,
+        }
+    }
+
+    #[test]
+    fn orphan_filter_local_always_shown_regardless_of_author_filter() {
+        let local = orphan("a", true, false, false);
+        // Shown with an active author filter, since its group (In progress) is selected.
+        assert!(super::orphan_matches_filters(
+            &local,
+            &["Alice".to_string()],
+            &[StatusGroup::InProgress],
+            "",
+        ));
+        // Still gated by the status-group filter.
+        assert!(!super::orphan_matches_filters(
+            &local,
+            &[],
+            &[StatusGroup::Complete],
+            "",
+        ));
+    }
+
+    #[test]
+    fn orphan_filter_prod_and_archive_hidden_when_author_filter_active() {
+        let prod = orphan("b", false, true, false);
+        assert!(super::orphan_matches_filters(
+            &prod,
+            &[],
+            &[StatusGroup::ToDo],
+            "",
+        ));
+        assert!(!super::orphan_matches_filters(
+            &prod,
+            &["Alice".to_string()],
+            &[StatusGroup::ToDo],
+            "",
+        ));
+
+        let archive = orphan("c", false, false, true);
+        assert!(super::orphan_matches_filters(
+            &archive,
+            &[],
+            &[StatusGroup::Complete],
+            "",
+        ));
+        assert!(!super::orphan_matches_filters(
+            &archive,
+            &["Alice".to_string()],
+            &[StatusGroup::Complete],
+            "",
+        ));
+    }
+
+    #[test]
+    fn orphan_filter_respects_search() {
+        let o = orphan("wooden_floor", true, false, false);
+        assert!(super::orphan_matches_filters(
+            &o,
+            &[],
+            &[StatusGroup::InProgress],
+            "wood",
+        ));
+        assert!(!super::orphan_matches_filters(
+            &o,
+            &[],
+            &[StatusGroup::InProgress],
+            "metal",
+        ));
+    }
+
+    #[test]
+    fn from_orphan_has_no_notion_identity_and_open_notion_message() {
+        let row = super::RowView::from_orphan(crate::ui::AssetType::Hdris, &orphan("abc", false, false, true));
+        assert!(row.is_orphan);
+        assert!(row.page_id.is_empty() && row.url.is_empty());
+        // Archive-only → Done.
+        assert_eq!(row.status.as_ref().unwrap().group, StatusGroup::Complete);
+        assert!(row.exists_on_archive && !row.exists_on_prod);
+        assert!(row.messages.iter().any(|m| m.text == "No notion card."
+            && matches!(m.action, Some(super::RowMsgAction::OpenNotion))));
     }
 
     #[test]

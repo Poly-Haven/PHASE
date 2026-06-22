@@ -63,6 +63,7 @@ fn test_state() -> super::AppState {
         focus_refresh: super::focus_refresh::State::default(),
         prod_folder_cache: HashMap::new(),
         archive_folder_cache: HashMap::new(),
+        orphans_by_type: HashMap::new(),
         prod_cache_rx: None,
         thumbnail_cache_root: std::path::PathBuf::from("thumbnail-cache-test"),
         thumbnail_revisions: HashMap::new(),
@@ -688,6 +689,86 @@ fn folder_caches_rebuild_only_for_visible_assets() {
     assert!(!state.prod_folder_cache.contains_key(&hidden));
     assert_eq!(state.local_folder_cache.get(&visible), Some(&true));
     assert!(!state.local_folder_cache.contains_key(&hidden));
+}
+
+#[test]
+fn discover_orphans_excludes_known_and_hidden_and_unions_locations() {
+    use std::collections::HashSet;
+    let temp = tempfile::tempdir().unwrap();
+    let local = temp.path().join("local");
+    let prod = temp.path().join("prod");
+    let archive = temp.path().join("archive");
+    for (root, name) in [
+        (&local, "Known_Hdri"), // matches a known slug (case-insensitively) → excluded
+        (&local, "local_only"),
+        (&prod, "prod_only"),
+        (&archive, "archive_only"),
+        (&local, "both"), // in local + prod → one orphan, local wins
+        (&prod, "both"),
+        (&local, ".hidden"),     // dotfile → excluded
+        (&prod, "$RECYCLE.BIN"), // system dir → excluded
+    ] {
+        std::fs::create_dir_all(root.join(name)).unwrap();
+    }
+    std::fs::write(prod.join("loose.txt"), b"x").unwrap(); // not a dir → ignored
+
+    let known: HashSet<String> = ["known_hdri".to_string()].into_iter().collect();
+    let orphans = super::discover_orphans(&local, &prod, &archive, &known);
+    let by_slug = |s: &str| orphans.iter().find(|o| o.slug == s);
+
+    assert!(by_slug("Known_Hdri").is_none(), "known asset excluded");
+    assert!(by_slug(".hidden").is_none());
+    assert!(orphans.iter().all(|o| !o.slug.contains("RECYCLE")));
+    assert!(orphans.iter().all(|o| o.slug != "loose.txt"));
+
+    assert_eq!(
+        by_slug("local_only").unwrap().group(),
+        StatusGroup::InProgress
+    );
+    assert_eq!(by_slug("prod_only").unwrap().group(), StatusGroup::ToDo);
+    assert_eq!(
+        by_slug("archive_only").unwrap().group(),
+        StatusGroup::Complete
+    );
+
+    let both = by_slug("both").unwrap();
+    assert!(both.exists_local && both.exists_prod && !both.exists_archive);
+    assert_eq!(both.group(), StatusGroup::InProgress);
+}
+
+#[test]
+fn visible_keys_apply_location_dependent_author_filter_to_orphans() {
+    let mut state = test_state();
+    state.selected_types = vec![super::AssetType::Hdris];
+    state.selected_status_groups = vec![StatusGroup::InProgress, StatusGroup::ToDo];
+    state.author_filters = vec!["Alice".into()]; // an author filter is active
+    state.orphans_by_type.insert(
+        super::AssetType::Hdris,
+        vec![
+            super::OrphanAsset {
+                slug: "local_orphan".into(),
+                exists_local: true,
+                exists_prod: false,
+                exists_archive: false,
+            },
+            super::OrphanAsset {
+                slug: "prod_orphan".into(),
+                exists_local: false,
+                exists_prod: true,
+                exists_archive: false,
+            },
+        ],
+    );
+
+    let slugs: Vec<String> = state
+        .visible_asset_keys()
+        .into_iter()
+        .map(|k| k.slug)
+        .collect();
+    // Local orphans show regardless of the author filter; Prod/Archive orphans
+    // are hidden while an author filter is active.
+    assert!(slugs.contains(&"local_orphan".to_string()));
+    assert!(!slugs.contains(&"prod_orphan".to_string()));
 }
 
 #[test]
