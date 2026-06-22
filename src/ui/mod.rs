@@ -2530,6 +2530,12 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
 
     // Keep repainting while a pending update is waiting to be flushed.
     if !state.pending_notion.is_empty()
+        // Keep ticking while a browser login is in flight, and while the asset
+        // fetch it triggers is running, so AuthMsg::Success is drained and the
+        // post-login Notion refresh lands even if the window never lost and
+        // regained focus (e.g. a cached Auth0 session redirects instantly).
+        || state.auth_rx.is_some()
+        || !state.notion_rx.is_empty()
         || !state.row_toasts.is_empty()
         || !state.jobs.is_empty()
         || !state.plan_jobs.is_empty()
