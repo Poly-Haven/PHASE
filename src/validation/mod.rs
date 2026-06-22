@@ -422,6 +422,59 @@ mod tests {
     }
 
     #[test]
+    fn needs_review_models_require_blend_and_textures_folder() {
+        let temp = tempdir().unwrap();
+        let local_root = temp.path().join("local");
+        let prod_root = temp.path().join("prod");
+        fs::create_dir_all(prod_root.join("staging")).unwrap();
+
+        let findings = validate_asset(
+            AssetType::Models,
+            "spaceship",
+            Some(&needs_review_status()),
+            &[],
+            &local_root,
+            &prod_root,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.severity == Severity::Error
+                && finding.text == "Missing /staging/spaceship.blend in Prod"
+        }));
+        assert!(findings.iter().any(|finding| {
+            finding.severity == Severity::Error
+                && finding.text == "Missing /staging/textures in Prod"
+        }));
+    }
+
+    #[test]
+    fn root_entries_models_accept_source_and_flag_raw() {
+        let temp = tempdir().unwrap();
+        let local_root = temp.path().join("local");
+        // Models use source/staging/work; a stray `raw` dir is unexpected.
+        for sub in ["source", "staging", "work", "raw"] {
+            fs::create_dir_all(local_root.join(sub)).unwrap();
+        }
+        let prod_root = temp.path().join("prod"); // absent → other checks skip
+
+        let findings = validate_asset(
+            AssetType::Models,
+            "spaceship",
+            Some(&needs_review_status()),
+            &[],
+            &local_root,
+            &prod_root,
+        );
+
+        let unexpected = findings
+            .iter()
+            .find(|f| f.text.starts_with("Unexpected root entries"))
+            .expect("expected an unexpected-entries finding");
+        assert!(unexpected.text.contains("raw"));
+        assert!(!unexpected.text.contains("source"));
+    }
+
+    #[test]
     fn colorchart_warning_is_marked_dismissable() {
         let temp = tempdir().unwrap();
         let local_root = temp.path().join("local");

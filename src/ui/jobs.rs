@@ -304,10 +304,7 @@ pub(super) fn create_prod_folder_structure_at(
     root: &std::path::Path,
     asset_type: AssetType,
 ) -> std::io::Result<()> {
-    let primary = match asset_type {
-        AssetType::Hdris | AssetType::Textures => "raw",
-    };
-    for subfolder in [primary, "staging", "work"] {
+    for subfolder in [asset_type.primary_subfolder(), "staging", "work"] {
         std::fs::create_dir_all(root.join(subfolder))?;
     }
     Ok(())

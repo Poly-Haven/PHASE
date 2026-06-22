@@ -52,46 +52,62 @@ struct UpdateCheckJob {
 pub enum AssetType {
     Hdris,
     Textures,
+    Models,
 }
 
 impl AssetType {
     pub fn all() -> &'static [Self] {
-        &[Self::Hdris, Self::Textures]
+        &[Self::Hdris, Self::Textures, Self::Models]
     }
     pub fn order(self) -> usize {
         match self {
             Self::Hdris => 0,
             Self::Textures => 1,
+            Self::Models => 2,
         }
     }
     pub fn label(self) -> &'static str {
         match self {
             Self::Hdris => "HDRIs",
             Self::Textures => "Textures",
+            Self::Models => "Models",
         }
     }
     pub fn folder(self) -> &'static str {
         match self {
             Self::Hdris => "HDRIs",
             Self::Textures => "Textures",
+            Self::Models => "Models",
         }
     }
     pub fn api_type(self) -> &'static str {
         match self {
             Self::Hdris => "hdris",
             Self::Textures => "textures",
+            Self::Models => "models",
         }
     }
     pub fn cache_name(self) -> &'static str {
         match self {
             Self::Hdris => "hdris",
             Self::Textures => "textures",
+            Self::Models => "models",
         }
     }
     pub fn selected_color(self) -> egui::Color32 {
         match self {
             Self::Hdris => colors::ASSET_TYPE_HDRIS,
             Self::Textures => colors::ASSET_TYPE_TEXTURES,
+            Self::Models => colors::ASSET_TYPE_MODELS,
+        }
+    }
+    /// The per-asset "source inputs" subfolder. HDRIs/Textures use `raw` (raw
+    /// photos); Models use `source` (models aren't necessarily photo-based).
+    /// The other subfolders (`staging`, `work`) are the same for all types.
+    pub fn primary_subfolder(self) -> &'static str {
+        match self {
+            Self::Hdris | Self::Textures => "raw",
+            Self::Models => "source",
         }
     }
     pub fn from_label(label: &str) -> Option<Self> {

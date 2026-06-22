@@ -600,7 +600,7 @@ fn draw_transfer_action_menu(
 
 /// Resolve an asset's primary editable file under `folder` (the slug folder),
 /// if it exists: `staging/{slug}.exr` (or `.hdr`) for HDRIs, `staging/{slug}.blend`
-/// for Textures. Returns `None` when the file is not present.
+/// for Textures and Models. Returns `None` when the file is not present.
 pub(super) fn asset_file_path(
     asset_type: AssetType,
     folder: &std::path::Path,
@@ -616,7 +616,7 @@ pub(super) fn asset_file_path(
                 staging.join(format!("{slug}.hdr"))
             }
         }
-        AssetType::Textures => staging.join(format!("{slug}.blend")),
+        AssetType::Textures | AssetType::Models => staging.join(format!("{slug}.blend")),
     };
     candidate.is_file().then_some(candidate)
 }

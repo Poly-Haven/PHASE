@@ -276,6 +276,20 @@ fn prod_folder_structure_creates_expected_subfolders() {
 }
 
 #[test]
+fn models_use_source_subfolder_instead_of_raw() {
+    assert_eq!(super::AssetType::Hdris.primary_subfolder(), "raw");
+    assert_eq!(super::AssetType::Textures.primary_subfolder(), "raw");
+    assert_eq!(super::AssetType::Models.primary_subfolder(), "source");
+
+    let temp = tempfile::tempdir().unwrap();
+    super::jobs::create_prod_folder_structure_at(temp.path(), super::AssetType::Models).unwrap();
+    assert!(temp.path().join("source").is_dir());
+    assert!(temp.path().join("staging").is_dir());
+    assert!(temp.path().join("work").is_dir());
+    assert!(!temp.path().join("raw").exists());
+}
+
+#[test]
 fn all_authors_persistence_does_not_fall_back_to_legacy_per_type_filter() {
     let _config_backup = ConfigBackup::capture();
     let mut config = Config::default();
