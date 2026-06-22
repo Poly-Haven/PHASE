@@ -404,6 +404,7 @@ pub struct AppState {
     pub logged_in_identity: Option<LoggedInIdentity>,
     pub settings_open: bool,
     pub settings_local_root_input: String,
+    pub settings_affinity_path_input: String,
     pub settings_open_notion_links_in_desktop_app: bool,
     /// Asset types whose background fetch is currently in flight.
     pub refreshing: HashSet<AssetType>,
@@ -610,6 +611,7 @@ impl AppState {
             logged_in_identity: None,
             settings_open: false,
             settings_local_root_input: String::new(),
+            settings_affinity_path_input: String::new(),
             settings_open_notion_links_in_desktop_app: false,
             refreshing: HashSet::new(),
             pending_notion: HashMap::new(),
@@ -654,6 +656,7 @@ impl AppState {
         s.token_prompt_open = !s.config.has_access_token() && !s.config.can_refresh_access_token();
         s.token_input.clear();
         s.settings_local_root_input = s.config.local_root.display().to_string();
+        s.settings_affinity_path_input = s.config.affinity_path.display().to_string();
         s.settings_open_notion_links_in_desktop_app = s.config.open_notion_links_in_desktop_app;
         s.refresh_logged_in_identity();
         // Warm the UI from cache immediately, then refresh in the background.
@@ -2069,6 +2072,7 @@ impl AppState {
 
     pub fn open_settings(&mut self) {
         self.settings_local_root_input = self.config.local_root.display().to_string();
+        self.settings_affinity_path_input = self.config.affinity_path.display().to_string();
         self.settings_open_notion_links_in_desktop_app =
             self.config.open_notion_links_in_desktop_app;
         self.settings_open = true;

@@ -22,6 +22,10 @@ pub struct Config {
     /// unlike `prod_root`).
     #[serde(default = "default_archive_root")]
     pub archive_root: PathBuf,
+    /// Path to the Affinity Photo executable, used by the "Open Asset with
+    /// Affinity" context-menu action. User-editable in Settings.
+    #[serde(default = "default_affinity_path")]
+    pub affinity_path: PathBuf,
     /// Last selected asset-type tab ("HDRIs" or "Textures").
     #[serde(default)]
     pub last_tab: String,
@@ -61,6 +65,14 @@ fn default_local_root() -> PathBuf {
 fn default_archive_root() -> PathBuf {
     PathBuf::from(r"A:\")
 }
+fn default_affinity_path() -> PathBuf {
+    // Per-user install location under %LOCALAPPDATA%\Microsoft\WindowsApps.
+    dirs::data_local_dir()
+        .map(|dir| dir.join(r"Microsoft\WindowsApps\AffinityPhoto2.exe"))
+        .unwrap_or_else(|| {
+            PathBuf::from(r"C:\Users\gregz\AppData\Local\Microsoft\WindowsApps\AffinityPhoto2.exe")
+        })
+}
 fn default_open_notion_links_in_desktop_app() -> bool {
     false
 }
@@ -75,6 +87,7 @@ impl Default for Config {
             prod_root: default_prod_root(),
             local_root: default_local_root(),
             archive_root: default_archive_root(),
+            affinity_path: default_affinity_path(),
             last_tab: String::new(),
             last_asset_types: Vec::new(),
             last_author_filter: String::new(),

@@ -531,9 +531,16 @@ fn draw_transfer_action_menu(
     }
 }
 
-fn open_asset_file(asset_type: AssetType, local_folder: &std::path::Path, slug: &str) {
-    let staging = local_folder.join("staging");
-    let file = match asset_type {
+/// Resolve an asset's primary editable file under `folder` (the slug folder),
+/// if it exists: `staging/{slug}.exr` (or `.hdr`) for HDRIs, `staging/{slug}.blend`
+/// for Textures. Returns `None` when the file is not present.
+pub(super) fn asset_file_path(
+    asset_type: AssetType,
+    folder: &std::path::Path,
+    slug: &str,
+) -> Option<std::path::PathBuf> {
+    let staging = folder.join("staging");
+    let candidate = match asset_type {
         AssetType::Hdris => {
             let exr = staging.join(format!("{slug}.exr"));
             if exr.is_file() {
@@ -544,12 +551,19 @@ fn open_asset_file(asset_type: AssetType, local_folder: &std::path::Path, slug: 
         }
         AssetType::Textures => staging.join(format!("{slug}.blend")),
     };
-    if file.exists() {
+    candidate.is_file().then_some(candidate)
+}
+
+fn open_asset_file(asset_type: AssetType, folder: &std::path::Path, slug: &str) {
+    if let Some(file) = asset_file_path(asset_type, folder, slug) {
         let _ = open::that(file);
-    } else if staging.exists() {
+        return;
+    }
+    let staging = folder.join("staging");
+    if staging.exists() {
         let _ = open::that(staging);
     } else {
-        let _ = open::that(local_folder);
+        let _ = open::that(folder);
     }
 }
 
@@ -1828,6 +1842,47 @@ mod tests {
         assert_eq!(
             super::transfer_progress_color(TransferKind::Unarchive),
             colors::STATUS_COMPLETE
+        );
+    }
+
+    #[test]
+    fn asset_file_path_prefers_exr_then_hdr_for_hdris() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path();
+        let staging = folder.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+
+        assert_eq!(
+            super::asset_file_path(crate::ui::AssetType::Hdris, folder, "sun"),
+            None
+        );
+        std::fs::write(staging.join("sun.hdr"), b"h").unwrap();
+        assert_eq!(
+            super::asset_file_path(crate::ui::AssetType::Hdris, folder, "sun"),
+            Some(staging.join("sun.hdr"))
+        );
+        std::fs::write(staging.join("sun.exr"), b"e").unwrap();
+        assert_eq!(
+            super::asset_file_path(crate::ui::AssetType::Hdris, folder, "sun"),
+            Some(staging.join("sun.exr"))
+        );
+    }
+
+    #[test]
+    fn asset_file_path_resolves_blend_for_textures() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path();
+        let staging = folder.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+
+        assert_eq!(
+            super::asset_file_path(crate::ui::AssetType::Textures, folder, "wood"),
+            None
+        );
+        std::fs::write(staging.join("wood.blend"), b"b").unwrap();
+        assert_eq!(
+            super::asset_file_path(crate::ui::AssetType::Textures, folder, "wood"),
+            Some(staging.join("wood.blend"))
         );
     }
 
