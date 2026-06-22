@@ -27,6 +27,8 @@ pub const ROW_INTRA_ICON_GAP: f32 = 2.0;
 pub const ACTION_ICON_SIZE: f32 = 18.0;
 pub const INLINE_ICON_SIZE: f32 = 14.0;
 pub const LINK_ICON_SIZE: f32 = 12.0;
+/// Tiny superscript-style icon tucked against the slug text (copy-slug button).
+pub const TINY_ICON_SIZE: f32 = 11.0;
 
 pub const STATUS_BAR_MARGIN_X: f32 = 4.0;
 pub const STATUS_BAR_MARGIN_Y: f32 = 2.0;

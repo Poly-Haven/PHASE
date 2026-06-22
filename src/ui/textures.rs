@@ -105,6 +105,34 @@ pub fn check_texture(ctx: &egui::Context) -> egui::TextureHandle {
         .clone()
 }
 
+/// The copy icon is drawn very small (superscript beside the slug). The usual
+/// fixed 4× oversample backfires here: rasterizing large and letting the GPU
+/// minify it down (bilinear, no mipmaps) resamples the image and produces
+/// shimmer/aliasing. Instead, rasterize at *exactly* the physical on-screen size
+/// so the caller can blit it 1:1, pixel-aligned, with no GPU rescale at all —
+/// resvg's coverage anti-aliasing then *is* the final image. Returns the texture
+/// and its physical pixel size; re-rendered only when the size (i.e. DPI) changes.
+pub fn copy_icon_texture(ctx: &egui::Context, display_pts: f32) -> (egui::TextureHandle, u32) {
+    use std::cell::RefCell;
+    static BYTES: &[u8] = include_bytes!("../assets/copy.svg");
+    thread_local! {
+        static CACHE: RefCell<Option<(u32, egui::TextureHandle)>> = const { RefCell::new(None) };
+    }
+    let target_px = ((display_pts * ctx.pixels_per_point()).round() as u32).max(1);
+    let tex = CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some((px, tex)) = cache.as_ref() {
+            if *px == target_px {
+                return tex.clone();
+            }
+        }
+        let tex = load_svg_texture_to_px(ctx, BYTES, "copy_icon", "copy.svg", target_px);
+        *cache = Some((target_px, tex.clone()));
+        tex
+    });
+    (tex, target_px)
+}
+
 pub fn gear_texture(ctx: &egui::Context) -> egui::TextureHandle {
     use std::sync::OnceLock;
     static BYTES: &[u8] = include_bytes!("../assets/gear-fill.svg");
@@ -177,4 +205,65 @@ pub fn load_svg_texture(
         egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], pixmap.data()),
         egui::TextureOptions::LINEAR,
     )
+}
+
+/// Rasterize an SVG so its larger dimension is `target_px` pixels. Use this for
+/// icons drawn very small, where rendering near the display size (rather than the
+/// fixed oversample in `load_svg_texture`) preserves thin strokes that heavy GPU
+/// minification would otherwise drop.
+fn load_svg_texture_to_px(
+    ctx: &egui::Context,
+    bytes: &[u8],
+    texture_name: &'static str,
+    debug_name: &'static str,
+    target_px: u32,
+) -> egui::TextureHandle {
+    let mut opt = usvg::Options::default();
+    opt.fontdb_mut().load_system_fonts();
+    opt.style_sheet = Some("svg { color: #ffffff; }".to_string());
+
+    let tree = usvg::Tree::from_data(bytes, &opt).expect(debug_name);
+    let size = tree.size();
+    let native = size.width().max(size.height()).max(1.0);
+    let scale = target_px as f32 / native;
+    let w = ((size.width() * scale).ceil() as u32).max(1);
+    let h = ((size.height() * scale).ceil() as u32).max(1);
+    let mut pixmap = tiny_skia::Pixmap::new(w, h).expect(debug_name);
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    ctx.load_texture(
+        texture_name,
+        egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], pixmap.data()),
+        egui::TextureOptions::LINEAR,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    /// The copy icon is stroked (not filled) and relies on the loader stylesheet
+    /// resolving `currentColor` to white. We can't eyeball the GUI here, so guard
+    /// against a malformed path or an unresolved stroke colour (either of which
+    /// would render nothing / non-white) by rasterizing it the same way the
+    /// loader does and checking for white pixels.
+    #[test]
+    fn copy_icon_svg_renders_white_strokes() {
+        let bytes = include_bytes!("../assets/copy.svg");
+        let mut opt = usvg::Options::default();
+        opt.style_sheet = Some("svg { color: #ffffff; }".to_string());
+        let tree = usvg::Tree::from_data(bytes, &opt).expect("copy.svg should parse");
+        let size = tree.size().to_int_size();
+        let mut pixmap = tiny_skia::Pixmap::new(size.width(), size.height()).unwrap();
+        resvg::render(&tree, tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+        let has_white = pixmap
+            .pixels()
+            .iter()
+            .any(|px| px.red() > 0 && px.red() == px.green() && px.green() == px.blue());
+        assert!(
+            has_white,
+            "copy.svg should render white strokes (currentColor → #fff)"
+        );
+    }
 }
