@@ -101,7 +101,7 @@ pub fn draw<T: Copy + PartialEq>(
                     layout::SELECTOR_SELECTED_OUTER_INSET_Y,
                 )),
                 option_rounding,
-                egui::Stroke::new(1.0, selected_color),
+                egui::Stroke::new(1.5, selected_color),
             );
         }
         let label_color = if response.hovered() {
