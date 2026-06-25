@@ -716,6 +716,14 @@ fn run_script(spec: ScriptSpec, tx: Sender<ScriptEvent>) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        // Suppress the console window Windows would otherwise pop up for the
+        // child `python` process. Output is still captured via the pipes above.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
 
     let mut child = match command.spawn() {
         Ok(child) => child,
