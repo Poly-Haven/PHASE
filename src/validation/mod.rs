@@ -1,4 +1,5 @@
 mod dismissed;
+mod hdri_resolution;
 mod local_freshness;
 mod needs_review;
 mod root_entries;
@@ -97,6 +98,12 @@ pub(crate) fn all_checks() -> &'static [Check] {
             _name: "needs-review",
             weight: 1,
             run: needs_review::run,
+        },
+        Check {
+            // Reads an image header off Prod, so it costs more than a stat.
+            _name: "hdri-resolution",
+            weight: 2,
+            run: hdri_resolution::run,
         },
     ];
     CHECKS

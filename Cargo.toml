@@ -15,6 +15,9 @@ image = { version = "0.24", default-features = false, features = [
   "png",
   "jpeg",
   "webp",
+  # Header-only reads for the HDRI resolution check (validation::hdri_resolution).
+  "openexr",
+  "hdr",
 ] }
 resvg = "0.45"
 reqwest = { version = "0.12", default-features = false, features = [
