@@ -1231,6 +1231,13 @@ impl AppState {
         self.thumbnail_jobs.insert(key.clone(), job);
     }
 
+    /// Re-check every visible row's thumbnail source (e.g. after regaining focus,
+    /// when a render may have landed while the window was in the background).
+    pub fn start_thumbnail_refresh_for_visible(&mut self) {
+        let keys = self.visible_asset_keys();
+        self.start_thumbnail_refresh_for_keys(keys);
+    }
+
     pub fn start_thumbnail_refresh_for_keys<I>(&mut self, keys: I)
     where
         I: IntoIterator<Item = RowKey>,
@@ -2677,6 +2684,9 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         state.rebuild_prod_folder_cache();
         state.rebuild_local_folder_cache();
         state.start_validation_for_visible_assets();
+        // Pick up renders produced while we were away. Unchanged sources hit the
+        // thumbnail cache, so this is cheap for rows that did not change.
+        state.start_thumbnail_refresh_for_visible();
         // Restart estimates with force=true so new jobs run, but old values remain
         // visible until results arrive (avoids flickering preview text on focus gain).
         state.transfer_estimate_jobs.clear();

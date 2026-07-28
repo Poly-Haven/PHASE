@@ -1131,6 +1131,57 @@ fn thumbnail_cleanup_only_touches_the_exact_asset_directory() {
 }
 
 #[test]
+fn finished_render_refreshes_that_row_thumbnail_but_normalize_does_not() {
+    use std::os::windows::process::ExitStatusExt;
+
+    fn pump_finished_script(
+        kind: super::scripts::ScriptKind,
+        row: &super::RowKey,
+    ) -> super::AppState {
+        let mut state = test_state();
+        let key = super::scripts::ScriptKey {
+            row: row.clone(),
+            kind,
+        };
+        let (tx, rx) = channel();
+        tx.send(super::scripts::ScriptEvent::Finished {
+            exit_status: std::process::ExitStatus::from_raw(0),
+        })
+        .unwrap();
+        state.script_jobs.insert(
+            key.clone(),
+            super::scripts::ScriptJob {
+                key,
+                rx,
+                started_at: Instant::now(),
+                output: String::new(),
+            },
+        );
+        super::scripts::pump(&mut state);
+        state
+    }
+
+    let row = super::RowKey {
+        asset_type: super::AssetType::Hdris,
+        slug: "sunny_field".into(),
+    };
+
+    // A render writes the preview the thumbnail comes from.
+    let state = pump_finished_script(super::scripts::ScriptKind::Render, &row);
+    assert!(
+        state.thumbnail_revisions.contains_key(&row),
+        "a finished render should queue a thumbnail refresh"
+    );
+
+    // Normalize only touches the EXR, not the preview.
+    let state = pump_finished_script(super::scripts::ScriptKind::Normalize, &row);
+    assert!(
+        !state.thumbnail_revisions.contains_key(&row),
+        "normalize should not queue a thumbnail refresh"
+    );
+}
+
+#[test]
 fn ui_thumbnail_refresh_logic_stays_off_the_ui_thread() {
     let mod_src =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "\\src\\ui\\mod.rs")).unwrap();

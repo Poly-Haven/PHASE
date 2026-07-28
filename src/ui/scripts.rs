@@ -381,6 +381,11 @@ pub fn pump(state: &mut AppState) {
                         created_at: Instant::now(),
                     },
                 );
+                // A render writes the preview the row's thumbnail comes from, so
+                // pick it up instead of waiting for the next focus/scope change.
+                if matches!(key.kind, ScriptKind::Render) {
+                    state.start_thumbnail_refresh_for_keys(vec![key.row.clone()]);
+                }
             } else {
                 block_dependents(state, &key);
             }
