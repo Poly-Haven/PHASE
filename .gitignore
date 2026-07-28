@@ -1,3 +1,5 @@
 /target
 Cargo.lock
 /plans
+# Packaged release output (scripts/release.ps1)
+/dist

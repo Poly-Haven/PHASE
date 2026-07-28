@@ -52,6 +52,8 @@ One unified pipeline; differs only by roots, progress color/direction, and post-
 
 ## Conventions
 - Commits: `feat:` / `fix:` / etc. prefix.
-- Releases: bump `version` in `Cargo.toml`, create a **lightweight `v*` tag**, push the tag → `.github/workflows/release.yml` builds the Windows binary and publishes a GitHub Release (notes auto-generated from commits since the previous tag). The in-app `updater` (`self_update`) checks GitHub releases ~once/day. Commit/tag/push only when asked.
+- Releases are built and published **locally** (no CI — a workflow run took ~10 min for a <1 min job). Bump `version` in `Cargo.toml` (the tag derives from it), commit, push the branch, then `pwsh scripts/release.ps1 -Publish -NotesFile <file>` — it tests, builds, packages `dist\phase-v*-x86_64-pc-windows-msvc.zip`, creates the lightweight `v*` tag, pushes it, and creates the GitHub Release with the zip + bare `phase.exe` attached. Commit/tag/push only when asked.
+  - **Write the notes yourself** — they're user-facing. Cover everything since the previous tag, grouped `## What's new` → `### Features` / `### Fixes`, describing user-visible impact rather than restating commit subjects. Omitting `-NotesFile` writes a placeholder to fix up with `gh release edit v* --notes-file <file>`.
+  - Don't rename the zip: the in-app `updater` (`self_update`, checks GitHub ~once/day) finds its download by matching the `x86_64-pc-windows-msvc` target in the asset name, and extracts `phase.exe` from the archive root.
 - **`Cargo.lock` is gitignored** (so is `/target` and `/docs/superpowers/`) — version bumps touch only `Cargo.toml`.
 - Match surrounding style; new background work should follow the thread→channel→`pump()` pattern, and new per-asset settings go in `config.rs` + the Settings dialog (`dialogs::settings`).
