@@ -24,6 +24,20 @@ pub struct Asset {
     pub author_profiles: Vec<AuthorProfile>,
     pub url: String,
     pub status: Option<AssetStatus>,
+    /// The page's remaining Notion properties, keyed by property name, as sent
+    /// by the admin API (see `vault`).
+    #[serde(default)]
+    pub properties: std::collections::HashMap<String, serde_json::Value>,
+}
+
+impl Asset {
+    /// The Notion "Vault" select property, when the asset has one (HDRIs only).
+    pub fn vault(&self) -> Option<&str> {
+        self.properties
+            .get("Vault")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -156,6 +156,7 @@ fn asset(slug: &str, author: &str, group: StatusGroup) -> Asset {
             group,
             sort_order: 0,
         }),
+        properties: Default::default(),
     }
 }
 
@@ -174,6 +175,7 @@ fn needs_review_asset(slug: &str, author: &str) -> Asset {
             group: StatusGroup::InProgress,
             sort_order: 1,
         }),
+        properties: Default::default(),
     }
 }
 
@@ -1128,6 +1130,39 @@ fn thumbnail_cleanup_only_touches_the_exact_asset_directory() {
     assert!(sibling_cache.exists());
     assert!(state.thumbnail_previews.contains_key(&key));
     assert!(!state.thumbnail_previews.contains_key(&sibling_key));
+}
+
+#[test]
+fn vault_pill_renders_between_the_slug_and_the_author() {
+    let mut state = test_state();
+    let mut asset = asset("sunny_field", "Greg", StatusGroup::InProgress);
+    asset
+        .properties
+        .insert("Vault".into(), serde_json::json!("Night City"));
+    state.assets_by_type.insert(
+        super::AssetType::Hdris,
+        super::AssetListState::Loaded(AssetList {
+            assets: vec![asset],
+            statuses: Vec::new(),
+        }),
+    );
+
+    let texts = render_text_shapes(&mut state);
+    let x_of = |needle: &str| {
+        texts
+            .iter()
+            .find(|(text, _, _)| text == needle)
+            .map(|(_, pos, _)| pos.x)
+    };
+
+    let slug_x = x_of("sunny_field").expect("slug should render");
+    let vault_x = x_of("Night City").expect("vault pill should render");
+    let author_x = x_of("Greg").expect("author should render");
+    assert!(slug_x < vault_x, "vault pill should sit after the slug");
+    assert!(
+        vault_x < author_x,
+        "vault pill should sit before the author"
+    );
 }
 
 #[test]

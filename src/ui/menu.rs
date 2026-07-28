@@ -416,6 +416,7 @@ mod tests {
                 group,
                 sort_order: 0,
             }),
+            properties: Default::default(),
         }
     }
 

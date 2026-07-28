@@ -173,6 +173,8 @@ struct RowView {
     url: String,
     page_id: String,
     status: Option<AssetStatus>,
+    /// Notion's "Vault" property, shown as a grey pill next to the slug.
+    vault: Option<String>,
     exists_on_prod: bool,
     exists_on_archive: bool,
     exists_local: bool,
@@ -284,6 +286,7 @@ impl RowView {
             url: a.url.clone(),
             page_id: a.page_id.clone(),
             status: a.status.clone(),
+            vault: a.vault().map(str::to_string),
             exists_on_prod,
             exists_on_archive,
             exists_local,
@@ -331,6 +334,7 @@ impl RowView {
                 // statuses, which have concrete sort orders).
                 sort_order: usize::MAX,
             }),
+            vault: None,
             exists_on_prod: orphan.exists_prod,
             exists_on_archive: orphan.exists_archive,
             exists_local: orphan.exists_local,
@@ -870,9 +874,16 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
                 );
             }
 
+            // Extra space clears the manually-positioned copy icon above.
+            if row.vault.is_some() || !row.is_orphan {
+                ui.add_space(layout::ROW_SECTION_PADDING + 12.0);
+            }
+            if let Some(vault) = row.vault.as_deref() {
+                vault_pill(ui, vault);
+                ui.add_space(layout::ROW_SECTION_PADDING);
+            }
             // Orphans have no author data.
             if !row.is_orphan {
-                ui.add_space(layout::ROW_SECTION_PADDING + 12.0);
                 draw_row_authors(state, ui, row, colors::TEXT_PRIMARY);
             }
             super::scripts::draw_row_status(state, ui, key);
@@ -1668,6 +1679,39 @@ fn colored_status_option(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// A small, non-interactive grey pill, matching the status pill's shape. Used
+/// for Notion's "Vault" property, which is informational only.
+fn vault_pill(ui: &mut egui::Ui, text: &str) {
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let text_width = ui.fonts(|fonts| {
+        fonts
+            .layout_no_wrap(text.to_string(), font_id.clone(), egui::Color32::WHITE)
+            .rect
+            .width()
+    });
+    let height = layout::STATUS_PILL_HEIGHT;
+    let width = text_width + layout::STATUS_PILL_PADDING_X * 2.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let color = notion_color("gray");
+    ui.painter()
+        .rect_filled(rect, height / 2.0, colors::colored_background(color));
+    ui.painter().rect_stroke(
+        rect.shrink(0.5),
+        height / 2.0,
+        egui::Stroke::new(1.0, color),
+    );
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        font_id,
+        colors::TEXT_PRIMARY,
+    );
+}
+
 fn status_pill_button(
     ui: &mut egui::Ui,
     status: &AssetStatus,
@@ -1822,6 +1866,7 @@ mod tests {
             url: String::new(),
             page_id: String::new(),
             status,
+            vault: None,
             exists_on_prod: true,
             exists_on_archive: false,
             exists_local: true,
@@ -1838,6 +1883,36 @@ mod tests {
             group: StatusGroup::InProgress,
             sort_order: 10,
         }
+    }
+
+    #[test]
+    fn vault_property_is_read_from_notion_properties() {
+        let mut asset = crate::notion::Asset {
+            page_id: "page".into(),
+            slug: "sunny_field".into(),
+            author: String::new(),
+            authors: Vec::new(),
+            author_profiles: Vec::new(),
+            url: String::new(),
+            status: None,
+            properties: Default::default(),
+        };
+        assert_eq!(asset.vault(), None);
+
+        asset
+            .properties
+            .insert("Vault".into(), serde_json::json!("Beach Vault"));
+        assert_eq!(asset.vault(), Some("Beach Vault"));
+
+        // An empty or non-string value is treated as absent.
+        asset
+            .properties
+            .insert("Vault".into(), serde_json::json!(""));
+        assert_eq!(asset.vault(), None);
+        asset
+            .properties
+            .insert("Vault".into(), serde_json::json!(42));
+        assert_eq!(asset.vault(), None);
     }
 
     fn orphan(slug: &str, local: bool, prod: bool, archive: bool) -> crate::ui::OrphanAsset {
@@ -2198,6 +2273,7 @@ mod tests {
             author_profiles: Vec::new(),
             url: String::new(),
             status: Some(status("approved", "Approved")),
+            properties: Default::default(),
         };
         let row = RowView::from_asset(
             crate::ui::AssetType::Hdris,
