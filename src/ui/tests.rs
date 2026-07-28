@@ -93,6 +93,7 @@ fn test_state() -> super::AppState {
         watcher_was_focused: false,
         last_watch_mode: super::file_watcher::WatchMode::RealTime,
         next_poll_at: Instant::now(),
+        next_notion_refresh_at: Instant::now() + std::time::Duration::from_secs(300),
         watch_dirty: true,
         watch_pending: HashMap::new(),
         pending_validation_keys: HashSet::new(),
@@ -1130,6 +1131,48 @@ fn thumbnail_cleanup_only_touches_the_exact_asset_directory() {
     assert!(sibling_cache.exists());
     assert!(state.thumbnail_previews.contains_key(&key));
     assert!(!state.thumbnail_previews.contains_key(&sibling_key));
+}
+
+#[test]
+fn notion_refresh_is_scheduled_periodically_and_backs_off_during_login() {
+    use super::{periodic_refresh_decision, PeriodicRefresh};
+    let now = Instant::now();
+    let interval = std::time::Duration::from_secs(300);
+
+    // Before the interval elapses, nothing happens.
+    assert_eq!(
+        periodic_refresh_decision(now, now + interval, false),
+        PeriodicRefresh::NotDue
+    );
+    // Once due, refresh in the background.
+    assert_eq!(
+        periodic_refresh_decision(now, now, false),
+        PeriodicRefresh::Refresh
+    );
+    // ...unless a login is in flight, in which case wait another interval
+    // instead of firing a fetch that would only fail.
+    assert_eq!(
+        periodic_refresh_decision(now, now, true),
+        PeriodicRefresh::BackOff
+    );
+}
+
+#[test]
+fn periodic_refresh_backs_off_without_fetching_while_the_login_prompt_is_open() {
+    let mut state = test_state();
+    state.token_prompt_open = true;
+    state.next_notion_refresh_at = Instant::now() - std::time::Duration::from_secs(1);
+
+    state.pump(&egui::Context::default());
+
+    assert!(
+        state.next_notion_refresh_at > Instant::now(),
+        "a skipped refresh should still push the next attempt out"
+    );
+    assert!(
+        state.refreshing.is_empty() && state.notion_rx.is_empty(),
+        "no fetch should start while logging in"
+    );
 }
 
 #[test]

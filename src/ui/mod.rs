@@ -38,6 +38,35 @@ use crate::notion::{Asset, AssetList, AssetStatus, StatusOption};
 
 const VERSION_NOTICE_DURATION: Duration = Duration::from_secs(10);
 
+/// How often the asset lists are re-fetched in the background, so the table is
+/// already up to date when the window is focused rather than refreshing then.
+const NOTION_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+
+/// What the periodic Notion refresh should do this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeriodicRefresh {
+    /// The interval hasn't elapsed yet.
+    NotDue,
+    /// Due, but a login is in flight or needed — wait another interval rather
+    /// than firing a fetch that would only fail and re-open the prompt.
+    BackOff,
+    Refresh,
+}
+
+fn periodic_refresh_decision(
+    now: Instant,
+    next_at: Instant,
+    login_in_flight: bool,
+) -> PeriodicRefresh {
+    if now < next_at {
+        PeriodicRefresh::NotDue
+    } else if login_in_flight {
+        PeriodicRefresh::BackOff
+    } else {
+        PeriodicRefresh::Refresh
+    }
+}
+
 struct VersionNotice {
     message: String,
     expires_at: Instant,
@@ -516,6 +545,8 @@ pub struct AppState {
     pub last_watch_mode: file_watcher::WatchMode,
     /// When the next poll tick is due (only meaningful in polling modes).
     pub next_poll_at: Instant,
+    /// When the next background asset-list refresh is due.
+    pub next_notion_refresh_at: Instant,
     /// Set true whenever the desired watch set may have changed; reconcile only
     /// touches the filesystem/network when this is set, then clears it.
     pub watch_dirty: bool,
@@ -764,6 +795,7 @@ impl AppState {
             watcher_was_focused: false,
             last_watch_mode: file_watcher::WatchMode::RealTime,
             next_poll_at: Instant::now(),
+            next_notion_refresh_at: Instant::now() + NOTION_REFRESH_INTERVAL,
             watch_dirty: true,
             watch_pending: HashMap::new(),
             pending_validation_keys: HashSet::new(),
@@ -1094,9 +1126,29 @@ impl AppState {
     }
 
     pub fn refresh_all_asset_types(&mut self) {
+        // Any full refresh (focus, login, periodic) restarts the background timer.
+        self.next_notion_refresh_at = Instant::now() + NOTION_REFRESH_INTERVAL;
         self.refresh_published_assets();
         for t in AssetType::all() {
             self.refresh(*t);
+        }
+    }
+
+    /// Re-fetch the asset lists on a timer so the table is already current when
+    /// the window regains focus, instead of visibly refreshing at that point.
+    fn pump_periodic_notion_refresh(&mut self) {
+        let login_in_flight = self.token_prompt_open || self.auth_rx.is_some();
+        match periodic_refresh_decision(
+            Instant::now(),
+            self.next_notion_refresh_at,
+            login_in_flight,
+        ) {
+            PeriodicRefresh::NotDue => {}
+            PeriodicRefresh::BackOff => {
+                self.next_notion_refresh_at = Instant::now() + NOTION_REFRESH_INTERVAL;
+            }
+            // Resets the timer itself.
+            PeriodicRefresh::Refresh => self.refresh_all_asset_types(),
         }
     }
 
@@ -2206,6 +2258,7 @@ impl AppState {
         self.row_toasts
             .retain(|_, toast| toast.created_at.elapsed() < Duration::from_secs(5));
 
+        self.pump_periodic_notion_refresh();
         self.pump_file_watcher();
     }
 
@@ -2755,6 +2808,12 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     if let Some(delay) = state.watcher_repaint_after() {
         ctx.request_repaint_after(delay);
     }
+    // ...and so the periodic Notion refresh fires even while unfocused.
+    ctx.request_repaint_after(
+        state
+            .next_notion_refresh_at
+            .saturating_duration_since(Instant::now()),
+    );
 }
 
 fn draw_update_prompt(state: &mut AppState, ctx: &egui::Context) {
