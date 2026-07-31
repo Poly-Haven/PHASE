@@ -2,6 +2,7 @@ mod dismissed;
 mod hdri_resolution;
 mod local_freshness;
 mod needs_review;
+pub mod resolution;
 mod root_entries;
 pub(crate) mod workers;
 
@@ -40,7 +41,12 @@ pub struct Request {
 }
 
 pub enum Msg {
-    RowValidated { key: RowKey, findings: Vec<Finding> },
+    RowValidated {
+        key: RowKey,
+        findings: Vec<Finding>,
+        /// The asset's measured pixel size, for the row's resolution label.
+        resolution: Option<(u32, u32)>,
+    },
     Finished,
 }
 
@@ -104,6 +110,13 @@ pub(crate) fn all_checks() -> &'static [Check] {
             _name: "hdri-resolution",
             weight: 2,
             run: hdri_resolution::run,
+        },
+        Check {
+            // Walks staging/textures and reads each header (memoised), so this
+            // is the heaviest check by some margin.
+            _name: "resolution",
+            weight: 3,
+            run: resolution::run,
         },
     ];
     CHECKS

@@ -37,6 +37,7 @@ fn run(requests: Vec<Request>, tx: Sender<Msg>) {
                 .send(Msg::RowValidated {
                     key: request.key,
                     findings: Vec::new(),
+                    resolution: None,
                 })
                 .is_err()
             {
@@ -104,10 +105,16 @@ fn run(requests: Vec<Request>, tx: Sender<Msg>) {
                 .iter()
                 .flat_map(|findings| findings.iter().cloned())
                 .collect();
+            // The resolution check (run on a worker above) left its measurement
+            // in a memo, so this is a map lookup rather than more disk work on
+            // the aggregating thread.
+            let key = requests[result.request_index].key.clone();
+            let resolution = crate::validation::resolution::measured(&key);
             if tx
                 .send(Msg::RowValidated {
-                    key: requests[result.request_index].key.clone(),
+                    key,
                     findings,
+                    resolution,
                 })
                 .is_err()
             {

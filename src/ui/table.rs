@@ -81,6 +81,11 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                                 .get(&key)
                                 .cloned()
                                 .unwrap_or_default();
+                            let resolution = state
+                                .asset_resolutions
+                                .get(&key)
+                                .copied()
+                                .and_then(crate::validation::resolution::label);
                             RowView::from_asset(
                                 t,
                                 a,
@@ -91,6 +96,7 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                                 &state.published_assets,
                                 &validation_findings,
                                 &state.dismissed_warning_keys,
+                                resolution,
                             )
                         }),
                 );
@@ -175,6 +181,8 @@ struct RowView {
     status: Option<AssetStatus>,
     /// Notion's "Vault" property, shown as a grey pill next to the slug.
     vault: Option<String>,
+    /// Measured pixel resolution, e.g. "16k", shown next to the slug.
+    resolution: Option<String>,
     exists_on_prod: bool,
     exists_on_archive: bool,
     exists_local: bool,
@@ -196,6 +204,7 @@ impl RowView {
         published_assets: &crate::polyhaven::PublishedAssets,
         validation_findings: &[crate::validation::Finding],
         dismissed_warning_keys: &std::collections::HashSet<String>,
+        resolution: Option<String>,
     ) -> Self {
         let mut messages = Vec::new();
         let key = RowKey {
@@ -287,6 +296,7 @@ impl RowView {
             page_id: a.page_id.clone(),
             status: a.status.clone(),
             vault: a.vault().map(str::to_string),
+            resolution,
             exists_on_prod,
             exists_on_archive,
             exists_local,
@@ -335,6 +345,8 @@ impl RowView {
                 sort_order: usize::MAX,
             }),
             vault: None,
+            // Orphans are not validated, so nothing has measured them.
+            resolution: None,
             exists_on_prod: orphan.exists_prod,
             exists_on_archive: orphan.exists_archive,
             exists_local: orphan.exists_local,
@@ -875,8 +887,13 @@ fn draw_row(state: &mut AppState, ui: &mut egui::Ui, key: &RowKey, row: &RowView
             }
 
             // Extra space clears the manually-positioned copy icon above.
-            if row.vault.is_some() || !row.is_orphan {
+            if row.resolution.is_some() || row.vault.is_some() || !row.is_orphan {
                 ui.add_space(layout::ROW_SECTION_PADDING + 12.0);
+            }
+            // Measured resolution ("16k"), styled like the author names.
+            if let Some(resolution) = row.resolution.as_deref() {
+                ui.colored_label(colors::TEXT_PRIMARY.linear_multiply(0.25), resolution);
+                ui.add_space(layout::ROW_SECTION_PADDING);
             }
             if let Some(vault) = row.vault.as_deref() {
                 vault_pill(ui, vault);
@@ -1867,6 +1884,7 @@ mod tests {
             page_id: String::new(),
             status,
             vault: None,
+            resolution: None,
             exists_on_prod: true,
             exists_on_archive: false,
             exists_local: true,
@@ -2285,6 +2303,7 @@ mod tests {
             &crate::polyhaven::PublishedAssets::default(),
             &[],
             &HashSet::new(),
+            None,
         );
 
         assert!(row.messages.iter().any(|msg| msg.text == "Passed review;"));

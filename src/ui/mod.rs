@@ -526,6 +526,8 @@ pub struct AppState {
     pub local_folder_cache: HashMap<RowKey, bool>,
     pub dismissed_warning_keys: HashSet<String>,
     pub validation_results: HashMap<RowKey, Vec<crate::validation::Finding>>,
+    /// Each asset's measured pixel width, shown as a "16k"-style row label.
+    pub asset_resolutions: HashMap<RowKey, u32>,
     pub validation_job: Option<ValidationJob>,
     pub visible_validation_scope: VisibleValidationScope,
     update_check: Option<UpdateCheckJob>,
@@ -785,6 +787,7 @@ impl AppState {
             dismissed_warning_keys: crate::validation::load_dismissed_warning_keys()
                 .unwrap_or_default(),
             validation_results: HashMap::new(),
+            asset_resolutions: HashMap::new(),
             validation_job: None,
             visible_validation_scope: VisibleValidationScope::default(),
             update_check: None,
@@ -2009,7 +2012,19 @@ impl AppState {
             .and_then(|job| job.rx.try_recv().ok())
         {
             match msg {
-                crate::validation::Msg::RowValidated { key, findings } => {
+                crate::validation::Msg::RowValidated {
+                    key,
+                    findings,
+                    resolution,
+                } => {
+                    match resolution {
+                        Some((width, _)) => {
+                            self.asset_resolutions.insert(key.clone(), width);
+                        }
+                        None => {
+                            self.asset_resolutions.remove(&key);
+                        }
+                    }
                     self.validation_results.insert(key, findings);
                     // The error set may have changed; re-evaluate prod watches.
                     self.watch_dirty = true;

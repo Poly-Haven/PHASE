@@ -76,6 +76,7 @@ fn test_state() -> super::AppState {
         local_folder_cache: HashMap::new(),
         dismissed_warning_keys: HashSet::new(),
         validation_results: HashMap::new(),
+        asset_resolutions: HashMap::new(),
         validation_job: None,
         visible_validation_scope: super::VisibleValidationScope::default(),
         update_check: None,
@@ -1226,6 +1227,39 @@ fn periodic_refresh_backs_off_without_fetching_while_the_login_prompt_is_open() 
         state.refreshing.is_empty() && state.notion_rx.is_empty(),
         "no fetch should start while logging in"
     );
+}
+
+#[test]
+fn resolution_label_renders_between_the_slug_and_the_author() {
+    let mut state = test_state();
+    state.assets_by_type.insert(
+        super::AssetType::Hdris,
+        super::AssetListState::Loaded(AssetList {
+            assets: vec![asset("sunny_field", "Greg", StatusGroup::InProgress)],
+            statuses: Vec::new(),
+        }),
+    );
+    state.asset_resolutions.insert(
+        super::RowKey {
+            asset_type: super::AssetType::Hdris,
+            slug: "sunny_field".into(),
+        },
+        16384,
+    );
+
+    let texts = render_text_shapes(&mut state);
+    let x_of = |needle: &str| {
+        texts
+            .iter()
+            .find(|(text, _, _)| text == needle)
+            .map(|(_, pos, _)| pos.x)
+    };
+
+    let slug_x = x_of("sunny_field").expect("slug should render");
+    let res_x = x_of("16k").expect("resolution label should render");
+    let author_x = x_of("Greg").expect("author should render");
+    assert!(slug_x < res_x, "resolution should sit after the slug");
+    assert!(res_x < author_x, "resolution should sit before the author");
 }
 
 #[test]

@@ -1,6 +1,5 @@
-use std::path::{Path, PathBuf};
-
 use crate::ui::AssetType;
+use crate::validation::resolution;
 use crate::validation::{Finding, Severity, ValidationContext};
 
 /// HDRIs are delivered at 16k wide.
@@ -12,12 +11,13 @@ pub(crate) fn run(ctx: &ValidationContext) -> Vec<Finding> {
     if !matches!(ctx.key.asset_type, AssetType::Hdris) {
         return Vec::new();
     }
-    let Some(path) = hdri_file(ctx) else {
+    let Some(path) = resolution::hdri_source(ctx) else {
         return Vec::new();
     };
     // An unreadable/exotic file yields no dimensions; stay quiet rather than
-    // reporting a resolution problem we cannot actually prove.
-    let Some((width, height)) = image_dimensions(&path) else {
+    // reporting a resolution problem we cannot actually prove. The read is
+    // memoised, so this shares one header read with `resolution`.
+    let Some((width, height)) = resolution::dimensions(&path) else {
         return Vec::new();
     };
     findings_for_dimensions(width, height)
@@ -41,33 +41,6 @@ fn findings_for_dimensions(width: u32, height: u32) -> Vec<Finding> {
         });
     }
     findings
-}
-
-/// The HDRI to measure: the Prod staging file (the delivered one), falling back
-/// to Local so the warning also shows while the asset is still being worked on.
-fn hdri_file(ctx: &ValidationContext) -> Option<PathBuf> {
-    staging_hdri(&ctx.prod_root, &ctx.key.slug)
-        .or_else(|| staging_hdri(&ctx.local_root, &ctx.key.slug))
-}
-
-fn staging_hdri(root: &Path, slug: &str) -> Option<PathBuf> {
-    let staging = root.join("staging");
-    let exr = staging.join(format!("{slug}.exr"));
-    if exr.is_file() {
-        return Some(exr);
-    }
-    let hdr = staging.join(format!("{slug}.hdr"));
-    hdr.is_file().then_some(hdr)
-}
-
-/// Read just the image header for its dimensions (no full decode).
-fn image_dimensions(path: &Path) -> Option<(u32, u32)> {
-    let reader = image::io::Reader::open(path).ok()?;
-    let reader = match reader.format() {
-        Some(_) => reader,
-        None => reader.with_guessed_format().ok()?,
-    };
-    reader.into_dimensions().ok()
 }
 
 #[cfg(test)]
@@ -111,7 +84,7 @@ mod tests {
 
         let exr = temp.path().join("probe.exr");
         pixels.save(&exr).unwrap();
-        assert_eq!(image_dimensions(&exr), Some((64, 32)));
+        assert_eq!(resolution::dimensions(&exr), Some((64, 32)));
 
         // `save()` has no Radiance encoder, so write that one directly.
         let hdr = temp.path().join("probe.hdr");
@@ -121,7 +94,7 @@ mod tests {
         ))
         .encode(&texels, 64, 32)
         .unwrap();
-        assert_eq!(image_dimensions(&hdr), Some((64, 32)));
+        assert_eq!(resolution::dimensions(&hdr), Some((64, 32)));
     }
 
     #[test]
