@@ -103,10 +103,6 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn access_token_expired_at(&self, now_unix_seconds: u64) -> bool {
-        crate::auth::access_token_expired(self.auth_expires_at, now_unix_seconds)
-    }
-
     pub fn can_refresh_access_token(&self) -> bool {
         !self.auth_refresh_token.trim().is_empty()
     }
@@ -149,16 +145,17 @@ local_root = "C:\\PHASE"
     }
 
     #[test]
-    fn expired_access_token_requires_refresh_before_api_calls() {
-        let mut cfg = super::Config::default();
-        cfg.auth_access_token = "access".into();
-        cfg.auth_refresh_token = "refresh".into();
-        cfg.auth_expires_at = Some(1_000);
+    fn stored_credentials_are_recognised_as_refreshable() {
+        let cfg = super::Config {
+            auth_access_token: "access".into(),
+            auth_refresh_token: "refresh".into(),
+            auth_expires_at: Some(1_000),
+            ..Default::default()
+        };
 
-        assert!(cfg.access_token_expired_at(940));
-        assert!(cfg.access_token_expired_at(1_000));
-        assert!(!cfg.access_token_expired_at(939));
+        assert!(cfg.has_access_token());
         assert!(cfg.can_refresh_access_token());
+        assert!(!super::Config::default().can_refresh_access_token());
     }
 
     #[test]
