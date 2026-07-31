@@ -486,6 +486,8 @@ pub struct AppState {
     /// refresh with the same refresh token.
     pub auth_tokens: crate::auth::SharedTokens,
     pub logged_in_identity: Option<LoggedInIdentity>,
+    /// In-flight lookup of the signed-in user's display name.
+    pub identity_rx: Option<Receiver<Result<LoggedInIdentity, anyhow::Error>>>,
     pub settings_open: bool,
     pub settings_local_root_input: String,
     pub settings_affinity_path_input: String,
@@ -760,6 +762,7 @@ impl AppState {
             auth_rx: None,
             auth_tokens,
             logged_in_identity: None,
+            identity_rx: None,
             settings_open: false,
             settings_local_root_input: String::new(),
             settings_affinity_path_input: String::new(),
@@ -2249,6 +2252,7 @@ impl AppState {
         self.row_toasts
             .retain(|_, toast| toast.created_at.elapsed() < Duration::from_secs(5));
 
+        self.pump_logged_in_identity();
         self.pump_periodic_notion_refresh();
         self.pump_file_watcher();
     }
@@ -2315,18 +2319,40 @@ impl AppState {
         self.settings_open = true;
     }
 
-    /// Read the signed-in user straight out of the access token's claims.
+    /// Refresh who we show as signed in.
     ///
-    /// We used to call Auth0's `/userinfo` first, but our access tokens are
-    /// minted for the PHASE API audience, which that endpoint always rejects
-    /// with a 401 — so it was a blocking request on the UI thread that only
-    /// ever fell through to these claims anyway.
+    /// The access token's own claims often lack a name (it is minted for the
+    /// PHASE API audience), leaving only the raw `auth0|…` user id — so show
+    /// that immediately, then ask Auth0's `/userinfo` for the real name on a
+    /// background thread. That request used to run on the UI thread, which
+    /// stalled the frame every time credentials were refreshed.
     pub fn refresh_logged_in_identity(&mut self) {
-        self.logged_in_identity = if self.config.has_access_token() {
-            crate::auth::logged_in_identity(&self.config.auth_access_token)
-        } else {
-            None
+        if !self.config.has_access_token() {
+            self.logged_in_identity = None;
+            self.identity_rx = None;
+            return;
+        }
+
+        let access_token = self.config.auth_access_token.clone();
+        self.logged_in_identity = crate::auth::logged_in_identity(&access_token);
+
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            let _ = tx.send(crate::auth::fetch_logged_in_identity(&access_token));
+        });
+        self.identity_rx = Some(rx);
+    }
+
+    fn pump_logged_in_identity(&mut self) {
+        let Some(result) = self.identity_rx.as_ref().and_then(|rx| rx.try_recv().ok()) else {
+            return;
         };
+        self.identity_rx = None;
+        match result {
+            Ok(identity) => self.logged_in_identity = Some(identity),
+            // Keep the claims-derived identity we already showed.
+            Err(err) => log::debug!("Could not fetch the display name from Auth0: {err}"),
+        }
     }
 
     /// Persist refreshed credentials and share them with background workers.
@@ -2796,6 +2822,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         || !state.jobs.is_empty()
         || !state.plan_jobs.is_empty()
         || state.prod_cache_rx.is_some()
+        || state.identity_rx.is_some()
         || !state.verifications.is_empty()
         || !state.archive_deletes.is_empty()
         || state.validation_job.is_some()

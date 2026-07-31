@@ -53,6 +53,7 @@ fn test_state() -> super::AppState {
         auth_login: None,
         auth_rx: None,
         auth_tokens: crate::auth::shared_tokens(&Config::default()),
+        identity_rx: None,
         logged_in_identity: None,
         settings_open: false,
         settings_local_root_input: String::new(),
@@ -1132,6 +1133,57 @@ fn thumbnail_cleanup_only_touches_the_exact_asset_directory() {
     assert!(sibling_cache.exists());
     assert!(state.thumbnail_previews.contains_key(&key));
     assert!(!state.thumbnail_previews.contains_key(&sibling_key));
+}
+
+#[test]
+fn a_fetched_display_name_replaces_the_one_decoded_from_the_token() {
+    let mut state = test_state();
+    // What the token's own claims gave us: no name claim, so the raw user id.
+    state.logged_in_identity = Some(crate::auth::LoggedInIdentity {
+        name: "auth0|abc123".into(),
+        user_id: "auth0|abc123".into(),
+        role: "Admin".into(),
+    });
+
+    let (tx, rx) = channel();
+    tx.send(Ok(crate::auth::LoggedInIdentity {
+        name: "Greg".into(),
+        user_id: "auth0|abc123".into(),
+        role: "Admin".into(),
+    }))
+    .unwrap();
+    state.identity_rx = Some(rx);
+
+    state.pump(&egui::Context::default());
+
+    assert_eq!(
+        state.logged_in_identity.as_ref().map(|i| i.name.as_str()),
+        Some("Greg")
+    );
+    assert!(state.identity_rx.is_none());
+}
+
+#[test]
+fn a_failed_display_name_lookup_keeps_the_token_derived_identity() {
+    let mut state = test_state();
+    state.logged_in_identity = Some(crate::auth::LoggedInIdentity {
+        name: "auth0|abc123".into(),
+        user_id: "auth0|abc123".into(),
+        role: "Admin".into(),
+    });
+
+    let (tx, rx) = channel();
+    tx.send(Err(anyhow::anyhow!("401 Unauthorized"))).unwrap();
+    state.identity_rx = Some(rx);
+
+    state.pump(&egui::Context::default());
+
+    assert_eq!(
+        state.logged_in_identity.as_ref().map(|i| i.name.as_str()),
+        Some("auth0|abc123"),
+        "a failed lookup must not blank out the status bar"
+    );
+    assert!(state.identity_rx.is_none());
 }
 
 #[test]

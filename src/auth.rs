@@ -73,6 +73,10 @@ pub fn auth0_audience() -> &'static str {
     "https://admin.polyhaven.com/api/phase"
 }
 
+pub fn userinfo_url() -> String {
+    format!("https://{AUTH0_DOMAIN}/userinfo")
+}
+
 pub fn phase_api_base_url() -> &'static str {
     #[cfg(debug_assertions)]
     {
@@ -330,6 +334,29 @@ pub fn apply_tokens(config: &mut crate::config::Config, tokens: &AuthTokens) {
     config.auth_expires_at = tokens.expires_at;
 }
 
+const ROLE_CLAIMS: &[&str] = &[
+    "role",
+    "roles",
+    "https://admin.polyhaven.com/role",
+    "https://admin.polyhaven.com/roles",
+    "https://polyhaven.com/role",
+    "https://polyhaven.com/roles",
+];
+
+/// An email address is shown as just its local part; anything else is used
+/// as-is.
+fn display_name_from(value: &str) -> String {
+    match value.split_once('@') {
+        Some((local, _)) => local.to_string(),
+        None => value.to_string(),
+    }
+}
+
+/// The signed-in user as described by the access token's own claims.
+///
+/// Needs no network, but an access token minted for a custom API audience
+/// often carries no name claim — then the name falls back to the raw user id,
+/// which is why `fetch_logged_in_identity` is used to improve on it.
 pub fn logged_in_identity(access_token: &str) -> Option<LoggedInIdentity> {
     let claims = decode_jwt_claims(access_token)?;
     let user_id = claim_string(&claims, &["sub"]).unwrap_or_else(|| "Unknown".to_string());
@@ -343,31 +370,82 @@ pub fn logged_in_identity(access_token: &str) -> Option<LoggedInIdentity> {
             "given_name",
         ],
     )
-    .map(|value| {
-        if value.contains('@') {
-            value.split('@').next().unwrap_or(&value).to_string()
-        } else {
-            value
-        }
-    })
+    .map(|value| display_name_from(&value))
     .unwrap_or_else(|| user_id.clone());
-    let role = claim_string(
-        &claims,
-        &[
-            "role",
-            "roles",
-            "https://admin.polyhaven.com/role",
-            "https://admin.polyhaven.com/roles",
-            "https://polyhaven.com/role",
-            "https://polyhaven.com/roles",
-        ],
-    )
-    .unwrap_or_else(|| "Unknown".to_string());
+    let role = claim_string(&claims, ROLE_CLAIMS).unwrap_or_else(|| "Unknown".to_string());
     Some(LoggedInIdentity {
         name,
         user_id,
         role,
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct UserInfoResponse {
+    sub: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    preferred_username: Option<String>,
+    #[serde(default)]
+    nickname: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+}
+
+/// Look up the signed-in user's display name from Auth0.
+///
+/// Our access tokens are minted for the PHASE API audience, so this can come
+/// back 401 depending on how the token was issued — in which case the caller
+/// keeps the name decoded from the token's own claims. That is a missing
+/// display name, *not* a dead session, so the error deliberately avoids the
+/// "Authentication required" prefix that opens the login prompt.
+///
+/// This makes a network request: call it off the UI thread.
+pub fn fetch_logged_in_identity(access_token: &str) -> Result<LoggedInIdentity> {
+    let client = client()?;
+    let resp = client
+        .get(userinfo_url())
+        .bearer_auth(access_token)
+        .send()
+        .context("fetching Auth0 userinfo")?;
+
+    let status = resp.status();
+    let text = resp.text().unwrap_or_default();
+    if !status.is_success() {
+        return Err(anyhow!("Auth0 userinfo request failed {status}: {text}"));
+    }
+
+    let userinfo: UserInfoResponse =
+        serde_json::from_str(&text).context("parsing Auth0 userinfo response")?;
+    let name = first_non_empty_text(&[
+        userinfo.name.as_deref(),
+        userinfo.preferred_username.as_deref(),
+        userinfo.nickname.as_deref(),
+        userinfo.email.as_deref(),
+    ])
+    .map(|value| display_name_from(&value))
+    .unwrap_or_else(|| userinfo.sub.clone());
+    // The role only ever comes from the access token's claims; /userinfo does
+    // not carry it.
+    let role = decode_jwt_claims(access_token)
+        .as_ref()
+        .and_then(|claims| claim_string(claims, ROLE_CLAIMS))
+        .unwrap_or_else(|| "Unknown".to_string());
+    Ok(LoggedInIdentity {
+        name,
+        user_id: userinfo.sub,
+        role,
+    })
+}
+
+fn first_non_empty_text(values: &[Option<&str>]) -> Option<String> {
+    values
+        .iter()
+        .flatten()
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 pub fn is_auth_required_error(message: &str) -> bool {
@@ -678,6 +756,21 @@ mod tests {
         let identity = logged_in_identity(&token).unwrap();
         assert_eq!(identity.name, "Ada Lovelace");
         assert_eq!(identity.role, "admin, editor");
+    }
+
+    #[test]
+    fn display_names_drop_the_email_domain() {
+        assert_eq!(display_name_from("ada@example.com"), "ada");
+        assert_eq!(display_name_from("Ada Lovelace"), "Ada Lovelace");
+        assert_eq!(display_name_from(""), "");
+    }
+
+    #[test]
+    fn a_userinfo_failure_does_not_look_like_a_dead_session() {
+        // Only a rejected *grant* should open the login prompt; failing to look
+        // up a display name must not.
+        let err = anyhow!("Auth0 userinfo request failed 401 Unauthorized: Unauthorized");
+        assert!(!is_auth_required_error(&err.to_string()));
     }
 
     #[test]
