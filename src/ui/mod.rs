@@ -74,7 +74,10 @@ struct VersionNotice {
 
 struct UpdateCheckJob {
     rx: Receiver<Result<Option<crate::updater::UpdateInfo>, String>>,
-    show_latest_notice_on_none: bool,
+    /// The user asked for this check (rather than the once-a-day background
+    /// one), so it should always report back: open the update dialog if there
+    /// is one, and say so explicitly when there isn't.
+    user_initiated: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
@@ -867,7 +870,7 @@ impl AppState {
     fn start_update_check_impl(&mut self, force: bool) {
         if let Some(job) = self.update_check.as_mut() {
             if force {
-                job.show_latest_notice_on_none = true;
+                job.user_initiated = true;
             }
             return;
         }
@@ -884,7 +887,7 @@ impl AppState {
         });
         self.update_check = Some(UpdateCheckJob {
             rx,
-            show_latest_notice_on_none: force,
+            user_initiated: force,
         });
     }
 
@@ -892,7 +895,14 @@ impl AppState {
         self.start_update_check_impl(false);
     }
 
+    /// Check for updates because the user asked (they clicked the version).
     pub fn start_update_check_force(&mut self) {
+        // An update we already know about: show it straight away rather than
+        // making them wait on a network round-trip for the same answer.
+        if self.pending_update.is_some() {
+            self.update_dialog_open = true;
+            return;
+        }
         self.start_update_check_impl(true);
     }
 
@@ -1781,22 +1791,23 @@ impl AppState {
             }
         }
 
-        if let Some((show_latest_notice_on_none, res)) =
-            self.update_check.as_ref().and_then(|job| {
-                job.rx
-                    .try_recv()
-                    .ok()
-                    .map(|res| (job.show_latest_notice_on_none, res))
-            })
+        if let Some((user_initiated, res)) = self
+            .update_check
+            .as_ref()
+            .and_then(|job| job.rx.try_recv().ok().map(|res| (job.user_initiated, res)))
         {
             self.update_check = None;
             match res {
                 Ok(Some(info)) => {
-                    self.update_dialog_open = info.minor_or_major_update;
+                    // The background check only interrupts for a minor/major
+                    // release, but a check the user asked for always offers the
+                    // update — otherwise a patch release leaves "New version
+                    // available" on screen with no way to install it.
+                    self.update_dialog_open = info.minor_or_major_update || user_initiated;
                     self.pending_update = Some(info);
                 }
                 Ok(None) => {
-                    if show_latest_notice_on_none {
+                    if user_initiated {
                         self.set_version_notice("You already have the latest version");
                     }
                 }

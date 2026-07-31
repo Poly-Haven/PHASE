@@ -423,7 +423,7 @@ fn manual_update_check_with_no_release_shows_latest_notice() {
     tx.send(Ok(None)).unwrap();
     state.update_check = Some(super::UpdateCheckJob {
         rx,
-        show_latest_notice_on_none: true,
+        user_initiated: true,
     });
 
     state.pump(&egui::Context::default());
@@ -1226,6 +1226,71 @@ fn periodic_refresh_backs_off_without_fetching_while_the_login_prompt_is_open() 
     assert!(
         state.refreshing.is_empty() && state.notion_rx.is_empty(),
         "no fetch should start while logging in"
+    );
+}
+
+fn update_info(version: &str, minor_or_major_update: bool) -> crate::updater::UpdateInfo {
+    crate::updater::UpdateInfo {
+        version: version.into(),
+        tag: format!("v{version}"),
+        notes: "notes".into(),
+        minor_or_major_update,
+    }
+}
+
+/// Drive a completed update check through `pump`.
+fn pump_update_check(
+    user_initiated: bool,
+    found: Option<crate::updater::UpdateInfo>,
+) -> super::AppState {
+    let mut state = test_state();
+    let (tx, rx) = channel();
+    tx.send(Ok(found)).unwrap();
+    state.update_check = Some(super::UpdateCheckJob { rx, user_initiated });
+    state.pump(&egui::Context::default());
+    state
+}
+
+#[test]
+fn a_patch_update_the_user_asked_for_offers_the_install_dialog() {
+    let state = pump_update_check(true, Some(update_info("1.5.1", false)));
+
+    assert!(
+        state.update_dialog_open,
+        "asking for updates and being told one exists must offer a way to install it"
+    );
+    assert!(state.pending_update.is_some());
+}
+
+#[test]
+fn the_background_check_does_not_interrupt_for_a_patch_update() {
+    let state = pump_update_check(false, Some(update_info("1.5.1", false)));
+
+    assert!(!state.update_dialog_open, "a patch must not steal focus");
+    assert!(
+        state.pending_update.is_some(),
+        "but the status bar should still mention it"
+    );
+}
+
+#[test]
+fn the_background_check_still_offers_a_minor_update() {
+    let state = pump_update_check(false, Some(update_info("1.6.0", true)));
+
+    assert!(state.update_dialog_open);
+}
+
+#[test]
+fn clicking_the_version_offers_an_update_already_found() {
+    let mut state = test_state();
+    state.pending_update = Some(update_info("1.5.1", false));
+
+    state.start_update_check_force();
+
+    assert!(state.update_dialog_open);
+    assert!(
+        state.update_check.is_none(),
+        "no need to re-check the network for an answer we have"
     );
 }
 
