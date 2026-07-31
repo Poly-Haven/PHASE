@@ -52,6 +52,7 @@ fn test_state() -> super::AppState {
         token_input: String::new(),
         auth_login: None,
         auth_rx: None,
+        auth_tokens: crate::auth::shared_tokens(&Config::default()),
         logged_in_identity: None,
         settings_open: false,
         settings_local_root_input: String::new(),

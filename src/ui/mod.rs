@@ -481,6 +481,10 @@ pub struct AppState {
     pub token_input: String,
     pub auth_login: Option<BrowserLogin>,
     pub auth_rx: Option<Receiver<AuthMsg>>,
+    /// Credentials shared with background workers. Every worker refreshes
+    /// through this one lock, so concurrent fetches can't each fire their own
+    /// refresh with the same refresh token.
+    pub auth_tokens: crate::auth::SharedTokens,
     pub logged_in_identity: Option<LoggedInIdentity>,
     pub settings_open: bool,
     pub settings_local_root_input: String,
@@ -721,6 +725,7 @@ impl AppState {
         let current_type = selected_types.first().copied().unwrap_or(AssetType::Hdris);
         let author_filters = initial_author_filters(&config, &selected_types);
         let author_filter = author_filters.first().cloned().unwrap_or_default();
+        let auth_tokens = crate::auth::shared_tokens(&config);
 
         let mut s = Self {
             current_type,
@@ -753,6 +758,7 @@ impl AppState {
             token_input: String::new(),
             auth_login: None,
             auth_rx: None,
+            auth_tokens,
             logged_in_identity: None,
             settings_open: false,
             settings_local_root_input: String::new(),
@@ -1078,11 +1084,13 @@ impl AppState {
             return;
         }
         if !self.config.has_access_token() && !self.config.can_refresh_access_token() {
-            self.assets_by_type.insert(
-                t,
-                AssetListState::Error("Authentication required: please log in".into()),
+            let message = "Authentication required: please log in".to_string();
+            self.assets_by_type
+                .insert(t, AssetListState::Error(message.clone()));
+            self.require_login(
+                &format!("no stored credentials for {}", t.label()),
+                &message,
             );
-            self.token_prompt_open = true;
             return;
         }
         // If we already have data, keep showing it while the background fetch runs.
@@ -1092,32 +1100,13 @@ impl AppState {
         }
         self.refreshing.insert(t);
         let (tx, rx) = channel();
-        let mut config = self.config.clone();
+        let tokens = self.auth_tokens.clone();
         let asset_type = t.api_type().to_string();
         thread::spawn(move || {
             let res = (|| {
-                let before = (
-                    config.auth_access_token.clone(),
-                    config.auth_refresh_token.clone(),
-                    config.auth_expires_at,
-                );
-                let token = crate::auth::ensure_access_token(&mut config)?;
-                let tokens = if before
-                    != (
-                        config.auth_access_token.clone(),
-                        config.auth_refresh_token.clone(),
-                        config.auth_expires_at,
-                    ) {
-                    Some(AuthTokens {
-                        access_token: config.auth_access_token.clone(),
-                        refresh_token: config.auth_refresh_token.clone(),
-                        expires_at: config.auth_expires_at,
-                    })
-                } else {
-                    None
-                };
+                let (token, refreshed) = crate::auth::ensure_access_token_shared(&tokens)?;
                 let list = crate::notion::fetch_assets(&token, &asset_type)?;
-                Ok((list, tokens))
+                Ok((list, refreshed))
             })()
             .map_err(|e: anyhow::Error| e.to_string());
             let _ = tx.send(res);
@@ -1761,7 +1750,7 @@ impl AppState {
                     self.auth_login = Some(login);
                 }
                 AuthMsg::Success(tokens) => {
-                    crate::auth::apply_tokens(&mut self.config, &tokens);
+                    self.store_tokens(&tokens);
                     self.refresh_logged_in_identity();
                     if let Err(err) = crate::config::save(&self.config) {
                         self.error_banner = Some(format!("Failed to save login: {err}"));
@@ -1867,7 +1856,7 @@ impl AppState {
                 match res {
                     Ok((list, tokens)) => {
                         if let Some(tokens) = tokens {
-                            crate::auth::apply_tokens(&mut self.config, &tokens);
+                            self.store_tokens(&tokens);
                             self.refresh_logged_in_identity();
                             if let Err(err) = crate::config::save(&self.config) {
                                 self.error_banner =
@@ -1887,7 +1876,9 @@ impl AppState {
                     }
                     Err(msg) => {
                         if crate::auth::is_auth_required_error(&msg) {
-                            self.token_prompt_open = true;
+                            self.require_login(&format!("fetching {}", t.label()), &msg);
+                        } else {
+                            log::warn!("Fetching {} failed: {msg}", t.label());
                         }
                         self.assets_by_type.insert(t, AssetListState::Error(msg));
                     }
@@ -1934,7 +1925,7 @@ impl AppState {
                 match res {
                     Ok(tokens) => {
                         if let Some(tokens) = tokens {
-                            crate::auth::apply_tokens(&mut self.config, &tokens);
+                            self.store_tokens(&tokens);
                             self.refresh_logged_in_identity();
                             if let Err(err) = crate::config::save(&self.config) {
                                 self.error_banner =
@@ -1949,7 +1940,7 @@ impl AppState {
                     }
                     Err(msg) => {
                         if crate::auth::is_auth_required_error(&msg) {
-                            self.token_prompt_open = true;
+                            self.require_login(&format!("status update for {}", key.slug), &msg);
                         }
                         jobs::set_asset_status(self, &key, job.previous);
                         self.start_validation_for_keys(vec![key.clone()]);
@@ -1973,7 +1964,7 @@ impl AppState {
                 match res {
                     Ok(tokens) => {
                         if let Some(tokens) = tokens {
-                            crate::auth::apply_tokens(&mut self.config, &tokens);
+                            self.store_tokens(&tokens);
                             self.refresh_logged_in_identity();
                             if let Err(err) = crate::config::save(&self.config) {
                                 self.error_banner =
@@ -1999,7 +1990,7 @@ impl AppState {
                     }
                     Err(msg) => {
                         if crate::auth::is_auth_required_error(&msg) {
-                            self.token_prompt_open = true;
+                            self.require_login(&format!("title rename for {}", key.slug), &msg);
                         }
                         self.error_banner =
                             Some(format!("Title rename failed for {}: {msg}", key.slug));
@@ -2324,18 +2315,34 @@ impl AppState {
         self.settings_open = true;
     }
 
+    /// Read the signed-in user straight out of the access token's claims.
+    ///
+    /// We used to call Auth0's `/userinfo` first, but our access tokens are
+    /// minted for the PHASE API audience, which that endpoint always rejects
+    /// with a 401 — so it was a blocking request on the UI thread that only
+    /// ever fell through to these claims anyway.
     pub fn refresh_logged_in_identity(&mut self) {
         self.logged_in_identity = if self.config.has_access_token() {
-            match crate::auth::fetch_logged_in_identity(&self.config.auth_access_token) {
-                Ok(identity) => Some(identity),
-                Err(err) => {
-                    log::warn!("Failed to fetch Auth0 userinfo: {err}");
-                    crate::auth::logged_in_identity(&self.config.auth_access_token)
-                }
-            }
+            crate::auth::logged_in_identity(&self.config.auth_access_token)
         } else {
             None
         };
+    }
+
+    /// Persist refreshed credentials and share them with background workers.
+    fn store_tokens(&mut self, tokens: &AuthTokens) {
+        crate::auth::apply_tokens(&mut self.config, tokens);
+        self.auth_tokens.set(tokens);
+    }
+
+    /// Open the login prompt, recording why. Without this the prompt appeared
+    /// with no trace of what actually failed, which made re-auth loops
+    /// impossible to diagnose.
+    fn require_login(&mut self, context: &str, message: &str) {
+        if !self.token_prompt_open {
+            log::warn!("Login required ({context}): {message}");
+        }
+        self.token_prompt_open = true;
     }
 
     pub fn is_admin(&self) -> bool {

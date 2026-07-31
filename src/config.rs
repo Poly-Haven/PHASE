@@ -104,10 +104,7 @@ impl Default for Config {
 
 impl Config {
     pub fn access_token_expired_at(&self, now_unix_seconds: u64) -> bool {
-        match self.auth_expires_at {
-            Some(expires_at) => expires_at <= now_unix_seconds + 60,
-            None => true,
-        }
+        crate::auth::access_token_expired(self.auth_expires_at, now_unix_seconds)
     }
 
     pub fn can_refresh_access_token(&self) -> bool {

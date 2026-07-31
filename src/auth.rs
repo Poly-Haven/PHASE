@@ -73,10 +73,6 @@ pub fn auth0_audience() -> &'static str {
     "https://admin.polyhaven.com/api/phase"
 }
 
-pub fn userinfo_url() -> String {
-    format!("https://{AUTH0_DOMAIN}/userinfo")
-}
-
 pub fn phase_api_base_url() -> &'static str {
     #[cfg(debug_assertions)]
     {
@@ -173,8 +169,10 @@ pub fn refresh_access_token(refresh_token: &str) -> Result<AuthTokens> {
     let status = resp.status();
     let text = resp.text().unwrap_or_default();
     if !status.is_success() {
-        return Err(anyhow!(
-            "Authentication required: token refresh failed {status}: {text}"
+        return Err(token_endpoint_error(
+            "token refresh",
+            status.as_u16(),
+            &text,
         ));
     }
 
@@ -187,17 +185,143 @@ pub fn refresh_access_token(refresh_token: &str) -> Result<AuthTokens> {
     Ok(tokens)
 }
 
-pub fn ensure_access_token(config: &mut crate::config::Config) -> Result<String> {
-    if config.has_access_token() && !config.access_token_expired_at(now_unix_seconds()) {
-        return Ok(config.auth_access_token.clone());
+/// Credentials shared by the UI thread and every background worker.
+///
+/// Two locks on purpose: `tokens` is only ever held for a moment (so the UI
+/// thread never stalls on it), while `refreshing` is held for the length of a
+/// refresh request to guarantee that only one is ever in flight.
+#[derive(Debug)]
+pub struct TokenState {
+    tokens: std::sync::Mutex<AuthTokens>,
+    refreshing: std::sync::Mutex<()>,
+}
+
+pub type SharedTokens = std::sync::Arc<TokenState>;
+
+pub fn shared_tokens(config: &crate::config::Config) -> SharedTokens {
+    std::sync::Arc::new(TokenState {
+        tokens: std::sync::Mutex::new(AuthTokens {
+            access_token: config.auth_access_token.clone(),
+            refresh_token: config.auth_refresh_token.clone(),
+            expires_at: config.auth_expires_at,
+        }),
+        refreshing: std::sync::Mutex::new(()),
+    })
+}
+
+impl TokenState {
+    fn read(&self) -> AuthTokens {
+        self.tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
-    if !config.can_refresh_access_token() {
+
+    /// Replace the stored credentials (after a login or a refresh).
+    pub fn set(&self, tokens: &AuthTokens) {
+        *self
+            .tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = tokens.clone();
+    }
+
+    fn usable_access_token(&self) -> Option<String> {
+        let tokens = self.read();
+        (!tokens.access_token.trim().is_empty()
+            && !access_token_expired(tokens.expires_at, now_unix_seconds()))
+        .then_some(tokens.access_token)
+    }
+}
+
+/// Get a usable access token, refreshing once if the current one has expired.
+///
+/// Workers used to each hold their own copy of the credentials and refresh
+/// independently, so an expiry made every in-flight fetch fire its own refresh
+/// with the same refresh token — which Auth0 can read as token reuse, and which
+/// let a stale token overwrite a fresh one. Here the first caller takes the
+/// `refreshing` lock and everyone else queues behind it, then re-checks and
+/// reuses the token that caller fetched.
+///
+/// Returns the access token, plus the new credentials when a refresh actually
+/// happened so the caller can persist them.
+pub fn ensure_access_token_shared(shared: &SharedTokens) -> Result<(String, Option<AuthTokens>)> {
+    if let Some(token) = shared.usable_access_token() {
+        return Ok((token, None));
+    }
+
+    let _refreshing = shared
+        .refreshing
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    // Someone else may have refreshed while we waited for the lock.
+    if let Some(token) = shared.usable_access_token() {
+        return Ok((token, None));
+    }
+
+    let refresh_token = shared.read().refresh_token;
+    if refresh_token.trim().is_empty() {
         return Err(anyhow!("Authentication required: please log in"));
     }
 
-    let tokens = refresh_access_token(&config.auth_refresh_token)?;
-    apply_tokens(config, &tokens);
-    Ok(config.auth_access_token.clone())
+    let refreshed = refresh_access_token(&refresh_token)?;
+    shared.set(&refreshed);
+    Ok((refreshed.access_token.clone(), Some(refreshed)))
+}
+
+/// Access tokens are treated as expired slightly early so a request can't be
+/// sent with a token that dies in flight.
+const TOKEN_EXPIRY_BUFFER_SECONDS: u64 = 60;
+
+pub fn access_token_expired(expires_at: Option<u64>, now: u64) -> bool {
+    match expires_at {
+        Some(expires_at) => expires_at <= now + TOKEN_EXPIRY_BUFFER_SECONDS,
+        None => true,
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TokenErrorResponse {
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    error_description: Option<String>,
+}
+
+/// Build the error for a non-2xx token-endpoint response.
+///
+/// Only a genuinely rejected grant means the stored credential is dead and the
+/// user has to log in again — those get the "Authentication required" prefix
+/// that opens the login prompt. Rate limits and Auth0 outages are transient, so
+/// they surface as an ordinary error and the next refresh simply retries.
+fn token_endpoint_error(context: &str, status: u16, body: &str) -> anyhow::Error {
+    let parsed: TokenErrorResponse = serde_json::from_str(body).unwrap_or_default();
+    let detail = parsed
+        .error_description
+        .as_deref()
+        .or(parsed.error.as_deref())
+        .unwrap_or(body);
+    if is_permanent_grant_failure(status, parsed.error.as_deref()) {
+        anyhow!("Authentication required: {context} rejected ({status}): {detail}")
+    } else {
+        anyhow!("{context} failed ({status}): {detail}")
+    }
+}
+
+/// Whether a token-endpoint failure means the credential itself is dead
+/// (re-login required) rather than something worth retrying.
+fn is_permanent_grant_failure(status: u16, error_code: Option<&str>) -> bool {
+    // Rate limiting and server errors are always transient.
+    if status == 429 || status >= 500 {
+        return false;
+    }
+    match error_code {
+        Some("invalid_grant") | Some("invalid_client") | Some("unauthorized_client") => true,
+        // A rejection without a code we recognise still means the credential
+        // was refused; anything else (e.g. a malformed request) is not fixed by
+        // logging in again, so don't nag the user about it.
+        _ => status == 401 || status == 403,
+    }
 }
 
 pub fn apply_tokens(config: &mut crate::config::Config, tokens: &AuthTokens) {
@@ -242,75 +366,6 @@ pub fn logged_in_identity(access_token: &str) -> Option<LoggedInIdentity> {
     Some(LoggedInIdentity {
         name,
         user_id,
-        role,
-    })
-}
-
-#[derive(Debug, Deserialize)]
-struct UserInfoResponse {
-    sub: String,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    preferred_username: Option<String>,
-    #[serde(default)]
-    nickname: Option<String>,
-    #[serde(default)]
-    email: Option<String>,
-}
-
-pub fn fetch_logged_in_identity(access_token: &str) -> Result<LoggedInIdentity> {
-    let client = client()?;
-    let resp = client
-        .get(userinfo_url())
-        .bearer_auth(access_token)
-        .send()
-        .context("fetching Auth0 userinfo")?;
-
-    let status = resp.status();
-    let text = resp.text().unwrap_or_default();
-    if !status.is_success() {
-        return Err(anyhow!(
-            "Authentication required: Auth0 userinfo request failed {status}: {text}"
-        ));
-    }
-
-    let userinfo: UserInfoResponse =
-        serde_json::from_str(&text).context("parsing Auth0 userinfo response")?;
-    let claims = decode_jwt_claims(access_token);
-    let name = first_non_empty_text(&[
-        userinfo.name.as_deref(),
-        userinfo.preferred_username.as_deref(),
-        userinfo.nickname.as_deref(),
-        userinfo.email.as_deref(),
-    ])
-    .map(|value| {
-        if value.contains('@') {
-            value.split('@').next().unwrap_or(&value).to_string()
-        } else {
-            value
-        }
-    })
-    .unwrap_or_else(|| userinfo.sub.clone());
-    let role = claims
-        .as_ref()
-        .and_then(|claims| {
-            claim_string(
-                claims,
-                &[
-                    "role",
-                    "roles",
-                    "https://admin.polyhaven.com/role",
-                    "https://admin.polyhaven.com/roles",
-                    "https://polyhaven.com/role",
-                    "https://polyhaven.com/roles",
-                ],
-            )
-        })
-        .unwrap_or_else(|| "Unknown".to_string());
-    Ok(LoggedInIdentity {
-        name,
-        user_id: userinfo.sub,
         role,
     })
 }
@@ -512,15 +567,6 @@ fn claim_string(claims: &serde_json::Value, keys: &[&str]) -> Option<String> {
     None
 }
 
-fn first_non_empty_text<'a>(values: &[Option<&'a str>]) -> Option<String> {
-    values
-        .iter()
-        .flatten()
-        .map(|value| value.trim())
-        .find(|value| !value.is_empty())
-        .map(ToString::to_string)
-}
-
 fn client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -664,43 +710,105 @@ mod tests {
     }
 
     #[test]
-    fn fetch_logged_in_identity_uses_userinfo_name_when_available() {
-        let payload = serde_json::json!({
-            "sub": "auth0|abc123",
-            "role": "editor",
-        });
-        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
-        let token = format!("header.{payload}.signature");
+    fn only_a_rejected_grant_forces_a_new_login() {
+        // A dead or revoked refresh token: the stored credential is useless.
+        assert!(is_permanent_grant_failure(403, Some("invalid_grant")));
+        assert!(is_permanent_grant_failure(401, Some("invalid_grant")));
+        assert!(is_permanent_grant_failure(400, Some("invalid_client")));
+        // A rejection we don't have a code for is still a rejection.
+        assert!(is_permanent_grant_failure(401, None));
 
-        let userinfo = UserInfoResponse {
-            sub: "auth0|abc123".into(),
-            name: Some("Ada Lovelace".into()),
-            preferred_username: None,
-            nickname: None,
-            email: Some("ada@example.com".into()),
-        };
-        let claims = decode_jwt_claims(&token).unwrap();
-        let name = first_non_empty_text(&[
-            userinfo.name.as_deref(),
-            userinfo.preferred_username.as_deref(),
-            userinfo.nickname.as_deref(),
-            userinfo.email.as_deref(),
-        ])
-        .unwrap();
-        assert_eq!(name, "Ada Lovelace");
-        assert_eq!(
-            claim_string(
-                &claims,
-                &[
-                    "role",
-                    "roles",
-                    "https://admin.polyhaven.com/role",
-                    "https://admin.polyhaven.com/roles",
-                    "https://polyhaven.com/role",
-                    "https://polyhaven.com/roles",
-                ],
-            ),
-            Some("editor".into())
+        // Transient: retrying later works, so don't make the user log in again.
+        assert!(!is_permanent_grant_failure(429, Some("too_many_requests")));
+        assert!(!is_permanent_grant_failure(500, None));
+        assert!(!is_permanent_grant_failure(503, None));
+        // Even a 429 that somehow carries a grant error is still a rate limit.
+        assert!(!is_permanent_grant_failure(429, Some("invalid_grant")));
+        // A malformed request isn't fixed by logging in.
+        assert!(!is_permanent_grant_failure(400, Some("invalid_request")));
+    }
+
+    #[test]
+    fn only_permanent_failures_get_the_prefix_that_opens_the_login_prompt() {
+        let permanent = token_endpoint_error(
+            "token refresh",
+            403,
+            r#"{"error":"invalid_grant","error_description":"Unknown or invalid refresh token."}"#,
         );
+        assert!(is_auth_required_error(&permanent.to_string()));
+        assert!(permanent.to_string().contains("Unknown or invalid refresh"));
+
+        let transient = token_endpoint_error("token refresh", 429, "Too Many Requests");
+        assert!(
+            !is_auth_required_error(&transient.to_string()),
+            "a rate limit must not prompt for login: {transient}"
+        );
+
+        let outage = token_endpoint_error("token refresh", 503, "");
+        assert!(!is_auth_required_error(&outage.to_string()));
+    }
+
+    fn shared(access_token: &str, refresh_token: &str, expires_at: Option<u64>) -> SharedTokens {
+        shared_tokens(&crate::config::Config {
+            auth_access_token: access_token.into(),
+            auth_refresh_token: refresh_token.into(),
+            auth_expires_at: expires_at,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_valid_shared_token_is_reused_without_contacting_auth0() {
+        // Comfortably beyond the early-expiry buffer.
+        let tokens = shared("still-good", "refresh", Some(now_unix_seconds() + 3600));
+
+        let (token, refreshed) = ensure_access_token_shared(&tokens).unwrap();
+
+        assert_eq!(token, "still-good");
+        assert!(
+            refreshed.is_none(),
+            "an unexpired token must not trigger a refresh"
+        );
+    }
+
+    #[test]
+    fn without_a_refresh_token_the_user_is_asked_to_log_in() {
+        let tokens = shared("", "", None);
+
+        let err = ensure_access_token_shared(&tokens).unwrap_err();
+
+        assert!(is_auth_required_error(&err.to_string()));
+    }
+
+    /// The UI thread persists credentials while workers are running, so its
+    /// update must never be blocked by an in-flight refresh.
+    #[test]
+    fn storing_tokens_does_not_wait_on_a_refresh_in_flight() {
+        let tokens = shared("expired", "refresh", Some(0));
+        let held = tokens.refreshing.lock().unwrap();
+
+        let updated = AuthTokens {
+            access_token: "from-login".into(),
+            refresh_token: "new-refresh".into(),
+            expires_at: Some(now_unix_seconds() + 3600),
+        };
+        tokens.set(&updated);
+        assert_eq!(tokens.read().access_token, "from-login");
+        assert_eq!(
+            ensure_access_token_shared(&tokens).unwrap(),
+            ("from-login".into(), None),
+            "the freshly stored token should be used without refreshing"
+        );
+
+        drop(held);
+    }
+
+    #[test]
+    fn tokens_are_treated_as_expired_early_so_requests_cannot_race_the_clock() {
+        // Expires in 30s — inside the buffer, so refresh before using it.
+        assert!(access_token_expired(Some(1_030), 1_000));
+        assert!(!access_token_expired(Some(1_120), 1_000));
+        // No recorded expiry means we can't trust it.
+        assert!(access_token_expired(None, 1_000));
     }
 }

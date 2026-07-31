@@ -7,7 +7,6 @@ use super::{
     AppState, AssetListState, AssetType, ConflictChoice, PlanJob, RowJob, RowKey, StatusUpdateJob,
     TitleRenameJob, TransferAction, TransferKind,
 };
-use crate::auth::AuthTokens;
 use crate::copy::job::JobProgress;
 use crate::copy::plan::{build_archive_plan, Action, Direction, Plan, PullFilterMode};
 use crate::notion::{AssetStatus, StatusOption};
@@ -147,33 +146,14 @@ pub fn start_status_update(
     let previous = set_asset_status(state, key, Some(status_from_option(&requested)));
     state.start_validation_for_keys(vec![key.clone()]);
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut config = state.config.clone();
+    let tokens = state.auth_tokens.clone();
     let page_id = page_id.to_string();
     let requested_for_thread = requested.clone();
     thread::spawn(move || {
         let res = (|| {
-            let before = (
-                config.auth_access_token.clone(),
-                config.auth_refresh_token.clone(),
-                config.auth_expires_at,
-            );
-            let token = crate::auth::ensure_access_token(&mut config)?;
+            let (token, refreshed) = crate::auth::ensure_access_token_shared(&tokens)?;
             crate::notion::update_page_status(&token, &page_id, &requested_for_thread)?;
-            let tokens = if before
-                != (
-                    config.auth_access_token.clone(),
-                    config.auth_refresh_token.clone(),
-                    config.auth_expires_at,
-                ) {
-                Some(AuthTokens {
-                    access_token: config.auth_access_token.clone(),
-                    refresh_token: config.auth_refresh_token.clone(),
-                    expires_at: config.auth_expires_at,
-                })
-            } else {
-                None
-            };
-            Ok(tokens)
+            Ok(refreshed)
         })()
         .map_err(|e: anyhow::Error| e.to_string());
         let _ = tx.send(res);
@@ -193,34 +173,15 @@ pub fn start_title_rename(state: &mut AppState, key: &RowKey, page_id: &str, new
         return;
     }
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut config = state.config.clone();
+    let tokens = state.auth_tokens.clone();
     let page_id = page_id.to_string();
     let new_title_str = new_title.to_string();
     let new_title_for_job = new_title_str.clone();
     thread::spawn(move || {
         let res = (|| {
-            let before = (
-                config.auth_access_token.clone(),
-                config.auth_refresh_token.clone(),
-                config.auth_expires_at,
-            );
-            let token = crate::auth::ensure_access_token(&mut config)?;
+            let (token, refreshed) = crate::auth::ensure_access_token_shared(&tokens)?;
             crate::notion::rename_page_title(&token, &page_id, &new_title_str)?;
-            let tokens = if before
-                != (
-                    config.auth_access_token.clone(),
-                    config.auth_refresh_token.clone(),
-                    config.auth_expires_at,
-                ) {
-                Some(AuthTokens {
-                    access_token: config.auth_access_token.clone(),
-                    refresh_token: config.auth_refresh_token.clone(),
-                    expires_at: config.auth_expires_at,
-                })
-            } else {
-                None
-            };
-            Ok(tokens)
+            Ok(refreshed)
         })()
         .map_err(|e: anyhow::Error| e.to_string());
         let _ = tx.send(res);
