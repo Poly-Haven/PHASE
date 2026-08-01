@@ -593,8 +593,8 @@ fn draw_dialog_contents(
     .collapsible(false)
     .resizable(true)
     .default_size(egui::vec2(
-        layout::UPDATE_DIALOG_WIDTH,
-        layout::UPDATE_DIALOG_SCROLL_HEIGHT,
+        layout::SCRIPT_OUTPUT_DIALOG_WIDTH,
+        layout::SCRIPT_OUTPUT_DIALOG_HEIGHT,
     ))
     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
     .show(ctx, |ui| {

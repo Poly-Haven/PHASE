@@ -126,5 +126,14 @@ impl eframe::App for App {
         }
         cfg.window_pos = self.last_window_pos.map(|p| [p.x, p.y]);
         let _ = config::save(&cfg);
+
+        // The update already replaced our executable on disk, so simply
+        // starting PHASE again runs the new version.
+        if self.state.restart_requested {
+            log::info!("Restarting PHASE to apply the installed update");
+            if let Err(err) = updater::relaunch() {
+                log::error!("Failed to restart PHASE: {err}");
+            }
+        }
     }
 }

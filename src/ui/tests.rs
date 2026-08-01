@@ -80,10 +80,13 @@ fn test_state() -> super::AppState {
         validation_job: None,
         visible_validation_scope: super::VisibleValidationScope::default(),
         update_check: None,
-        pending_update: None,
+        next_update_check_at: Instant::now() + std::time::Duration::from_secs(3600),
         version_notice: None,
-        update_dialog_open: false,
         update_install: None,
+        staged_update: None,
+        restart_requested: false,
+        changelog_rx: None,
+        changelog: None,
         transfer_estimates: HashMap::new(),
         transfer_estimate_jobs: HashMap::new(),
         script_jobs: HashMap::new(),
@@ -115,6 +118,22 @@ fn render_text_shapes(state: &mut super::AppState) -> Vec<(String, Pos2, Option<
     let mut texts = Vec::new();
     collect_text_shapes(&output.shapes, &mut texts);
     texts
+}
+
+/// As above, but over two frames on one context: `egui::Window` only knows
+/// where it belongs once it has measured itself, so it paints nothing on the
+/// very first frame.
+fn render_settled_text_shapes(state: &mut super::AppState) -> Vec<String> {
+    let ctx = egui::Context::default();
+    let input = || RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0))),
+        ..Default::default()
+    };
+    let _ = ctx.run(input(), |ctx| super::draw(state, ctx));
+    let output = ctx.run(input(), |ctx| super::draw(state, ctx));
+    let mut texts = Vec::new();
+    collect_text_shapes(&output.shapes, &mut texts);
+    texts.into_iter().map(|(text, _, _)| text).collect()
 }
 
 fn collect_text_shapes(shapes: &[ClippedShape], texts: &mut Vec<(String, Pos2, Option<Color32>)>) {
@@ -366,19 +385,6 @@ fn persisting_author_filters_partitions_selection_by_asset_type() {
 }
 
 #[test]
-fn update_check_runs_only_once_per_day() {
-    assert!(super::should_check_for_update(None, 42));
-    assert!(super::should_check_for_update(Some(41), 42));
-    assert!(!super::should_check_for_update(Some(42), 42));
-}
-
-#[test]
-fn force_update_check_bypasses_the_daily_gate() {
-    assert!(!super::should_force_update_check(false, Some(42), 42));
-    assert!(super::should_force_update_check(true, Some(42), 42));
-}
-
-#[test]
 fn version_notice_expires_after_ten_seconds() {
     let mut state = test_state();
     let now = Instant::now();
@@ -392,28 +398,6 @@ fn version_notice_expires_after_ten_seconds() {
 
     state.clear_expired_version_notice(now + std::time::Duration::from_secs(10));
     assert!(state.version_notice.is_none());
-}
-
-#[test]
-fn latest_update_tag_for_install_uses_the_fresh_lookup_result() {
-    let tag = super::latest_update_tag_for_install(|| {
-        Ok(Some(crate::updater::UpdateInfo {
-            version: "1.2.4".into(),
-            tag: "v1.2.4".into(),
-            notes: String::new(),
-            minor_or_major_update: false,
-        }))
-    })
-    .unwrap();
-
-    assert_eq!(tag, "v1.2.4");
-}
-
-#[test]
-fn latest_update_tag_for_install_errors_when_no_update_exists() {
-    let err = super::latest_update_tag_for_install(|| Ok(None)).unwrap_err();
-
-    assert_eq!(err, "No newer update found");
 }
 
 #[test]
@@ -1233,64 +1217,215 @@ fn update_info(version: &str, minor_or_major_update: bool) -> crate::updater::Up
     crate::updater::UpdateInfo {
         version: version.into(),
         tag: format!("v{version}"),
-        notes: "notes".into(),
         minor_or_major_update,
     }
 }
 
-/// Drive a completed update check through `pump`.
-fn pump_update_check(
-    user_initiated: bool,
-    found: Option<crate::updater::UpdateInfo>,
-) -> super::AppState {
+fn staged(version: &str, minor_or_major: bool) -> super::StagedUpdate {
+    super::StagedUpdate {
+        version: version.into(),
+        minor_or_major,
+    }
+}
+
+#[test]
+fn a_newly_found_update_is_installed_without_asking() {
+    assert_eq!(
+        super::update_check_outcome(Some(&update_info("1.6.1", false)), None),
+        super::UpdateCheckOutcome::Install,
+        "even a patch installs itself, so the team stays current"
+    );
+}
+
+#[test]
+fn an_update_already_installed_is_not_downloaded_again() {
+    assert_eq!(
+        super::update_check_outcome(
+            Some(&update_info("1.7.0", true)),
+            Some(&staged("1.7.0", true)),
+        ),
+        super::UpdateCheckOutcome::AlreadyStaged,
+        "the hourly check must not reinstall the same release all day"
+    );
+}
+
+#[test]
+fn a_release_newer_than_the_staged_one_is_installed_over_it() {
+    assert_eq!(
+        super::update_check_outcome(
+            Some(&update_info("1.8.0", true)),
+            Some(&staged("1.7.0", true)),
+        ),
+        super::UpdateCheckOutcome::Install
+    );
+}
+
+#[test]
+fn finding_nothing_leaves_the_staged_update_alone() {
+    assert_eq!(
+        super::update_check_outcome(None, Some(&staged("1.7.0", true))),
+        super::UpdateCheckOutcome::UpToDate
+    );
+}
+
+#[test]
+fn a_finished_install_is_staged_for_the_next_start() {
     let mut state = test_state();
     let (tx, rx) = channel();
-    tx.send(Ok(found)).unwrap();
-    state.update_check = Some(super::UpdateCheckJob { rx, user_initiated });
+    tx.send(Ok(())).unwrap();
+    state.update_install = Some(super::UpdateInstallJob {
+        rx,
+        version: "1.7.0".into(),
+        minor_or_major: true,
+        user_initiated: false,
+    });
+
     state.pump(&egui::Context::default());
-    state
-}
 
-#[test]
-fn a_patch_update_the_user_asked_for_offers_the_install_dialog() {
-    let state = pump_update_check(true, Some(update_info("1.5.1", false)));
-
+    assert_eq!(state.staged_update, Some(staged("1.7.0", true)));
+    assert!(state.update_install.is_none());
     assert!(
-        state.update_dialog_open,
-        "asking for updates and being told one exists must offer a way to install it"
-    );
-    assert!(state.pending_update.is_some());
-}
-
-#[test]
-fn the_background_check_does_not_interrupt_for_a_patch_update() {
-    let state = pump_update_check(false, Some(update_info("1.5.1", false)));
-
-    assert!(!state.update_dialog_open, "a patch must not steal focus");
-    assert!(
-        state.pending_update.is_some(),
-        "but the status bar should still mention it"
+        state.error_banner.is_none(),
+        "a background update must not interrupt the window"
     );
 }
 
 #[test]
-fn the_background_check_still_offers_a_minor_update() {
-    let state = pump_update_check(false, Some(update_info("1.6.0", true)));
-
-    assert!(state.update_dialog_open);
-}
-
-#[test]
-fn clicking_the_version_offers_an_update_already_found() {
+fn a_failed_background_install_stays_out_of_the_way() {
     let mut state = test_state();
-    state.pending_update = Some(update_info("1.5.1", false));
+    let (tx, rx) = channel();
+    tx.send(Err("offline".into())).unwrap();
+    state.update_install = Some(super::UpdateInstallJob {
+        rx,
+        version: "1.7.0".into(),
+        minor_or_major: true,
+        user_initiated: false,
+    });
 
-    state.start_update_check_force();
+    state.pump(&egui::Context::default());
 
-    assert!(state.update_dialog_open);
+    assert!(state.staged_update.is_none());
+    assert!(state.error_banner.is_none());
+    assert!(state.version_notice.is_none());
+}
+
+#[test]
+fn only_a_minor_or_major_update_asks_for_a_restart() {
+    let restart = "A new version is available, click to restart";
+
+    assert_eq!(
+        super::version_status_label("v1.6.0", None, Some(&staged("1.7.0", true)), false),
+        restart
+    );
+    assert_eq!(
+        super::version_status_label("v1.6.0", None, Some(&staged("1.6.1", false)), false),
+        "v1.6.0",
+        "a patch applies itself quietly on the next start"
+    );
+    assert_eq!(
+        super::version_status_label("v1.6.0", None, None, false),
+        "v1.6.0"
+    );
+    assert_eq!(
+        super::version_status_label("v1.6.0", None, Some(&staged("1.7.0", true)), true),
+        "Installing update..."
+    );
+    assert_eq!(
+        super::version_status_label(
+            "v1.6.0",
+            Some("Checked"),
+            Some(&staged("1.7.0", true)),
+            false
+        ),
+        "Checked",
+        "a transient notice wins while it lasts"
+    );
+}
+
+#[test]
+fn a_restart_waits_for_transfers_to_finish() {
+    let mut state = test_state();
+    state.staged_update = Some(staged("1.7.0", true));
+    let (_tx, rx) = channel();
+    state.plan_jobs.insert(
+        super::RowKey {
+            asset_type: super::AssetType::Hdris,
+            slug: "busy".into(),
+        },
+        super::PlanJob {
+            kind: TransferKind::Push,
+            rx,
+        },
+    );
+
+    state.request_restart();
+
     assert!(
-        state.update_check.is_none(),
-        "no need to re-check the network for an answer we have"
+        !state.restart_requested,
+        "restarting mid-copy would abandon the transfer"
+    );
+    assert!(state.version_notice.is_some());
+}
+
+#[test]
+fn a_restart_when_idle_closes_the_window() {
+    let mut state = test_state();
+    state.staged_update = Some(staged("1.7.0", true));
+
+    state.request_restart();
+
+    assert!(state.restart_requested);
+}
+
+#[test]
+fn the_changelog_is_shown_once_and_the_version_recorded() {
+    let mut state = test_state();
+
+    state.apply_changelog(vec![crate::updater::ReleaseNotes {
+        version: "1.7.0".into(),
+        notes: "### Fixes\n- Thumbnails refresh again".into(),
+    }]);
+
+    let changelog = state.changelog.as_ref().expect("expected a changelog");
+    assert_eq!(changelog.entries.len(), 1);
+    assert_eq!(changelog.entries[0].version, "1.7.0");
+    assert_eq!(
+        state.config.last_run_version.as_deref(),
+        Some(crate::updater::current_version()),
+        "so it does not reappear on the next start"
+    );
+}
+
+#[test]
+fn the_changelog_dialog_renders_the_notes_it_was_given() {
+    let mut state = test_state();
+    state.changelog = Some(super::changelog::Changelog::from_releases(vec![
+        crate::updater::ReleaseNotes {
+            version: "1.7.0".into(),
+            notes: "### Fixes\n- **Updates** install themselves".into(),
+        },
+    ]));
+
+    let rendered = render_settled_text_shapes(&mut state);
+
+    for expected in ["What's new", "Fixes", "Updates", " install themselves"] {
+        assert!(
+            rendered.iter().any(|text| text.contains(expected)),
+            "expected {expected:?} in {rendered:?}"
+        );
+    }
+}
+
+#[test]
+fn an_unpublished_local_build_is_not_recorded_as_seen() {
+    let mut state = test_state();
+
+    state.apply_changelog(Vec::new());
+
+    assert!(state.changelog.is_none());
+    assert_eq!(
+        state.config.last_run_version, None,
+        "the real release should still get to introduce itself"
     );
 }
 

@@ -51,9 +51,10 @@ pub struct Config {
     /// Last selected status group filters (e.g. ["InProgress", "ToDo"]).
     #[serde(default)]
     pub last_selected_status_groups: Vec<crate::notion::StatusGroup>,
-    /// UTC day number (`unix_seconds / 86400`) when update checks last ran.
+    /// PHASE version the user was last shown release notes for. Drives the
+    /// "What's new" dialog after an update installs itself.
     #[serde(default)]
-    pub last_update_check_day: Option<u64>,
+    pub last_run_version: Option<String>,
 }
 
 fn default_prod_root() -> PathBuf {
@@ -97,7 +98,7 @@ impl Default for Config {
             last_selected_status_groups: Vec::new(),
             window_size: None,
             window_pos: None,
-            last_update_check_day: None,
+            last_run_version: None,
         }
     }
 }

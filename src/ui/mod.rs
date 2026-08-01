@@ -1,5 +1,6 @@
 mod asset_types;
 mod authors;
+mod changelog;
 pub mod colors;
 mod dialogs;
 mod file_watcher;
@@ -38,6 +39,14 @@ use crate::notion::{Asset, AssetList, AssetStatus, StatusOption};
 
 const VERSION_NOTICE_DURATION: Duration = Duration::from_secs(10);
 
+/// How often PHASE looks for a newer release. It also checks once on startup,
+/// so a machine that is opened and closed all day still keeps up.
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(3600);
+
+/// Debug builds run straight out of `target\debug`; installing a release
+/// binary over that mid-development would be a nasty surprise.
+const AUTO_UPDATE_ENABLED: bool = !cfg!(debug_assertions);
+
 /// How often the asset lists are re-fetched in the background, so the table is
 /// already up to date when the window is focused rather than refreshing then.
 const NOTION_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
@@ -74,10 +83,44 @@ struct VersionNotice {
 
 struct UpdateCheckJob {
     rx: Receiver<Result<Option<crate::updater::UpdateInfo>, String>>,
-    /// The user asked for this check (rather than the once-a-day background
-    /// one), so it should always report back: open the update dialog if there
-    /// is one, and say so explicitly when there isn't.
+    /// The user asked for this check (rather than the hourly background one),
+    /// so it should report back either way rather than working in silence.
     user_initiated: bool,
+}
+
+/// A newer PHASE already downloaded and written over our own executable. The
+/// running process is unaffected; the new one takes over on the next start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StagedUpdate {
+    pub version: String,
+    /// Worth telling the user about in the status bar. Patches are staged
+    /// silently and simply turn up next time PHASE is opened.
+    pub minor_or_major: bool,
+}
+
+/// What a finished update check means for the version we are already holding.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum UpdateCheckOutcome {
+    /// Download and install it now.
+    Install,
+    /// We already installed exactly this version; wait for a restart.
+    AlreadyStaged,
+    /// Nothing newer than what is running.
+    UpToDate,
+}
+
+fn update_check_outcome(
+    found: Option<&crate::updater::UpdateInfo>,
+    staged: Option<&StagedUpdate>,
+) -> UpdateCheckOutcome {
+    let Some(found) = found else {
+        return UpdateCheckOutcome::UpToDate;
+    };
+    if staged.is_some_and(|staged| staged.version == found.version) {
+        UpdateCheckOutcome::AlreadyStaged
+    } else {
+        UpdateCheckOutcome::Install
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
@@ -298,6 +341,14 @@ pub struct TitleRenameJob {
 
 pub struct UpdateInstallJob {
     pub rx: Receiver<Result<(), String>>,
+    pub version: String,
+    pub minor_or_major: bool,
+    /// Installing because the user clicked the version, so tell them how it went.
+    pub user_initiated: bool,
+}
+
+pub struct ChangelogJob {
+    pub rx: Receiver<Result<Vec<crate::updater::ReleaseNotes>, String>>,
 }
 
 pub struct ValidationJob {
@@ -534,10 +585,18 @@ pub struct AppState {
     pub validation_job: Option<ValidationJob>,
     pub visible_validation_scope: VisibleValidationScope,
     update_check: Option<UpdateCheckJob>,
-    pub pending_update: Option<crate::updater::UpdateInfo>,
+    /// When the next hourly update check is due.
+    pub next_update_check_at: Instant,
     version_notice: Option<VersionNotice>,
-    pub update_dialog_open: bool,
     pub update_install: Option<UpdateInstallJob>,
+    /// A newer PHASE sitting on disk, waiting for a restart.
+    pub staged_update: Option<StagedUpdate>,
+    /// Set once the user asks to restart into the staged update; `draw` closes
+    /// the window and `on_exit` starts the new process.
+    pub restart_requested: bool,
+    pub changelog_rx: Option<ChangelogJob>,
+    /// Notes for versions installed since the user last ran PHASE.
+    pub changelog: Option<changelog::Changelog>,
     pub transfer_estimates: HashMap<(RowKey, TransferAction), ActionPreview>,
     pub transfer_estimate_jobs: HashMap<(RowKey, TransferAction), TransferEstimateJob>,
     pub script_jobs: HashMap<scripts::ScriptKey, scripts::ScriptJob>,
@@ -685,13 +744,6 @@ fn discover_orphans(
     found.into_values().collect()
 }
 
-fn current_update_check_day() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs() / 86_400)
-        .unwrap_or(0)
-}
-
 fn thumbnail_cache_root() -> PathBuf {
     match crate::config::cache_dir() {
         Ok(dir) => dir.join("thumbnails"),
@@ -709,16 +761,9 @@ fn thumbnail_cache_root() -> PathBuf {
     }
 }
 
-fn should_check_for_update(last_check_day: Option<u64>, current_day: u64) -> bool {
-    last_check_day != Some(current_day)
-}
-
-fn should_force_update_check(force: bool, last_check_day: Option<u64>, current_day: u64) -> bool {
-    force || should_check_for_update(last_check_day, current_day)
-}
-
 impl AppState {
     pub fn new(config: Config) -> Self {
+        let last_run_version = config.last_run_version.clone();
         let selected_types = if config.last_asset_types.is_empty() {
             asset_types::from_labels(&[config.last_tab.clone()])
         } else {
@@ -794,10 +839,13 @@ impl AppState {
             validation_job: None,
             visible_validation_scope: VisibleValidationScope::default(),
             update_check: None,
-            pending_update: None,
+            next_update_check_at: Instant::now() + UPDATE_CHECK_INTERVAL,
             version_notice: None,
-            update_dialog_open: false,
             update_install: None,
+            staged_update: None,
+            restart_requested: false,
+            changelog_rx: None,
+            changelog: None,
             transfer_estimates: HashMap::new(),
             transfer_estimate_jobs: HashMap::new(),
             script_jobs: HashMap::new(),
@@ -830,6 +878,7 @@ impl AppState {
         s.rebuild_prod_folder_cache();
         s.start_thumbnail_cleanup();
         s.start_update_check();
+        s.start_changelog_fetch(last_run_version.as_deref());
         s
     }
 
@@ -867,28 +916,28 @@ impl AppState {
             .collect()
     }
 
-    fn start_update_check_impl(&mut self, force: bool) {
-        if let Some(job) = self.update_check.as_mut() {
-            if force {
-                job.user_initiated = true;
+    fn start_update_check_impl(&mut self, user_initiated: bool) {
+        self.next_update_check_at = Instant::now() + UPDATE_CHECK_INTERVAL;
+        if !AUTO_UPDATE_ENABLED {
+            if user_initiated {
+                self.set_version_notice("Updates are disabled in debug builds");
             }
             return;
         }
-        let today = current_update_check_day();
-        if !should_force_update_check(force, self.config.last_update_check_day, today) {
+        // An install already covers the check that started it.
+        if self.update_install.is_some() {
             return;
         }
-        self.config.last_update_check_day = Some(today);
-        let _ = crate::config::save(&self.config);
+        if let Some(job) = self.update_check.as_mut() {
+            job.user_initiated |= user_initiated;
+            return;
+        }
         let (tx, rx) = channel();
         thread::spawn(move || {
             let res = crate::updater::check_for_update().map_err(|err| err.to_string());
             let _ = tx.send(res);
         });
-        self.update_check = Some(UpdateCheckJob {
-            rx,
-            user_initiated: force,
-        });
+        self.update_check = Some(UpdateCheckJob { rx, user_initiated });
     }
 
     fn start_update_check(&mut self) {
@@ -897,30 +946,84 @@ impl AppState {
 
     /// Check for updates because the user asked (they clicked the version).
     pub fn start_update_check_force(&mut self) {
-        // An update we already know about: show it straight away rather than
-        // making them wait on a network round-trip for the same answer.
-        if self.pending_update.is_some() {
-            self.update_dialog_open = true;
-            return;
-        }
         self.start_update_check_impl(true);
     }
 
-    pub fn start_update_install(&mut self) {
+    /// Fetch and install `info` over our own executable. It takes effect the
+    /// next time PHASE starts, so this never interrupts what is on screen.
+    fn start_update_install(&mut self, info: crate::updater::UpdateInfo, user_initiated: bool) {
         if self.update_install.is_some() {
             return;
         }
+        log::info!("Installing PHASE {} in the background", info.tag);
+        let tag = info.tag.clone();
         let (tx, rx) = channel();
         thread::spawn(move || {
-            let res = latest_update_tag_for_install(|| {
-                crate::updater::check_for_update().map_err(|err| err.to_string())
-            })
-            .and_then(|tag| {
-                crate::updater::install_update_and_restart(&tag).map_err(|err| err.to_string())
-            });
+            let res = crate::updater::install_update(&tag).map_err(|err| err.to_string());
             let _ = tx.send(res);
         });
-        self.update_install = Some(UpdateInstallJob { rx });
+        self.update_install = Some(UpdateInstallJob {
+            rx,
+            version: info.version,
+            minor_or_major: info.minor_or_major_update,
+            user_initiated,
+        });
+    }
+
+    /// Record a finished install. Kept separate from `pump` so tests can drive
+    /// it without a network round-trip.
+    fn stage_installed_update(&mut self, staged: StagedUpdate) {
+        log::info!(
+            "Installed PHASE v{}; it will be used the next time PHASE starts",
+            staged.version
+        );
+        self.staged_update = Some(staged);
+    }
+
+    /// Restart into a staged update, unless that would abandon a transfer.
+    pub fn request_restart(&mut self) {
+        if self.transfers_in_flight() {
+            self.set_version_notice("Transfers are running - restart when they finish");
+            return;
+        }
+        self.restart_requested = true;
+    }
+
+    fn transfers_in_flight(&self) -> bool {
+        !self.jobs.is_empty()
+            || !self.plan_jobs.is_empty()
+            || !self.verifications.is_empty()
+            || !self.archive_deletes.is_empty()
+    }
+
+    /// Fetch the notes for every version installed since `last_run_version`.
+    fn start_changelog_fetch(&mut self, last_run_version: Option<&str>) {
+        if self.changelog_rx.is_some() || !crate::updater::changelog_is_due(last_run_version) {
+            return;
+        }
+        let previous = last_run_version.map(str::to_string);
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            let res =
+                crate::updater::changelog_since(previous.as_deref()).map_err(|err| err.to_string());
+            let _ = tx.send(res);
+        });
+        self.changelog_rx = Some(ChangelogJob { rx });
+    }
+
+    /// Show what changed and remember that we did, so it appears exactly once.
+    /// Persisting is left to the caller so tests stay off disk.
+    ///
+    /// No releases at all means this version was never published — a local
+    /// build — so nothing is recorded and the real release still gets to
+    /// introduce itself.
+    fn apply_changelog(&mut self, releases: Vec<crate::updater::ReleaseNotes>) {
+        let changelog = changelog::Changelog::from_releases(releases);
+        if changelog.entries.is_empty() {
+            return;
+        }
+        self.config.last_run_version = Some(crate::updater::current_version().to_string());
+        self.changelog = Some(changelog);
     }
 
     fn clear_expired_version_notice(&mut self, now: Instant) {
@@ -1791,6 +1894,10 @@ impl AppState {
             }
         }
 
+        if Instant::now() >= self.next_update_check_at {
+            self.start_update_check();
+        }
+
         if let Some((user_initiated, res)) = self
             .update_check
             .as_ref()
@@ -1798,33 +1905,85 @@ impl AppState {
         {
             self.update_check = None;
             match res {
-                Ok(Some(info)) => {
-                    // The background check only interrupts for a minor/major
-                    // release, but a check the user asked for always offers the
-                    // update — otherwise a patch release leaves "New version
-                    // available" on screen with no way to install it.
-                    self.update_dialog_open = info.minor_or_major_update || user_initiated;
-                    self.pending_update = Some(info);
-                }
-                Ok(None) => {
-                    if user_initiated {
-                        self.set_version_notice("You already have the latest version");
+                Ok(found) => {
+                    // Updates install themselves; the only question is whether
+                    // this is one we are already holding.
+                    let outcome = update_check_outcome(found.as_ref(), self.staged_update.as_ref());
+                    match outcome {
+                        UpdateCheckOutcome::Install => {
+                            if let Some(info) = found {
+                                self.start_update_install(info, user_initiated);
+                            }
+                        }
+                        UpdateCheckOutcome::AlreadyStaged => {
+                            if user_initiated {
+                                self.set_version_notice("Update ready - restart to apply it");
+                            }
+                        }
+                        UpdateCheckOutcome::UpToDate => {
+                            if user_initiated {
+                                self.set_version_notice("You already have the latest version");
+                            }
+                        }
                     }
                 }
                 Err(msg) => {
                     log::warn!("Update check failed: {msg}");
+                    if user_initiated {
+                        self.set_version_notice("Could not check for updates");
+                    }
+                }
+            }
+        }
+
+        let installed = self.update_install.as_ref().and_then(|job| {
+            job.rx.try_recv().ok().map(|res| {
+                let staged = StagedUpdate {
+                    version: job.version.clone(),
+                    minor_or_major: job.minor_or_major,
+                };
+                (staged, job.user_initiated, res)
+            })
+        });
+        if let Some((staged, user_initiated, res)) = installed {
+            self.update_install = None;
+            match res {
+                Ok(()) => {
+                    if user_initiated {
+                        self.set_version_notice(format!(
+                            "Updated to v{} - restart to apply",
+                            staged.version
+                        ));
+                    }
+                    self.stage_installed_update(staged);
+                }
+                Err(msg) => {
+                    // Nobody asked for this, so a failed background install is
+                    // a log line rather than a banner across the window.
+                    log::warn!("Installing PHASE v{} failed: {msg}", staged.version);
+                    if user_initiated {
+                        self.set_version_notice("Update failed - see phase.log");
+                    }
                 }
             }
         }
 
         if let Some(res) = self
-            .update_install
+            .changelog_rx
             .as_ref()
             .and_then(|job| job.rx.try_recv().ok())
         {
-            self.update_install = None;
-            if let Err(msg) = res {
-                self.error_banner = Some(format!("Update failed: {msg}"));
+            self.changelog_rx = None;
+            match res {
+                Ok(releases) => {
+                    self.apply_changelog(releases);
+                    // Recorded only now, so an offline start tries again later
+                    // rather than swallowing the notes.
+                    if let Err(err) = crate::config::save(&self.config) {
+                        log::warn!("Failed to record the version last run: {err}");
+                    }
+                }
+                Err(msg) => log::warn!("Could not fetch release notes: {msg}"),
             }
         }
 
@@ -2695,16 +2854,6 @@ fn components_eq_ci(a: std::path::Component, b: std::path::Component) -> bool {
         .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy())
 }
 
-pub(super) fn latest_update_tag_for_install<F>(lookup: F) -> Result<String, String>
-where
-    F: FnOnce() -> Result<Option<crate::updater::UpdateInfo>, String>,
-{
-    let Some(update) = lookup()? else {
-        return Err("No newer update found".into());
-    };
-    Ok(update.tag)
-}
-
 fn draw_status_bar_primary(state: &mut AppState, ui: &mut egui::Ui) {
     if let Some(err) = state.error_banner.clone() {
         ui.horizontal(|ui| {
@@ -2749,29 +2898,56 @@ fn draw_status_bar_primary(state: &mut AppState, ui: &mut egui::Ui) {
     }
 }
 
+/// The status-bar version text. A staged update is only announced when it is a
+/// minor or major release — patches install themselves and simply turn up the
+/// next time PHASE is opened.
+fn version_status_label(
+    current: &str,
+    notice: Option<&str>,
+    staged: Option<&StagedUpdate>,
+    installing: bool,
+) -> String {
+    if installing {
+        "Installing update...".to_string()
+    } else if let Some(notice) = notice {
+        notice.to_string()
+    } else if staged.is_some_and(|staged| staged.minor_or_major) {
+        "A new version is available, click to restart".to_string()
+    } else {
+        current.to_string()
+    }
+}
+
 fn draw_version_status(state: &mut AppState, ui: &mut egui::Ui) {
     state.clear_expired_version_notice(Instant::now());
-    let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let current = format!("v{}", crate::updater::current_version());
+    let label = version_status_label(
+        &current,
+        state.version_notice.as_ref().map(|n| n.message.as_str()),
+        state.staged_update.as_ref(),
+        state.update_install.is_some(),
+    );
     if state.update_install.is_some() {
-        ui.label(egui::RichText::new("Installing update...").color(colors::TEXT_DISABLED));
+        ui.label(egui::RichText::new(label).color(colors::TEXT_DISABLED));
         return;
     }
-    let label = if let Some(notice) = state.version_notice.as_ref() {
-        notice.message.clone()
-    } else if state.pending_update.is_some() {
-        format!("{current} - New version available")
-    } else {
-        current
+    let hover = match state.staged_update.as_ref() {
+        Some(staged) => format!("Restart to run PHASE v{}", staged.version),
+        None => "Check for updates".to_string(),
     };
     let response = ui
         .add(
             egui::Label::new(egui::RichText::new(label).color(colors::TEXT_DISABLED))
                 .sense(egui::Sense::click()),
         )
-        .on_hover_text("Check for updates")
+        .on_hover_text(hover)
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.clicked() {
-        state.start_update_check_force();
+        if state.staged_update.is_some() {
+            state.request_restart();
+        } else {
+            state.start_update_check_force();
+        }
     }
 }
 
@@ -2818,7 +2994,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     dialogs::token_prompt(state, ctx);
     dialogs::settings(state, ctx);
     dialogs::draw(state, ctx);
-    draw_update_prompt(state, ctx);
+    changelog::draw(state, ctx);
     draw_create_prod_folder_prompt(state, ctx);
     draw_delete_local_folder_prompt(state, ctx);
     draw_archive_prompt(state, ctx);
@@ -2854,6 +3030,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         || state.validation_job.is_some()
         || state.update_check.is_some()
         || state.update_install.is_some()
+        || state.changelog_rx.is_some()
         || !state.transfer_estimate_jobs.is_empty()
         || !state.thumbnail_jobs.is_empty()
         || state.thumbnail_cleanup_rx.is_some()
@@ -2868,61 +3045,16 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     if let Some(delay) = state.watcher_repaint_after() {
         ctx.request_repaint_after(delay);
     }
-    // ...and so the periodic Notion refresh fires even while unfocused.
-    ctx.request_repaint_after(
-        state
-            .next_notion_refresh_at
-            .saturating_duration_since(Instant::now()),
-    );
-}
+    // ...and so the periodic Notion refresh and update check fire even while
+    // unfocused, which is most of the time for a background update.
+    let now = Instant::now();
+    ctx.request_repaint_after(state.next_notion_refresh_at.saturating_duration_since(now));
+    ctx.request_repaint_after(state.next_update_check_at.saturating_duration_since(now));
 
-fn draw_update_prompt(state: &mut AppState, ctx: &egui::Context) {
-    if !state.update_dialog_open {
-        return;
-    }
-    let Some(update) = state.pending_update.clone() else {
-        state.update_dialog_open = false;
-        return;
-    };
-
-    let mut install = false;
-    let mut close = false;
-    let mut notes = update.notes.clone();
-    egui::Window::new(format!("PHASE {} available", update.tag))
-        .collapsible(false)
-        .resizable(true)
-        .default_width(layout::UPDATE_DIALOG_WIDTH)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .show(ctx, |ui| {
-            ui.label(format!("A new PHASE version is available: {}", update.tag));
-            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
-            ui.label("Release notes:");
-            egui::ScrollArea::vertical()
-                .max_height(layout::UPDATE_DIALOG_SCROLL_HEIGHT)
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut notes)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(12)
-                            .interactive(false),
-                    );
-                });
-            ui.add_space(layout::DIALOG_SECTION_SPACING_MEDIUM);
-            ui.horizontal(|ui| {
-                if ui.button("Update").clicked() {
-                    install = true;
-                }
-                if ui.button("Not now").clicked() {
-                    close = true;
-                }
-            });
-        });
-
-    if install {
-        state.update_dialog_open = false;
-        state.start_update_install();
-    } else if close {
-        state.update_dialog_open = false;
+    // Close the window so `on_exit` can save the layout and start the new
+    // PHASE, which picks up the executable the update wrote.
+    if state.restart_requested {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 }
 
