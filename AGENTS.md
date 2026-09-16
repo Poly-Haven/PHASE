@@ -86,16 +86,26 @@ trusts, one bad file never aborts a run, nothing is dropped without being counte
 - **Idempotency** — `.phase-ingest.json` in the card's ingest folder records the verified BLAKE3 per
   file. A re-run skips instantly when source *and* destination still match their recorded
   `(size, mtime)` within ±2s; a whole-hour shift (FAT/DST) re-hashes the source instead of re-copying.
-- **Where the time goes** — measured, not assumed. Per 48.7 MB Nikon NEF in a release build:
-  copy card→NAS 690 ms, read back 536 ms, BLAKE3 11 ms, RAW decode 382 ms. But the pipeline
-  runs at **exactly the card reader's speed**: that card reads a flat 32 MB/s no matter how
-  many streams you point at it (measured at 1/2/4/6), and the ingest achieves 32 MB/s. Stage
-  B has ~6× headroom and is entirely hidden behind the card, which is why debug and release
-  builds finish in the same time despite debug decoding 5× slower. Do not try to tune the
-  worker counts against a slow card — there is nothing there. On a fast card the next ceiling
-  is the NAS link at ~111 MB/s (gigabit, saturated by 2 streams), where the read-back verify
-  is what costs: 97.4 MB of traffic per 48.7 MB file. `benchmark_ingest_stages` and
-  `benchmark_dir_cache` in `ingest::job` measure all of this against real hardware.
+- **Where the time goes** — measured, not assumed, and the answer is the hardware. Per
+  48.7 MB Nikon NEF in a release build: copy card→NAS 690 ms, read back 536 ms, BLAKE3
+  11 ms, RAW decode 382 ms. None of those is the limit. The pipeline is bound by the
+  **gigabit NIC**, and because each file is written and then read back for verification it
+  costs 97.4 MB of traffic per 48.7 MB file — about 1.3 files/s, so ~27 minutes for a
+  2120-file card. Things that were measured and did **not** help: doubling either worker
+  pool (within noise), skipping the RAW decode entirely (1.29 vs 1.28 files/s — the decode
+  is completely hidden behind I/O), and deepening the hand-off queue. A slow card can bind
+  instead: on a USB 2 port the same card read a flat 32 MB/s and that became the ceiling, so
+  check the card before suspecting the code. `benchmark_ingest_stages`,
+  `benchmark_stage_a_concurrency` and `benchmark_dir_cache` in `ingest::job` measure all of
+  this against real hardware.
+  - Beware when benchmarking this by hand: reading a file back moments after writing it
+    looks like a 1.7x penalty, but only if the reader opens the file *while* it is still
+    being written. Reading a completed file is no slower whether it was written seconds or
+    hours ago. Likewise, re-reading the same files measures the Windows page cache, not the
+    network — always read a set you have not touched.
+  - The one lever that would actually move the number is halving the traffic by dropping
+    the read-back verification, which trades away the guarantee that what landed on the NAS
+    is what was read off the card. That is a deliberate product decision, not a tuning knob.
 - **Eject** — offered only when every file is green. Many multi-slot readers do not implement media
   eject and Windows' own "Safely Remove" fails on them too; that is reported as a note, not a fault,
   because the data is already verified.

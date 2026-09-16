@@ -29,21 +29,25 @@ use super::scan::{CardScan, IngestFile};
 use super::thumb;
 use crate::copy::engine;
 
-/// Copy workers. The card reads far faster than the NAS accepts writes, so this is sized
-/// for the network: enough streams to keep it busy, few enough to avoid thrashing one card.
+/// Copy workers.
+///
+/// Four is enough. Both stages share one gigabit link, and mixed read+write traffic tops
+/// out at roughly 120 MB/s aggregate on this hardware whatever the worker count — measured
+/// at 4 and 8 workers per stage, which differ by less than the run-to-run noise. Raising
+/// these only costs memory.
 const COPY_WORKERS: usize = 4;
 
-/// Verify/decode workers. Each holds a whole file in memory plus the decoder's own buffers
-/// — roughly 300 MB at peak for a 45 MP RAW — so this is a memory budget as much as a
+/// Verify workers. Each holds a whole file in memory plus the decoder's own buffers —
+/// roughly 300 MB at peak for a 45 MP RAW — so this is a memory budget as much as a
 /// parallelism one.
 const VERIFY_WORKERS: usize = 4;
 
 /// How far stage A may run ahead of stage B.
 ///
 /// Kept small on purpose. Both stages compete for the same network link, so letting the
-/// copy stage sprint ahead buys nothing and costs memory — and it makes the grid lie, since
-/// a deep queue shows up as a crowd of files that look like they are being worked on when
-/// they are only waiting.
+/// copy stage sprint ahead buys nothing — and it makes the grid lie, since a deep queue
+/// shows up as a crowd of files that look like they are being worked on when they are only
+/// waiting.
 const VERIFY_QUEUE_DEPTH: usize = COPY_WORKERS;
 
 const COPY_ATTEMPTS: usize = 3;
@@ -1112,6 +1116,75 @@ with {VERIFY_WORKERS} verify workers: {b_throughput:.2} files/s"
             per_call(uncached) * 2120.0 / 1000.0,
             per_call(cached) * 2120.0 / 1000.0,
         );
+    }
+
+    /// Isolate stage A: how fast can N workers actually push files card -> NAS?
+    ///
+    /// ```text
+    /// PHASE_BENCH_SRC=I:\DCIM\115NCZ_7 PHASE_BENCH_DEST=P:\_INGEST\_bench \
+    ///   cargo test --release -- --ignored --nocapture benchmark_stage_a_concurrency
+    /// ```
+    #[test]
+    #[ignore]
+    fn benchmark_stage_a_concurrency() {
+        let src_dir = std::env::var("PHASE_BENCH_SRC").expect("set PHASE_BENCH_SRC");
+        let dest_dir = PathBuf::from(std::env::var("PHASE_BENCH_DEST").expect("set PHASE_BENCH_DEST"));
+        std::fs::create_dir_all(&dest_dir).unwrap();
+
+        let mut all: Vec<PathBuf> = std::fs::read_dir(&src_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("nef")))
+            .collect();
+        all.sort();
+        // Deep into the card, so the OS cache cannot flatter the read side.
+        let all: Vec<PathBuf> = all.into_iter().skip(1500).collect();
+
+        println!();
+        for workers in [1usize, 2, 4, 6, 8] {
+            let files: Vec<PathBuf> = all.iter().skip(workers * 17).take(workers * 2).cloned().collect();
+            if files.len() < workers {
+                continue;
+            }
+            let bytes: u64 = files.iter().map(|f| std::fs::metadata(f).unwrap().len()).sum();
+
+            let next = Arc::new(AtomicUsize::new(0));
+            let files = Arc::new(files);
+            let started = Instant::now();
+            let mut handles = Vec::new();
+            for _ in 0..workers {
+                let next = next.clone();
+                let files = files.clone();
+                let dest_dir = dest_dir.clone();
+                handles.push(thread::spawn(move || {
+                    let bytes_done = AtomicU64::new(0);
+                    let cancel = AtomicBool::new(false);
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(src) = files.get(index) else { return };
+                        let dst = dest_dir.join(format!("bench_{index}.nef"));
+                        engine::copy_one_file_hashed(src, &dst, &bytes_done, &cancel).unwrap();
+                    }
+                }));
+            }
+            for h in handles {
+                h.join().unwrap();
+            }
+            let secs = started.elapsed().as_secs_f64();
+            let mb = bytes as f64 / 1_048_576.0;
+            println!(
+                "  stage A workers={workers}  {:>6.1} MB in {:>5.2}s = {:>6.1} MB/s  ({:>5.2} files/s)",
+                mb,
+                secs,
+                mb / secs,
+                files.len() as f64 / secs
+            );
+            for index in 0..files.len() {
+                let _ = std::fs::remove_file(dest_dir.join(format!("bench_{index}.nef")));
+            }
+        }
+        println!();
     }
 
     #[test]
