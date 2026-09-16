@@ -6,6 +6,7 @@ mod config;
 mod copy;
 mod notion;
 mod polyhaven;
+mod removable_media;
 mod slug;
 mod ui;
 mod updater;
