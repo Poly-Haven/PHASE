@@ -103,6 +103,15 @@ fn test_state() -> super::AppState {
         watch_dirty: true,
         watch_pending: HashMap::new(),
         pending_validation_keys: HashSet::new(),
+        screen: super::Screen::Main,
+        removable_cards: Vec::new(),
+        card_scan_rx: None,
+        next_card_scan_at: Instant::now(),
+        ingest_runs: Vec::new(),
+        ingest_scans: HashMap::new(),
+        ingest_pools: None,
+        manifest_writes: HashMap::new(),
+        next_card_id: 1,
     }
 }
 

@@ -1790,7 +1790,7 @@ fn status_options_for(state: &AppState, asset_type: super::AssetType) -> Vec<Sta
     }
 }
 
-fn fmt_bytes(b: u64) -> String {
+pub(crate) fn fmt_bytes(b: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
     const GB: f64 = MB * 1024.0;

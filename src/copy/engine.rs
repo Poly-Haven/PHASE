@@ -41,7 +41,7 @@ pub fn copy_one_file(
     bytes_done: &AtomicU64,
     cancel: &AtomicBool,
 ) -> Result<(), CopyError> {
-    copy_one_file_inner(src, dst, bytes_done, cancel, true)
+    copy_one_file_inner(src, dst, bytes_done, cancel, true, true).map(|_| ())
 }
 
 pub fn copy_one_file_deferred_verify(
@@ -50,7 +50,23 @@ pub fn copy_one_file_deferred_verify(
     bytes_done: &AtomicU64,
     cancel: &AtomicBool,
 ) -> Result<(), CopyError> {
-    copy_one_file_inner(src, dst, bytes_done, cancel, false)
+    copy_one_file_inner(src, dst, bytes_done, cancel, false, false).map(|_| ())
+}
+
+/// Copy, returning the BLAKE3 of the source as it streamed past, without reading the
+/// destination back.
+///
+/// Card ingest verifies in a separate stage that has to read the destination anyway (to
+/// decode the image), so having the copy also read it back — as `copy_one_file` does —
+/// would double the traffic over the NAS for nothing.
+pub fn copy_one_file_hashed(
+    src: &Path,
+    dst: &Path,
+    bytes_done: &AtomicU64,
+    cancel: &AtomicBool,
+) -> Result<blake3::Hash, CopyError> {
+    copy_one_file_inner(src, dst, bytes_done, cancel, false, true)?
+        .ok_or_else(|| CopyError::Other(anyhow::anyhow!("copy produced no hash")))
 }
 
 fn copy_one_file_inner(
@@ -59,7 +75,8 @@ fn copy_one_file_inner(
     bytes_done: &AtomicU64,
     cancel: &AtomicBool,
     verify_before_rename: bool,
-) -> Result<(), CopyError> {
+    hash_source: bool,
+) -> Result<Option<blake3::Hash>, CopyError> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create_dir_all {}", parent.display()))?;
@@ -68,7 +85,7 @@ fn copy_one_file_inner(
     let partial = partial_path(dst);
     let _ = fs::remove_file(&partial);
 
-    let mut hasher = verify_before_rename.then(blake3::Hasher::new);
+    let mut hasher = (verify_before_rename || hash_source).then(blake3::Hasher::new);
 
     {
         let mut src_f =
@@ -106,10 +123,10 @@ fn copy_one_file_inner(
             .with_context(|| format!("fsync {}", partial.display()))?;
     }
 
+    let src_hash = hasher.map(|hasher| hasher.finalize());
+
     if verify_before_rename {
-        let src_hash = hasher
-            .expect("copy hash must exist when immediate verification is enabled")
-            .finalize();
+        let src_hash = src_hash.expect("copy hash must exist when immediate verification is enabled");
         let dst_hash =
             hash_file(&partial).with_context(|| format!("validate-read {}", partial.display()))?;
 
@@ -128,7 +145,7 @@ fn copy_one_file_inner(
     set_file_mtime(dst, FileTime::from_last_modification_time(&src_md))
         .with_context(|| format!("set mtime {}", dst.display()))?;
 
-    Ok(())
+    Ok(src_hash)
 }
 
 pub fn verify_copied_file(src: &Path, dst: &Path) -> Result<(), VerifyError> {
@@ -164,7 +181,7 @@ fn partial_path(dst: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn hash_file(path: &Path) -> anyhow::Result<blake3::Hash> {
+pub fn hash_file(path: &Path) -> anyhow::Result<blake3::Hash> {
     let mut f = fs::File::open(path)?;
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; CHUNK];

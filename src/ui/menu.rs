@@ -1,4 +1,4 @@
-use super::{layout, AppState, AssetListState, AssetType};
+use super::{layout, AppState, AssetListState, AssetType, Screen};
 use crate::notion::StatusGroup;
 use std::sync::OnceLock;
 
@@ -22,6 +22,10 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
         .interact_size
         .y
         .max(layout::TOP_BAR_INTERACT_HEIGHT);
+    if state.screen == Screen::Ingest {
+        draw_ingest_bar(state, ui);
+        return;
+    }
     ui.horizontal(|ui| {
         ui.add_space(layout::TOP_BAR_EDGE_PADDING);
 
@@ -172,6 +176,158 @@ pub fn draw(state: &mut AppState, ui: &mut egui::Ui) {
                     for t in state.selected_types.clone() {
                         state.refresh(t);
                     }
+                }
+            }
+
+            // Only offered when there is actually a card in a reader. In a right-to-left
+            // layout this lands to the left of the two icons whose position people already
+            // know.
+            if !state.removable_cards.is_empty() {
+                ui.add_space(layout::TOP_BAR_ACTION_GAP);
+                if ingest_button(ui, state.removable_cards.len()).clicked() {
+                    state.screen = Screen::Ingest;
+                }
+            }
+        });
+    });
+}
+
+/// The bold green call to action that takes over the window.
+fn ingest_button(ui: &mut egui::Ui, cards: usize) -> egui::Response {
+    let label = if cards > 1 {
+        format!("INGEST {cards} CARDS")
+    } else {
+        "INGEST CARD".to_string()
+    };
+    let font = egui::FontId::proportional(layout::INGEST_BUTTON_TEXT_SIZE);
+    let text_width = ui.fonts(|fonts| {
+        fonts
+            .layout_no_wrap(label.clone(), font.clone(), egui::Color32::WHITE)
+            .rect
+            .width()
+    });
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(
+            text_width + layout::INGEST_BUTTON_PADDING_X * 2.0,
+            layout::STATUS_PILL_HEIGHT + 4.0,
+        ),
+        egui::Sense::click(),
+    );
+    if ui.is_rect_visible(rect) {
+        let tint = if response.hovered() {
+            super::colors::HOVER
+        } else {
+            super::colors::INGEST
+        };
+        ui.painter()
+            .rect_stroke(rect, rect.height() / 2.0, egui::Stroke::new(1.0, tint));
+        // `text` rather than a pre-laid galley, which would carry its own colour and ignore
+        // the hover tint.
+        ui.painter()
+            .text(rect.center(), egui::Align2::CENTER_CENTER, &label, font, tint);
+    }
+    response
+        .on_hover_text("Copy photos off the inserted memory card")
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// "‹ Back", with the chevron drawn at its own larger size — the glyph is drawn well
+/// below the cap height of the text beside it, so matching their font sizes makes it look
+/// like a stray tick rather than an arrow.
+fn back_button(ui: &mut egui::Ui) -> egui::Response {
+    let chevron_font = egui::FontId::proportional(layout::INGEST_BACK_CHEVRON_SIZE);
+    let text_font = egui::FontId::proportional(layout::INGEST_BUTTON_TEXT_SIZE);
+    let measure = |text: &str, font: &egui::FontId| {
+        ui.fonts(|fonts| {
+            fonts
+                .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+                .rect
+                .width()
+        })
+    };
+    let chevron_width = measure("‹", &chevron_font);
+    let text_width = measure("Back", &text_font);
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(
+            chevron_width + layout::INGEST_BACK_GAP + text_width,
+            ui.spacing().interact_size.y,
+        ),
+        egui::Sense::click(),
+    );
+    if ui.is_rect_visible(rect) {
+        let tint = if response.hovered() {
+            super::colors::HOVER
+        } else {
+            super::colors::TEXT_PRIMARY
+        };
+        ui.painter().text(
+            egui::pos2(rect.left(), rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            "‹",
+            chevron_font,
+            tint,
+        );
+        ui.painter().text(
+            egui::pos2(rect.right(), rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            "Back",
+            text_font,
+            tint,
+        );
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The ingest screen's own header: back on the left, rescan and settings on the right.
+fn draw_ingest_bar(state: &mut AppState, ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        ui.add_space(layout::TOP_BAR_EDGE_PADDING);
+        if back_button(ui).clicked() {
+            super::ingest::back(state);
+        }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let gear_tex = super::gear_texture(ui.ctx());
+            let gear_resp = ui.add(
+                egui::Image::new(egui::load::SizedTexture::new(
+                    gear_tex.id(),
+                    egui::vec2(layout::TOP_BAR_ICON_SIZE, layout::TOP_BAR_ICON_SIZE),
+                ))
+                .tint(super::colors::TEXT_PRIMARY)
+                .sense(egui::Sense::click()),
+            );
+            if gear_resp
+                .on_hover_text("Settings")
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                state.open_settings();
+            }
+            ui.add_space(layout::TOP_BAR_ACTION_GAP);
+
+            let scanning = state.card_scan_rx.is_some() || !state.ingest_scans.is_empty();
+            if scanning {
+                let (spinner_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(layout::TOP_BAR_ICON_SIZE, layout::TOP_BAR_ICON_SIZE),
+                    egui::Sense::hover(),
+                );
+                super::loading_indicator::draw_image_at(ui, spinner_rect, super::colors::TEXT_PRIMARY);
+            } else {
+                let refresh_tex = refresh_texture(ui.ctx());
+                let refresh_resp = ui.add(
+                    egui::Image::new(egui::load::SizedTexture::new(
+                        refresh_tex.id(),
+                        egui::vec2(layout::TOP_BAR_ICON_SIZE, layout::TOP_BAR_ICON_SIZE),
+                    ))
+                    .tint(super::colors::TEXT_PRIMARY)
+                    .sense(egui::Sense::click()),
+                );
+                if refresh_resp
+                    .on_hover_text("Rescan memory cards")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    state.rescan_cards();
                 }
             }
         });

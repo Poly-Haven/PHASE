@@ -1,0 +1,19 @@
+PHASE
+Copyright (C) 2026 Poly Haven
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See LICENSE for the full text.
+
+Third-party components
+----------------------
+
+rawler (https://github.com/dnglab/dnglab) — LGPL-2.1
+    Camera RAW decoding for memory-card ingest. Used as a library dependency,
+    statically linked. PHASE's own source is published at
+    https://github.com/Poly-Haven/PHASE, so a recipient can rebuild the whole
+    program against a modified rawler.
+
+All other dependencies are MIT and/or Apache-2.0; see Cargo.toml and the
+individual crates for details.

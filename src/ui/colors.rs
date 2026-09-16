@@ -24,6 +24,9 @@ pub const ERROR_BANNER: Color32 = Color32::from_rgb(220, 80, 80);
 
 // ── Action button colors ──────────────────────────────────────────────────────
 pub const PUSH: Color32 = Color32::from_rgb(180, 100, 255);
+/// Card ingest. A brighter green than STATUS_COMPLETE so the header button reads as an
+/// invitation rather than as a "this is finished" badge.
+pub const INGEST: egui::Color32 = egui::Color32::from_rgb(80, 220, 110);
 pub const PULL: Color32 = Color32::from_rgb(70, 130, 220);
 
 // ── Row message icons ─────────────────────────────────────────────────────────

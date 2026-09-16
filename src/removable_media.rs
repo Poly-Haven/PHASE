@@ -50,9 +50,16 @@ extern "system" {
         lpOverlapped: *mut c_void,
     ) -> i32;
     fn CloseHandle(hObject: *mut c_void) -> i32;
+    fn SetThreadErrorMode(dwNewMode: u32, lpOldMode: *mut u32) -> i32;
 }
 
 const DRIVE_REMOVABLE: u32 = 2;
+const SEM_FAILCRITICALERRORS: u32 = 0x0001;
+
+/// How many times to try locking the volume before reporting it as in use, and how long to
+/// wait between attempts — together, a little over a second of patience.
+const LOCK_ATTEMPTS: usize = 8;
+const LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const FILE_SHARE_READ: u32 = 1;
@@ -96,6 +103,16 @@ fn nearest_bucket_gb(size_gb: f64) -> u64 {
     let ceil_20 = (size_gb / 20.0).ceil() as u64 * 20;
     let ceil_pow2 = 2u64.pow(size_gb.log2().ceil() as u32);
     ceil_20.min(ceil_pow2)
+}
+
+/// Suppress the shell's "Please insert a disk into drive X:" dialog for this thread.
+///
+/// An empty card-reader slot still reports `DRIVE_REMOVABLE`, so any thread that polls
+/// removable drives on a timer will eventually query one with no media in it. Without this
+/// Windows helpfully puts a modal dialog in front of the user. Call once per polling
+/// thread; it is inherited by nothing and affects no other thread.
+pub fn suppress_no_media_dialogs() {
+    unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS, std::ptr::null_mut()) };
 }
 
 /// All currently-mounted removable drive letters (USB flash drives, SD/XQD/etc. card readers).
@@ -202,8 +219,7 @@ pub fn safe_eject(drive_letter: char) -> Result<()> {
     }
 
     let result = (|| {
-        ioctl(handle, FSCTL_LOCK_VOLUME)
-            .map_err(|e| anyhow!("volume is in use, close open files first ({e})"))?;
+        lock_volume(handle)?;
         ioctl(handle, FSCTL_DISMOUNT_VOLUME).map_err(|e| anyhow!("dismount failed: {e}"))?;
 
         let allow_removal: u8 = 0;
@@ -230,6 +246,32 @@ pub fn safe_eject(drive_letter: char) -> Result<()> {
 
     unsafe { CloseHandle(handle) };
     result
+}
+
+/// Take an exclusive lock on the volume, retrying briefly before giving up.
+///
+/// `FSCTL_LOCK_VOLUME` fails outright if *any* process still has a handle anywhere on the
+/// volume, and the handles that matter here are usually momentary: PHASE finishing its own
+/// summary write, a shell thumbnail worker, an indexer waking up because a directory just
+/// changed. Windows retries for the same reason; a single attempt turns an eject that would
+/// have worked a moment later into an error the user can do nothing about.
+fn lock_volume(handle: *mut c_void) -> Result<()> {
+    let mut last = None;
+    for attempt in 0..LOCK_ATTEMPTS {
+        match ioctl(handle, FSCTL_LOCK_VOLUME) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last = Some(err);
+                if attempt + 1 < LOCK_ATTEMPTS {
+                    std::thread::sleep(LOCK_RETRY_DELAY);
+                }
+            }
+        }
+    }
+    let detail = last
+        .map(|err| err.to_string())
+        .unwrap_or_else(|| "unknown error".to_string());
+    Err(anyhow!("volume is in use, close open files first ({detail})"))
 }
 
 fn ioctl(handle: *mut c_void, code: u32) -> std::result::Result<(), std::io::Error> {

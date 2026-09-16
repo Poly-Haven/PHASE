@@ -3,10 +3,16 @@
 PHASE is a **Windows desktop app** (Rust + `egui`/`eframe` 0.27) for the Poly Haven team to move
 **HDRI/Texture asset folders** between the Local working drive, the production NAS, and an archive
 drive, while keeping each asset's workflow status in sync with the Notion-backed admin backend.
+It also ingests photos off camera memory cards onto the NAS (see **Card ingest**).
+
+Licensed **GPL-3.0-or-later** (see `LICENSE`); `NOTICE` records the LGPL-2.1 `rawler` dependency.
 
 ## Build / run / test
 - `cargo build` → `target\debug\phase.exe`; `cargo build --release` → `target\release\phase.exe`.
-- `cargo test` (~140 tests, fast). `cargo clippy` has ~9 **pre-existing** warnings (auth/notion/mod) — don't treat as new.
+- `cargo test` (~270 tests, fast). `cargo clippy` has ~9 **pre-existing** warnings (auth/notion/mod) — don't treat as new.
+- `[profile.release]` deliberately does **not** set `panic = "abort"`: card ingest wraps every RAW
+  decode in `catch_unwind` because `rawler` panics on some malformed files, and detecting those
+  without taking PHASE down with them is the entire point of decoding them.
 - Toolchain: **Rust MSVC** (Windows-only; `build.rs` sets the icon via `winres`, `main.rs` uses the windows subsystem).
 - **Gotcha:** if the app is running it holds a lock on `target\debug\phase.exe`, so `cargo build` fails at link with `Access is denied (os error 5)`. Stop the process first (`Stop-Process -Name phase -Force`); compilation already succeeded if you see this.
 - Debug builds hit the backend at `http://localhost:3001/`; release builds hit `https://admin.polyhaven.com/` (`auth::phase_api_base_url`).
@@ -17,7 +23,11 @@ drive, while keeping each asset's workflow status in sync with the Notion-backed
 - `src/ui/` — all UI. `mod.rs` holds **`AppState`** (≈90-field god-object) + `pump`/`draw`. Other modules: `table` (asset grid + rows), `jobs` (transfer dispatch), `scripts` (context menu + admin HDRI scripts), `dialogs` (modals/settings), `thumbnails`, `file_watcher`, `validation` glue, `menu`, `layout`, `colors`, `textures` (SVG icon loaders).
 - `src/copy/` — transfer engine: `plan` (walk+classify), `job` (worker threads), `engine` (BLAKE3 stream copy + verify).
 - `src/validation/` — background asset checks (`root_entries`, `local_freshness`, `needs_review`).
-- `src/{auth,notion,polyhaven,config,cache,slug,updater}.rs` — Auth0 login, admin API, public-API published-slug cache, config, JSON cache, slug parse/validate, self-update.
+- `src/ingest/` — memory-card ingest: `scan` (walk + classify + pair), `exif` (Make/Model/orientation),
+  `thumb` (RAW decode → 64px JPEG), `job` (two-stage worker pools), `manifest`, `log` (card summary).
+  UI lives in `src/ui/ingest.rs`.
+- `src/{auth,notion,polyhaven,config,cache,slug,updater,removable_media}.rs` — Auth0 login, admin API,
+  public-API published-slug cache, config, JSON cache, slug parse/validate, self-update, card detection.
 
 ### Concurrency model (important)
 All slow work runs on **background threads** and reports back via **`mpsc` channels stored in `AppState`**.
@@ -41,6 +51,54 @@ One unified pipeline; differs only by roots, progress color/direction, and post-
 - **Unarchive** = Archive→Prod, non-destructive (archive copy kept).
 - Conflicts: dialog for Push/Pull; auto-overwrite (source authoritative) for Archive/Unarchive.
 - UI: full-row "wash" = copy progress (Push purple-LTR, Pull blue-RTL, Archive/Unarchive green LTR/RTL); small bottom bar = a separate verify step (today only Push).
+
+## Card ingest (`src/ingest/`, `src/ui/ingest.rs`)
+
+Copies every still image off an inserted card to `{ingest_root}\{card}\` (default `P:\_INGEST`,
+config `ingest_root`), **mirroring the card's own folder tree**. The card is usually formatted after
+a shoot, so the ingested copy is often the only copy — which is why every stage verifies rather than
+trusts, one bad file never aborts a run, nothing is dropped without being counted, and a
+`phase_log.txt` is left on the card saying whether it is **safe to format**.
+
+- **Detection** — `removable_media::{list_removable_drives, fingerprint}` polled on a background
+  thread every 2s focused / 15s not, guarded against stacking. Polling threads must call
+  `suppress_no_media_dialogs()`: an empty reader slot still reports `DRIVE_REMOVABLE`, and querying
+  it otherwise raises the shell's "please insert a disk" modal. Identity is `signature`; the folder
+  name is `friendly_name` (`120GB_671658`). Reformatting a card changes its identity by design.
+- **Scan** — deep walk, extension allowlist (`RAW_EXTENSIONS` / `STILL_EXTENSIONS`; `bmp` is
+  deliberately excluded because Magic Lantern installs a folder of them). **JPEGs are dropped when a
+  RAW of the same stem sits in the same directory** — per-directory on purpose, since two image
+  folders may hold different shots under the same name. Camera names come from *sampled* files: one
+  per (directory, name prefix, extension, run of consecutive numbers), not one per file.
+- **Two stages, shared pools** (`job.rs`) — stage A copies and hashes the source
+  (`copy::engine::copy_one_file_hashed`); stage B reads the destination back **once**, checks the
+  hash, and decodes the image from the same buffer. Pools are shared across cards so two cards take
+  turns over one link. A file marks purple only when a verify worker actually has it — the hand-off
+  queue is `COPY_WORKERS` deep so the grid cannot show more busy files than are really in flight.
+  Failures retry, then go red; the run continues. Opposite of `copy/job.rs`, which fails fast.
+- **Thumbnails** — `thumb.rs` decodes the **actual sensor data** via `rawler`, not the embedded
+  preview: corrupt raw payload leaves the preview perfectly readable, so a preview check would pass a
+  ruined photo. Only the decode runs at full size; the CFA is box-averaged straight down to 64px and
+  rawler's own white-balance/colour-matrix/sRGB maths then runs on a few thousand pixels. Rendered
+  **scene-linear with no exposure normalisation** — these are bracketed HDRI shoots, and a dark frame
+  should look dark. `exif::looks_like_raw` gates the decoder: handed 4 KB of zeroes, rawler sniffs
+  them into some format and allocates past 6 GB, which `catch_unwind` cannot save you from.
+- **Idempotency** — `.phase-ingest.json` in the card's ingest folder records the verified BLAKE3 per
+  file. A re-run skips instantly when source *and* destination still match their recorded
+  `(size, mtime)` within ±2s; a whole-hour shift (FAT/DST) re-hashes the source instead of re-copying.
+- **Where the time goes** — measured, not assumed. Per 48.7 MB Nikon NEF in a release build:
+  copy card→NAS 690 ms, read back 536 ms, BLAKE3 11 ms, RAW decode 382 ms. But the pipeline
+  runs at **exactly the card reader's speed**: that card reads a flat 32 MB/s no matter how
+  many streams you point at it (measured at 1/2/4/6), and the ingest achieves 32 MB/s. Stage
+  B has ~6× headroom and is entirely hidden behind the card, which is why debug and release
+  builds finish in the same time despite debug decoding 5× slower. Do not try to tune the
+  worker counts against a slow card — there is nothing there. On a fast card the next ceiling
+  is the NAS link at ~111 MB/s (gigabit, saturated by 2 streams), where the read-back verify
+  is what costs: 97.4 MB of traffic per 48.7 MB file. `benchmark_ingest_stages` and
+  `benchmark_dir_cache` in `ingest::job` measure all of this against real hardware.
+- **Eject** — offered only when every file is green. Many multi-slot readers do not implement media
+  eject and Windows' own "Safely Remove" fails on them too; that is reported as a note, not a fault,
+  because the data is already verified.
 
 ## Supporting subsystems
 - **Validation** runs on a worker pool over visible assets, debounced after watcher events; results keyed by `RowKey` in `validation_results`. Checks: `root_entries` (expected `raw/staging/work`), `local_freshness` (local newer than prod when needs-review), `needs_review` (required staging files present for review statuses).

@@ -6,13 +6,14 @@ mod dialogs;
 mod file_watcher;
 mod focus_refresh;
 mod group_selector;
+mod ingest;
 mod jobs;
 pub mod layout;
 mod loading_indicator;
 mod menu;
 mod scripts;
 mod status_groups;
-mod table;
+pub mod table;
 mod textures;
 mod thumbnails;
 
@@ -35,7 +36,9 @@ use crate::auth::{AuthTokens, BrowserLogin, LoggedInIdentity};
 use crate::config::Config;
 use crate::copy::job::{JobMsg, JobProgress, VerifyMsg};
 use crate::copy::plan::{build_plan_with_pull_filter, Action, Direction, Plan, PullFilterMode};
+use crate::ingest::job::{CardId, CardRun, Pools};
 use crate::notion::{Asset, AssetList, AssetStatus, StatusOption};
+use crate::removable_media::CardFingerprint;
 
 const VERSION_NOTICE_DURATION: Duration = Duration::from_secs(10);
 
@@ -50,6 +53,31 @@ const AUTO_UPDATE_ENABLED: bool = !cfg!(debug_assertions);
 /// How often the asset lists are re-fetched in the background, so the table is
 /// already up to date when the window is focused rather than refreshing then.
 const NOTION_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Card detection queries the machine's real removable drives, which unit tests have no
+/// business doing — several of them drive `pump()` in a loop, and polling a card reader
+/// there is both a side effect and a source of flakiness.
+const CARD_DETECTION_ENABLED: bool = !cfg!(test);
+
+/// How often PHASE looks for inserted memory cards while the window has focus. Cheap
+/// enough to be responsive: a bitmask syscall plus two volume queries per drive.
+const CARD_SCAN_INTERVAL_ACTIVE: Duration = Duration::from_secs(2);
+
+/// ...and while it does not. A card plugged in while PHASE sits in the background is
+/// still noticed, just not instantly.
+const CARD_SCAN_INTERVAL_IDLE: Duration = Duration::from_secs(15);
+
+/// Manifest entries buffered before flushing to the NAS. Small enough that a crash costs
+/// only a few files a re-verify, large enough not to rewrite the file constantly.
+const MANIFEST_FLUSH_EVERY: usize = 50;
+
+/// Which screen the window is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Screen {
+    #[default]
+    Main,
+    Ingest,
+}
 
 /// What the periodic Notion refresh should do this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -624,6 +652,24 @@ pub struct AppState {
     pub watch_pending: HashMap<RowKey, PendingWatch>,
     /// Keys awaiting (re-)validation while a validation job is already running.
     pub pending_validation_keys: HashSet<RowKey>,
+
+    /// Which screen is drawn in the central panel.
+    pub screen: Screen,
+    /// Removable cards currently plugged in, refreshed by a background poll.
+    pub removable_cards: Vec<CardFingerprint>,
+    /// In-flight card detection, so a slow reader cannot stack a thread every tick.
+    pub card_scan_rx: Option<Receiver<Vec<CardFingerprint>>>,
+    pub next_card_scan_at: Instant,
+    /// Per-card ingest state, in the order the cards are drawn.
+    pub ingest_runs: Vec<CardRun>,
+    /// Background scans of card contents, keyed by card signature.
+    pub ingest_scans: HashMap<String, ingest::ScanJob>,
+    /// The shared copy/verify worker pools, started on the first ingest.
+    pub ingest_pools: Option<Pools>,
+    /// Manifest writes in flight, keyed by card id, so two never overlap.
+    pub manifest_writes: HashMap<CardId, Receiver<()>>,
+    /// Next id handed to a card run.
+    pub next_card_id: CardId,
 }
 
 /// A debounced re-validation request accumulated from filesystem events.
@@ -862,6 +908,15 @@ impl AppState {
             watch_dirty: true,
             watch_pending: HashMap::new(),
             pending_validation_keys: HashSet::new(),
+            screen: Screen::Main,
+            removable_cards: Vec::new(),
+            card_scan_rx: None,
+            next_card_scan_at: Instant::now(),
+            ingest_runs: Vec::new(),
+            ingest_scans: HashMap::new(),
+            ingest_pools: None,
+            manifest_writes: HashMap::new(),
+            next_card_id: 1,
         };
         s.token_prompt_open = !s.config.has_access_token() && !s.config.can_refresh_access_token();
         s.token_input.clear();
@@ -2440,6 +2495,8 @@ impl AppState {
         self.pump_logged_in_identity();
         self.pump_periodic_notion_refresh();
         self.pump_file_watcher();
+        self.pump_card_detection();
+        self.pump_ingest();
     }
 
     pub fn local_root_for(&self, t: AssetType) -> PathBuf {
@@ -2967,7 +3024,13 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
 
     // Skip the focus-triggered refresh if login is in progress — a fresh refresh
     // will be started by AuthMsg::Success once authentication completes.
-    if gained_focus && !state.token_prompt_open && state.auth_rx.is_none() {
+    // Several of these walk prod over SMB on every alt-tab. During an ingest that is the
+    // exact bandwidth the copy needs, so they wait until the main screen is showing again.
+    if gained_focus
+        && state.screen == Screen::Main
+        && !state.token_prompt_open
+        && state.auth_rx.is_none()
+    {
         state.refresh_all_asset_types();
         state.rebuild_prod_folder_cache();
         state.rebuild_local_folder_cache();
@@ -2989,7 +3052,9 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             ))
             .show(ui, |ui| menu::draw(state, ui));
     });
-    state.start_validation_if_visible_scope_changed();
+    if state.screen == Screen::Main {
+        state.start_validation_if_visible_scope_changed();
+    }
     scripts::pump(state);
     dialogs::token_prompt(state, ctx);
     dialogs::settings(state, ctx);
@@ -3000,17 +3065,23 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     draw_archive_prompt(state, ctx);
     draw_verification_failure_prompt(state, ctx);
     draw_status_bar(state, ctx);
-    let table_resp = egui::CentralPanel::default().show(ctx, |ui| table::draw(state, ui));
-
-    // Track cursor movement inside the table panel for the 2s safety guard.
-    let table_rect = table_resp.response.rect;
-    ctx.input(|i| {
-        if let Some(pos) = i.pointer.latest_pos() {
-            if table_rect.contains(pos) && i.pointer.delta() != egui::Vec2::ZERO {
-                state.cursor_moved_in_table_at = Some(Instant::now());
-            }
-        }
+    let central = egui::CentralPanel::default().show(ctx, |ui| match state.screen {
+        Screen::Main => table::draw(state, ui),
+        Screen::Ingest => ingest::draw(state, ui),
     });
+
+    // Track cursor movement inside the table panel for the 2s safety guard. The ingest
+    // screen has no rows to guard, and must not be mistaken for the table.
+    if state.screen == Screen::Main {
+        let table_rect = central.response.rect;
+        ctx.input(|i| {
+            if let Some(pos) = i.pointer.latest_pos() {
+                if table_rect.contains(pos) && i.pointer.delta() != egui::Vec2::ZERO {
+                    state.cursor_moved_in_table_at = Some(Instant::now());
+                }
+            }
+        });
+    }
 
     // Keep repainting while a pending update is waiting to be flushed.
     if !state.pending_notion.is_empty()
@@ -3036,6 +3107,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         || state.thumbnail_cleanup_rx.is_some()
         || !state.script_jobs.is_empty()
         || !state.script_queue.is_empty()
+        || state.ingest_busy()
     {
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }
@@ -3050,6 +3122,8 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     let now = Instant::now();
     ctx.request_repaint_after(state.next_notion_refresh_at.saturating_duration_since(now));
     ctx.request_repaint_after(state.next_update_check_at.saturating_duration_since(now));
+    // ...and so a card inserted while PHASE is idle is still noticed.
+    ctx.request_repaint_after(state.card_scan_repaint_after());
 
     // Close the window so `on_exit` can save the layout and start the new
     // PHASE, which picks up the executable the update wrote.

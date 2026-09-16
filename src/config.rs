@@ -22,6 +22,10 @@ pub struct Config {
     /// unlike `prod_root`).
     #[serde(default = "default_archive_root")]
     pub archive_root: PathBuf,
+    /// Root for memory-card ingest. A card's files land at `ingest_root\{card}`, mirroring
+    /// the card's own folder tree. Note this sits beside `prod_root`, not inside it.
+    #[serde(default = "default_ingest_root")]
+    pub ingest_root: PathBuf,
     /// Path to the Affinity Photo executable, used by the "Open Asset with
     /// Affinity" context-menu action. User-editable in Settings.
     #[serde(default = "default_affinity_path")]
@@ -66,6 +70,9 @@ fn default_local_root() -> PathBuf {
 fn default_archive_root() -> PathBuf {
     PathBuf::from(r"A:\")
 }
+fn default_ingest_root() -> PathBuf {
+    PathBuf::from(r"P:\_INGEST")
+}
 fn default_affinity_path() -> PathBuf {
     // Per-user install location under %LOCALAPPDATA%\Microsoft\WindowsApps.
     dirs::data_local_dir()
@@ -88,6 +95,7 @@ impl Default for Config {
             prod_root: default_prod_root(),
             local_root: default_local_root(),
             archive_root: default_archive_root(),
+            ingest_root: default_ingest_root(),
             affinity_path: default_affinity_path(),
             last_tab: String::new(),
             last_asset_types: Vec::new(),
@@ -143,6 +151,23 @@ local_root = "C:\\PHASE"
         assert!(default_cfg.auth_access_token.is_empty());
         assert!(default_cfg.auth_refresh_token.is_empty());
         assert_eq!(default_cfg.auth_expires_at, None);
+    }
+
+    /// A new field without `#[serde(default)]` would make every existing config.toml fail
+    /// to parse, and `main`'s `unwrap_or_default()` would then silently boot with blank
+    /// auth tokens and reset roots — which `on_exit` would save back over the real file.
+    #[test]
+    fn a_config_written_before_ingest_existed_still_loads() {
+        let cfg: super::Config = toml::from_str(
+            r#"
+auth_access_token = "access"
+auth_refresh_token = "refresh"
+local_root = "C:\\PHASE"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.auth_access_token, "access");
+        assert_eq!(cfg.ingest_root, PathBuf::from(r"P:\_INGEST"));
     }
 
     #[test]
@@ -259,7 +284,7 @@ fn save_to_path(path: &Path, cfg: &Config) -> Result<()> {
     save_text_atomically(path, &text)
 }
 
-fn save_text_atomically(path: &Path, text: &str) -> Result<()> {
+pub(crate) fn save_text_atomically(path: &Path, text: &str) -> Result<()> {
     let temp = temp_path(path);
     let backup = backup_path(path);
     let _ = fs::remove_file(&temp);

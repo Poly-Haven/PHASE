@@ -80,3 +80,28 @@ pub const SELECTOR_SELECTED_OUTER_INSET_X: f32 = 0.5;
 pub const SELECTOR_SELECTED_OUTER_INSET_Y: f32 = 1.5;
 pub const SELECTOR_SELECTED_LABEL_NUDGE_X: f32 = 0.45;
 pub const SELECTOR_ROW_HEIGHT: f32 = 28.0;
+
+// Card ingest screen.
+pub const INGEST_REGION_PADDING: f32 = 8.0;
+pub const INGEST_HEADER_HEIGHT: f32 = 40.0;
+pub const INGEST_CARD_NAME_SIZE: f32 = 17.0;
+pub const INGEST_DETAIL_SIZE: f32 = 12.0;
+pub const INGEST_ACTION_SIZE: f32 = 13.0;
+/// Gap between file squares. The last column and row have no trailing gap.
+pub const INGEST_CELL_GAP: f32 = 2.0;
+pub const INGEST_CELL_ROUNDING: f32 = 1.0;
+/// A square this small is still a visible mark; below it the grid stops being readable.
+pub const INGEST_MIN_CELL: f32 = 2.0;
+/// Upper bound so a card holding three files does not draw three enormous blocks, but
+/// loose enough that a card of a hundred still fills its region rather than huddling in the
+/// top-left corner.
+pub const INGEST_MAX_CELL: f32 = 48.0;
+/// Period of the busy-square pulse.
+pub const INGEST_PULSE_SECONDS: f32 = 0.8;
+/// How far towards white a busy square goes at the top of its pulse.
+pub const INGEST_PULSE_LIGHTEN: f32 = 0.3;
+pub const INGEST_BUTTON_TEXT_SIZE: f32 = 12.0;
+pub const INGEST_BUTTON_PADDING_X: f32 = 10.0;
+/// The back chevron is drawn larger than its label; the glyph sits well below cap height.
+pub const INGEST_BACK_CHEVRON_SIZE: f32 = 20.0;
+pub const INGEST_BACK_GAP: f32 = 5.0;

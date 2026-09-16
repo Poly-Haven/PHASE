@@ -4,6 +4,7 @@ mod auth;
 mod cache;
 mod config;
 mod copy;
+mod ingest;
 mod notion;
 mod polyhaven;
 mod removable_media;

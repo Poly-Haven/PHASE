@@ -27,7 +27,7 @@ pub enum Direction {
     Push,
 }
 
-const PULL_EXCLUDED_EXT: &[&str] = &[
+pub(crate) const PULL_EXCLUDED_EXT: &[&str] = &[
     "tif", "tiff", "nef", "cr2", "cr3", "arw", "rw2", "orf", "raf", "dng", "pp3",
 ];
 const PULL_EXCLUDED_NAMES: &[&str] = &["thumbs.db", "desktop.ini", ".ds_store", "ehthumbs.db"];
